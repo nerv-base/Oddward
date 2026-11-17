@@ -32,6 +32,10 @@ var (
 	ErrNeedsRelink       = errors.New("tajiduo: relink required")
 	ErrIdentityMismatch  = errors.New("tajiduo: identity mismatch")
 	ErrInvalidInput      = errors.New("tajiduo: invalid input")
+	// ErrAlreadySigned is a business answer, not a transport failure: the
+	// server says this account or role already signed today. Callers must not
+	// treat it as a fresh reward and must not retry the write.
+	ErrAlreadySigned = errors.New("tajiduo: already signed today")
 )
 
 // Grant contains only the fields suitable for an encrypted account attachment.

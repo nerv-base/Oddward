@@ -116,6 +116,19 @@ const (
 	WishExported
 	WishOperationFailed
 	WishImportNeedsConfirmation
+	// Check-in: account reads, two independent writes, the automatic
+	// switches and the game status panel.
+	CheckInStateRequested
+	CheckInStateLoaded
+	CheckInStateFailed
+	CheckInBegin
+	CheckInSigned
+	CheckInAutoToggle
+	CheckInAutoSaved
+	CheckInAutoTick
+	CheckInStatusRequested
+	CheckInStatusLoaded
+	CheckInStatusFailed
 )
 
 type Event struct {
@@ -151,6 +164,8 @@ type Event struct {
 	WishNewCount, WishOutside, WishConflicts int
 	WishFailure                              WishFailureKind
 	WishFormat                               WishFormat
+	// Check carries the check-in facts a shell response reports.
+	Check CheckInPayload
 }
 
 type EffectKind uint8
@@ -172,6 +187,12 @@ const (
 	WishImport
 	WishPickExport
 	WishExport
+	// Check-in effects read the account's state, run one write, refresh the
+	// status panel and persist one automatic switch.
+	TajiduoCheckInState
+	TajiduoCheckInSign
+	TajiduoCheckInStatus
+	TajiduoCheckInAuto
 )
 
 type Effect struct {
@@ -182,6 +203,9 @@ type Effect struct {
 	RoleID     string
 	WishFormat WishFormat
 	Confirmed  bool
+	// CheckInKind and Enabled address one daily task or one switch.
+	CheckInKind CheckInKind
+	Enabled     bool
 }
 
 // NewsStatus is the state of the official announcement feed. There is no
@@ -229,7 +253,7 @@ type Model struct {
 	Managed             ManagedState
 	Page                Page
 	Wish                WishState
-	CheckIn             FeatureState
+	CheckIn             CheckInState
 	DemoPaused          bool
 	NewsTab             uint8
 	NewsIndex           uint8
@@ -295,8 +319,8 @@ func Reduce(m Model, e Event) (Model, []Effect) {
 	if next, effects, handled := ReduceWish(m, e); handled {
 		return next, effects
 	}
-	if next, handled := ReduceFeature(m, e); handled {
-		return next, nil
+	if next, effects, handled := ReduceCheckIn(m, e); handled {
+		return next, effects
 	}
 	start := func(flow Flow, reset bool) (Model, []Effect) {
 		m.Token++

@@ -54,6 +54,14 @@ func (s *Shell) accentButton(c *ui.Context, key, label string) ui.Element {
 	return b
 }
 func (s *Shell) preferenceSwitch(c *ui.Context, key string, caption ui.Element, on, disabled bool, event state.EventKind) {
+	s.preferenceSwitchFor(c, key, caption, on, disabled, func(on bool) state.Event {
+		return state.Event{Kind: event, Enabled: on}
+	})
+}
+
+// preferenceSwitchFor is preferenceSwitch with the event built by the caller,
+// so one page can carry an extra dimension (which daily task).
+func (s *Shell) preferenceSwitchFor(c *ui.Context, key string, caption ui.Element, on, disabled bool, event func(on bool) state.Event) ui.Element {
 	// Bind only a local value. The callback emits an event, never edits Model.
 	b := ui.SwitchBase(c.Key(key), &on).LabelledBy(caption).Size(48, 28).Radius(14).Disabled(disabled)
 	x, fill, knob := float32(3), ui.RGBA(255, 255, 255, .10), muted
@@ -80,5 +88,6 @@ func (s *Shell) preferenceSwitch(c *ui.Context, key string, caption ui.Element, 
 	}
 	b.Border(1, hairline).Children(func() {
 		ui.Box(c).Absolute().Left(x).Top(3).Size(22, 22).Radius(11).Background(knob)
-	}).OnChange(func() { s.Dispatch(state.Event{Kind: event, Enabled: on}) })
+	}).OnChange(func() { s.Dispatch(event(on)) })
+	return b
 }

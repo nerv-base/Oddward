@@ -54,7 +54,7 @@ func TestNavigationGuardsAndScenarioReturn(t *testing.T) {
 	}
 }
 
-func TestNativeFeatureNavigationIsAnHonestMock(t *testing.T) {
+func TestNativeFeatureNavigationKeepsPagesHonest(t *testing.T) {
 	for _, size := range [][2]int{{1024, 631}, {1280, 720}, {1600, 900}} {
 		s := NewShell(settled(state.Ready))
 		t.Cleanup(s.Dispose)
@@ -66,6 +66,13 @@ func TestNativeFeatureNavigationIsAnHonestMock(t *testing.T) {
 			if clickFailed(tt, item.label) || s.Model.Page != item.page {
 				t.Fatalf("missing functional navigation %s", item.label)
 			}
+			if item.page == state.CheckIn {
+				loadCheckInPage(t, s, linkedCheckInPayload("preview-account"))
+				tt.Frame()
+				if !tt.HasText("游戏签到") || !tt.HasText("社区签到") {
+					t.Fatal("check-in page must show both tasks")
+				}
+			}
 			for _, node := range tt.AccessAll() {
 				if node.Role == ui.RoleText {
 					for _, r := range node.Name {
@@ -75,8 +82,8 @@ func TestNativeFeatureNavigationIsAnHonestMock(t *testing.T) {
 					}
 				}
 			}
-			if got := tt.HasText("MOCK · 仅内存演示"); got != (item.page == state.CheckIn) {
-				t.Fatal("only check-in must identify its mock data")
+			if tt.HasText("MOCK · 仅内存演示") {
+				t.Fatal("no page may present local demo data as a mock")
 			}
 			if _, ok := tt.AccessByRole(ui.RoleButton, "启动游戏"); ok {
 				t.Fatal("hidden game CTA must not remain accessible")

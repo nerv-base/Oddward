@@ -4,6 +4,7 @@ package system
 import (
 	"context"
 	"errors"
+	"github.com/nerv-base/Oddward/internal/checkin"
 	"github.com/nerv-base/Oddward/internal/cnlogin/accounts"
 	"github.com/nerv-base/Oddward/internal/gacha"
 	"github.com/nerv-base/Oddward/internal/launcher"
@@ -19,6 +20,7 @@ type TajiduoBackend struct {
 	accounts *accounts.Store
 	client   *tajiduo.Client
 	archives *WishArchives
+	checkin  *checkin.Store
 	sessions map[string]*tajiduoLink
 	devices  map[string]string
 }
@@ -30,8 +32,8 @@ type tajiduoLink struct {
 
 var _ launcher.WishLinkBackend = (*TajiduoBackend)(nil)
 
-func NewTajiduoBackend(store *accounts.Store, client *tajiduo.Client, archives *WishArchives) *TajiduoBackend {
-	return &TajiduoBackend{accounts: store, client: client, archives: archives, sessions: map[string]*tajiduoLink{}, devices: map[string]string{}}
+func NewTajiduoBackend(store *accounts.Store, client *tajiduo.Client, archives *WishArchives, records *checkin.Store) *TajiduoBackend {
+	return &TajiduoBackend{accounts: store, client: client, archives: archives, checkin: records, sessions: map[string]*tajiduoLink{}, devices: map[string]string{}}
 }
 func tajiduoFailure(err error) error {
 	if err == nil {

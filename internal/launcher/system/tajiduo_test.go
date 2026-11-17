@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/nerv-base/Oddward/internal/checkin"
 	"github.com/nerv-base/Oddward/internal/cnlogin/accounts"
 	"github.com/nerv-base/Oddward/internal/launcher"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
@@ -84,7 +86,11 @@ func testTajiduoBackendInDir(t *testing.T, dir, uid string, namesFail ...bool) (
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewTajiduoBackend(store, client, archives), store, account.ID, binds
+	records, err := checkin.Open(filepath.Join(dir, "checkin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewTajiduoBackend(store, client, archives, records), store, account.ID, binds
 }
 func TestTajiduoCancelDoesNotSaveAndRoleReadDoesNotBind(t *testing.T) {
 	b, s, id, binds := testTajiduoBackend(t, "42")

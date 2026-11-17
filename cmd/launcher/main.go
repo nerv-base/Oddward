@@ -19,6 +19,7 @@ import (
 
 	"github.com/nerv-base/Oddward/internal/branding"
 	"github.com/nerv-base/Oddward/internal/buildinfo"
+	"github.com/nerv-base/Oddward/internal/checkin"
 	"github.com/nerv-base/Oddward/internal/cnlogin/accounts"
 	"github.com/nerv-base/Oddward/internal/launcher"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
@@ -78,13 +79,19 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	checkInRecords, err := checkin.Open(filepath.Join(filepath.Dir(cachePath), "checkin"))
+	if err != nil {
+		log.Fatal(err)
+	}
 	tajiduoClient, err := tajiduo.NewClient(tajiduo.Config{HTTPClient: &http.Client{Transport: network}})
 	if err != nil {
 		log.Fatal("cannot initialize Tajiduo client")
 	}
 	mygo.App.WhenReady(func() {
 		s := newApplicationShell(*demo)
-		s.WishLinkBackend = system.NewTajiduoBackend(accountStore, tajiduoClient, wishArchives)
+		tajiduoBackend := system.NewTajiduoBackend(accountStore, tajiduoClient, wishArchives, checkInRecords)
+		s.WishLinkBackend = tajiduoBackend
+		s.CheckInBackend = tajiduoBackend
 		s.WishBackend, s.WishLocation = wishArchives, time.Local
 		s.ManagedBackend = system.NativeManagedBackend{
 			LoginUI:         resolveLoginUI(executable, *loginUI),

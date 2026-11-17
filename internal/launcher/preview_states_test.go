@@ -32,6 +32,31 @@ func previewUpdate(phase state.UpdatePhase, downloaded int64) state.UpdateState 
 // launch flow, the announcement board states, overlays and the in-memory demo
 // pages). Skipped unless ODDWARD_STATES_OUT names an output directory under
 // ignored artifacts/. Frames are review material only.
+// previewCheckIn is a fully populated, linked check-in state with the numbers
+// the status panel draws. Day is left empty so the first tick adopts the
+// tester's day instead of rolling these fixtures away.
+func previewCheckIn() state.CheckInState {
+	stamp := time.Date(2026, 11, 17, 15, 27, 0, 0, time.Local)
+	c := state.CheckInState{
+		AccountID: "preview-account", RoleID: "100012345",
+		Linked: true, Loaded: true, StatusPhase: state.CheckStatusReady,
+		Role: state.CheckInRole{
+			RoleID: "100012345", Name: "合成测试角色", Server: "天空之城",
+			Level: 61, WorldLevel: 12,
+			Stamina: 187, StaminaMax: 240,
+			CityStamina: 92, CityStaminaMax: 120,
+			DayValue: 100, WeekRemain: 2,
+			LoginDays: 128, CharCount: 24,
+			Achievement: 512, AchievementTotal: 900,
+			FetchedAt: stamp,
+		},
+	}
+	for k := 0; k < state.CheckInKinds; k++ {
+		c.Known[k], c.Phase[k] = true, state.CheckInReady
+	}
+	return c
+}
+
 func TestRenderMockStateFrames(t *testing.T) {
 	out := os.Getenv("ODDWARD_STATES_OUT")
 	if out == "" {
@@ -174,9 +199,56 @@ func TestRenderMockStateFrames(t *testing.T) {
 			s.Model.Wish.Link = state.WishLinkState{AccountID: "preview-account", Phase: state.WishLinking, Step: state.WishLinkRole, Agreed: true}
 			s.wishLink.roles = []WishLinkRole{{ID: "123456", Name: "合成测试角色", Bound: true}, {ID: "654321", Name: "另一个合成角色"}}
 		}},
-		{"24-checkin-ready", func(s *Shell, _ *ui.Tester) {
+		{"24-checkin-unlinked", func(s *Shell, _ *ui.Tester) {
 			s.Dispatch(state.Event{Kind: state.Navigate, Page: state.CheckIn})
-			s.Model.CheckIn = state.FeatureReady
+			c := previewCheckIn()
+			c.Linked, c.RoleID, c.StatusPhase = false, "", state.CheckStatusIdle
+			for k := 0; k < state.CheckInKinds; k++ {
+				c.Known[k], c.Phase[k] = false, state.CheckInUnlinked
+			}
+			s.Model.CheckIn = c
+		}},
+		{"24b-checkin-ready", func(s *Shell, _ *ui.Tester) {
+			s.Dispatch(state.Event{Kind: state.Navigate, Page: state.CheckIn})
+			c := previewCheckIn()
+			c.Auto[0] = true
+			s.Model.CheckIn = c
+		}},
+		{"24c-checkin-done", func(s *Shell, _ *ui.Tester) {
+			s.Dispatch(state.Event{Kind: state.Navigate, Page: state.CheckIn})
+			c := previewCheckIn()
+			c.Auto[0], c.Auto[1] = true, true
+			for k := 0; k < state.CheckInKinds; k++ {
+				c.Signed[k], c.Phase[k] = true, state.CheckInDone
+				c.At[k] = time.Date(2026, 11, 17, 15, 28, 0, 0, time.Local)
+			}
+			c.Result[0], c.Detail[0] = state.CheckResultSuccess, "本性像素 ×60"
+			c.Result[1], c.Detail[1] = state.CheckResultAlready, "服务器显示今日已签到"
+			s.Model.CheckIn = c
+		}},
+		{"24d-checkin-partial", func(s *Shell, _ *ui.Tester) {
+			s.Dispatch(state.Event{Kind: state.Navigate, Page: state.CheckIn})
+			c := previewCheckIn()
+			c.Auto[0] = true
+			c.Signed[0], c.Phase[0] = true, state.CheckInDone
+			c.Result[0], c.Detail[0] = state.CheckResultSuccess, "本性像素 ×60"
+			c.At[0] = time.Date(2026, 11, 17, 15, 28, 0, 0, time.Local)
+			c.Phase[1], c.Result[1], c.Failure[1] = state.CheckInFailed, state.CheckResultFailed, state.CheckInFailureOffline
+			c.Detail[1] = "网络连接失败，请稍后再试"
+			s.Model.CheckIn = c
+		}},
+		{"24e-checkin-unknown", func(s *Shell, _ *ui.Tester) {
+			s.Dispatch(state.Event{Kind: state.Navigate, Page: state.CheckIn})
+			c := previewCheckIn()
+			c.Phase[1], c.Result[1] = state.CheckInUnknown, state.CheckResultUnverified
+			c.Detail[1] = "服务器称已签到，但状态未确认"
+			s.Model.CheckIn = c
+		}},
+		{"24f-checkin-status-failed", func(s *Shell, _ *ui.Tester) {
+			s.Dispatch(state.Event{Kind: state.Navigate, Page: state.CheckIn})
+			c := previewCheckIn()
+			c.StatusPhase, c.StatusFailure, c.Role = state.CheckStatusFailed, state.CheckInFailureOffline, state.CheckInRole{}
+			s.Model.CheckIn = c
 		}},
 		{"26-update-pill", func(s *Shell, _ *ui.Tester) {
 			loaded(s)

@@ -98,6 +98,13 @@ type Shell struct {
 	workOut           chan state.Event
 	updateProgress    chan state.Event
 	updateAutoChecked bool
+	// CheckInBackend signs and reads the saved Tajiduo link. A nil backend
+	// leaves the page in its unlinked state and touches no network.
+	CheckInBackend CheckInBackend
+	checkinOut     chan state.Event
+	checkinStarted bool
+	checkinVisit   bool
+	checkinWakeAt  time.Time
 	// Shown runs once, off the UI thread, after the first frame is built; the
 	// installed build marks its version healthy there.
 	Shown     func()
@@ -127,6 +134,7 @@ func NewShell(m state.Model) *Shell {
 		managedOut: make(chan managedResult, 8), managedProgress: make(chan state.Event, 1),
 		managedSave: make(chan ManagedPreferences, 1),
 		workOut:     make(chan state.Event, 8), updateProgress: make(chan state.Event, 1),
+		checkinOut: make(chan state.Event, 8),
 	}
 	s.NetworkForm = networkForm(m.Network)
 	if state.Active(m.Flow) {
@@ -144,7 +152,7 @@ func (s *Shell) Dispatch(e state.Event) {
 
 func (s *Shell) apply(fx []state.Effect) {
 	for _, f := range fx {
-		if s.applyWishLinkEffect(f) || s.applyWishEffect(f) || s.applyManagedEffect(f) || s.applyUpdateEffect(f) || s.applyLoginEffect(f) {
+		if s.applyWishLinkEffect(f) || s.applyWishEffect(f) || s.applyCheckInEffect(f) || s.applyManagedEffect(f) || s.applyUpdateEffect(f) || s.applyLoginEffect(f) {
 			continue
 		}
 		switch f.Kind {
@@ -331,6 +339,7 @@ func (s *Shell) tick(c *ui.Context) {
 	s.syncBannerMedia()
 	s.syncManaged()
 	s.syncUpdate()
+	s.syncCheckIn(c)
 }
 
 func (s *Shell) View(c *ui.Context) {
@@ -356,7 +365,7 @@ func (s *Shell) View(c *ui.Context) {
 			if s.Model.Page == state.WishAnalysis {
 				s.wishPage(c, s.wishProjection())
 			} else {
-				s.featurePage(c)
+				s.checkInPage(c, s.checkInProjection())
 			}
 			s.footer(c)
 		}

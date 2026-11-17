@@ -42,28 +42,39 @@ func TestOverlayFloatsAsARoundedGlassSheet(t *testing.T) {
 	}
 }
 
-func TestFeaturePageLeadsWithATonePill(t *testing.T) {
+func TestCheckInPageLeadsWithALinkedTonePill(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	defer s.Dispose()
 	tt := ui.NewTester(s.View, 1280, 720)
 	if clickFailed(tt, "自动签到") {
-		t.Fatal("feature page unreachable")
+		t.Fatal("check-in page unreachable")
 	}
+	// A saved account with no Tajiduo link has exactly one tone action: relink.
+	loadCheckInPage(t, s, state.CheckInPayload{AccountID: "preview-account"})
 	tt.Frame()
-	b, ok := tt.Find("模拟签到")
+	b, ok := tt.Find("去关联塔吉多")
 	if !ok {
-		t.Fatal("feature action missing")
+		t.Fatal("relink action missing")
 	}
 	img := tt.Image()
 	want := color.RGBA{defaultAccent.R, defaultAccent.G, defaultAccent.B, 255}
 	if got := img.RGBAAt(int(b.X+14), int(b.Y+b.H/2)); !sameColor(got, want, 12) {
-		t.Fatalf("the page's main mock action must wear the tone: %+v", got)
+		t.Fatalf("the page's main action must wear the tone: %+v", got)
 	}
 	if got := img.RGBAAt(int(b.X+1), int(b.Y+1)); sameColor(got, want, 12) {
 		t.Fatalf("the main action must be a pill: %+v", got)
 	}
-	back, _ := tt.Find("返回游戏")
-	if got := img.RGBAAt(int(back.X+14), int(back.Y+back.H/2)); sameColor(got, want, 40) {
+	quiet, ok := tt.Find("刷新")
+	if !ok {
+		t.Fatal("refresh action missing")
+	}
+	if got := img.RGBAAt(int(quiet.X+14), int(quiet.Y+quiet.H/2)); sameColor(got, want, 40) {
 		t.Fatal("secondary actions must stay quiet glass")
+	}
+	if tt.HasText("今日已签到") {
+		t.Fatal("an unlinked account cannot have a finished task")
+	}
+	if tt.HasText("本性像素") {
+		t.Fatal("an unread status panel must not invent game numbers")
 	}
 }
