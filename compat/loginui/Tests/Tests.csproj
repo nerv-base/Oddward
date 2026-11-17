@@ -7,6 +7,8 @@
     <AssemblyName>Oddward.LoginUi.Tests</AssemblyName><EnableDefaultCompileItems>false</EnableDefaultCompileItems><TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
+    <Resource Include="../../../internal/branding/icon.ico" Link="Branding/icon.ico" />
+    <Resource Include="../../../internal/branding/symbol.png" Link="Branding/symbol.png" />
     <Compile Include="Program.cs" /><Compile Include="OverlayTests.cs" /><Compile Include="MotionTests.cs" /><Compile Include="ChildTests.cs" /><Compile Include="../Protocol.cs" /><Compile Include="../LoginWindow.cs" /><Compile Include="../GameOverlay.cs" /><Compile Include="../LoginViewController.cs" />
     <Compile Include="../Presentation/LoginSurface.cs" Link="LoginSurface.cs" /><Compile Include="../Presentation/LoginVisuals.cs" Link="LoginVisuals.cs" />
   </ItemGroup>

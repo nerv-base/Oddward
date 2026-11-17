@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="internal/branding/icon.svg" alt="Oddward 异象眼图标" width="112" height="112">
+
 # Oddward
 
 **Windows 上的《异环》非官方启动器**
@@ -94,7 +96,7 @@ Go 可安装在 PATH，或放在 `.tools/go1.27.3/go/bin/go.exe`。构建脚本�
 
 感谢以下项目提供的实现与文档参考：
 
-- [Starward](https://github.com/Scighost/Starward)：启动器项目介绍与使用文档的组织方式。
+- [Starward](https://github.com/Scighost/Starward)：启动器项目灵感来源。
 - [Oddity](https://git.miprota.cc/Oddity/Oddity)：《异环》启动器的实现参考。
 - [Hi3Helper.Plugin.NTE](https://github.com/maxinglo/Hi3Helper.Plugin.NTE)：《异环》登录兼容实现参考。
 - [MyGo](https://github.com/egoist/mygo)：原生 UI 框架。

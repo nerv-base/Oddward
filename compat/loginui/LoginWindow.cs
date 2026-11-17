@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Input;
 using System.Windows.Interop;
 using Nte.LoginHost.Presentation;
@@ -48,6 +49,7 @@ internal sealed class LoginWindow : Window
  {
   this.emit=emit;
   Title="Oddward 国服登录";Width=420;Height=520;ResizeMode=ResizeMode.NoResize;
+  Icon=BitmapFrame.Create(new Uri("pack://application:,,,/Branding/icon.ico",UriKind.Absolute));
   WindowStyle=WindowStyle.None;AllowsTransparency=true;Background=Brushes.Transparent;
   WindowStartupLocation=WindowStartupLocation.CenterScreen;
   Resources=LoginVisuals.Create();

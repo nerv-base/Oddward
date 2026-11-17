@@ -7,6 +7,7 @@ import (
 
 	"github.com/egoist/mygo/ui"
 
+	"github.com/nerv-base/Oddward/internal/branding"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
 )
 
@@ -85,15 +86,15 @@ func (s *Shell) navigation(c *ui.Context) {
 	})
 }
 
-// railMark is Oddward's own sign, not the game's: a rounded aperture around
-// a tone dot, under a short rule that closes the brand cell.
+var brandSymbol = ui.MustParseSVG(branding.SymbolSVG)
+
+// railMark shares the application identity with the native icon and login UI.
 func (s *Shell) railMark(c *ui.Context) {
-	tone := s.tone()
-	ui.Box(c.Key("rail-mark")).Absolute().Left(0).Top(22).Width(railWidth).Height(48).PassThrough().DragWindow().Draw(func(p *ui.Painter, r ui.Rect) {
+	ui.Box(c.Key("rail-mark")).Absolute().Left(0).Top(22).Width(railWidth).Height(48).PassThrough().DragWindow().Children(func() {
+		ui.Icon(c, brandSymbol).Absolute().Left((railWidth-brandMarkSize)/2).Top(0).
+			Size(brandMarkSize, brandMarkSize).TextColor(paper).Label("Oddward 标志").PassThrough()
+	}).Draw(func(p *ui.Painter, r ui.Rect) {
 		cx := r.X + r.W/2
-		box := ui.Rect{X: cx - 13, Y: r.Y + 2, W: 26, H: 26}
-		p.Stroke(box, paper, 9, 1.6)
-		p.Fill(ui.Rect{X: cx - 4, Y: box.Y + 9, W: 8, H: 8}, tone, 4)
 		p.Line(cx-10, r.Y+44, cx+10, r.Y+44, 1, ui.RGBA(255, 255, 255, .14))
 	})
 }

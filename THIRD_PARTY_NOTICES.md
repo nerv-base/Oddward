@@ -78,6 +78,15 @@ mean that every listed component is used by Oddward. The helper's own
 `loginui/LICENSES.md` preserves original-code attribution and historical
 upstream attribution separately.
 
+## Icon resource build tool
+
+[`github.com/akavel/rsrc` `v0.10.2`](https://github.com/akavel/rsrc/tree/v0.10.2)
+is used only by `scripts/update-icons.ps1` to encode Oddward's original icon
+as Windows COFF resources. It is licensed under
+[MIT, Copyright 2013–2017 The rsrc Authors](https://github.com/akavel/rsrc/blob/v0.10.2/LICENSE.txt).
+The generator's executable and implementation are not included in the application;
+ordinary builds link the checked-in icon data without running the generator.
+
 ## Provenance and updates
 
 `SOURCES.json` records each included upstream text's component, exact version,

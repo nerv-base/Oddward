@@ -47,6 +47,18 @@ pwsh -File compat/loginui/Test.ps1
 
 不带 `loginui_embed` 标签的 Go 开发构建会从可执行文件旁的 `login-compat` 目录读取助手，也可以通过 `-login-ui` 指定自包含发布后的程序。Go 负责登录流程与账号存储，WPF 仅负责界面和窗口呈现。
 
+## 应用图标
+
+原创品牌资源位于 `internal/branding`。PNG 用于原生窗口，单色 SVG/PNG 用于界面，ICO 包含 16–256 像素的九个尺寸，供 EXE、登录助手和安装器使用。
+
+修改 ICO 后运行：
+
+```powershell
+pwsh -File scripts/update-icons.ps1
+```
+
+脚本固定使用 MIT 许可的 [`github.com/akavel/rsrc` `v0.10.2`](https://github.com/akavel/rsrc/tree/v0.10.2)，更新两个入口中的 `icon_windows_amd64.syso`。将源图与生成资源一同提交；普通 Go 构建会自动链接这些资源，无需额外安装生成器。此工具仅在图标更新时运行，不是运行时依赖。
+
 ## 常规检查
 
 ```powershell

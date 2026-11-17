@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="768" height="768" viewBox="0 0 768 768" role="img" aria-labelledby="title">
+  <title id="title">Oddward — Anomaly Eye</title>
+
+  <g transform="">
+    <g fill="#F4F3ED" transform="translate(-121 -63)">
+    <path d="M 264 435 L 357 259 L 800 143 L 765 222 L 815 247 L 790 302 L 826 334 L 799 414 C 565 373 468 370 264 435 Z"/>
+    <path d="M 184 298 L 281 367 L 250 440 L 518 516 L 237 615 Z"/>
+    <path d="M 333 606 L 742 425 L 803 581 C 605 599 438 662 279 751 Z"/>
+    <path d="M 553 412 L 609 409 L 611 465 L 554 467 Z"/>
+    </g>
+  </g>
+</svg>

@@ -37,6 +37,7 @@ var (
 )
 
 const (
+	brandMarkSize            float32 = 40
 	bezelWidth               float32 = 8
 	canvasRadius             float32 = 16
 	homeLeft                         = railWidth + 40

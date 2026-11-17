@@ -21,6 +21,7 @@ cmd/launcher
 |---|---|
 | `cmd/launcher` | 命令行、素材、依赖注入及主窗口 |
 | `cmd/stub` | 安装版按版本启动与回退 |
+| `internal/branding` | 原创图标的 SVG、PNG、ICO 源资源及 Go 嵌入数据 |
 | `internal/launcher/state` | Model、Event、Reduce、Present，以及抽卡页规则 |
 | `internal/launcher` | MyGo 视图、Shell 和副作用调度 |
 | `internal/launcher/system` | 登录、设置、网络、更新、档案等系统适配 |
@@ -42,6 +43,8 @@ cmd/launcher
 输入经 `Shell.Dispatch` 进入 reducer，产生新模型和副作用。后台工作携带 context 与任务 token，将结果写入有界 channel；下一帧在 UI 线程再次分派事件。过期结果由 reducer 丢弃，后台不直接修改界面。
 
 颜色和尺寸集中在 `internal/launcher/view.go`，强调色使用 `s.tone()`。共享控件放在 `controls.go`。素材以 contain 方式呈现，不假设宽高比；无障碍标签、高对比度及减少动态效果应覆盖每个可交互页面。
+
+应用图标统一来自 `internal/branding`：主窗口通过 MyGo `SetIcon` 设置任务栏图标，导航栏使用单色 SVG，WPF 通过项目资源引用同源图像。两个 Go 入口链接已提交的 Windows/amd64 COFF 图标资源，安装器直接使用同一 ICO；修改 ICO 后用 `scripts/update-icons.ps1` 再生成 COFF。
 
 ## 国服登录
 

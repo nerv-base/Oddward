@@ -13,6 +13,7 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
+using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using Path = System.Windows.Shapes.Path;
 
@@ -444,16 +445,16 @@ internal sealed class LoginSurface
             VerticalAlignment = VerticalAlignment.Center,
             IsHitTestVisible = false
         };
-        Grid mark = new() { Width = 24, Height = 24, Margin = new Thickness(0, 0, 9, 0), VerticalAlignment = VerticalAlignment.Center };
-        mark.Children.Add(new Ellipse { Stroke = Brushes.White, StrokeThickness = 3 });
-        mark.Children.Add(new Ellipse
+        Image mark = new()
         {
-            Width = 7,
-            Height = 7,
-            Fill = Brushes.White,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Top
-        });
+            Source = new BitmapImage(new Uri("pack://application:,,,/Branding/symbol.png", UriKind.Absolute)),
+            Width = 24,
+            Height = 24,
+            Stretch = Stretch.Uniform,
+            Margin = new Thickness(0, 0, 9, 0),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        RenderOptions.SetBitmapScalingMode(mark, BitmapScalingMode.HighQuality);
         brand.Children.Add(mark);
         brand.Children.Add(new TextBlock
         {

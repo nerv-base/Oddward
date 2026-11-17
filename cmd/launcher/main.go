@@ -17,6 +17,7 @@ import (
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/video"
 
+	"github.com/nerv-base/Oddward/internal/branding"
 	"github.com/nerv-base/Oddward/internal/buildinfo"
 	"github.com/nerv-base/Oddward/internal/cnlogin/accounts"
 	"github.com/nerv-base/Oddward/internal/launcher"
@@ -136,6 +137,9 @@ func main() {
 		options := launcherWindowOptions()
 		options.Content = ui.View(s.View)
 		w := mygo.NewWindow(options)
+		if err := w.SetIcon(branding.IconPNG); err != nil {
+			log.Printf("application icon unavailable: %v", err)
+		}
 		s.PickGameDirectory = func(ctx context.Context) (string, error) {
 			if err := ctx.Err(); err != nil {
 				return "", err
