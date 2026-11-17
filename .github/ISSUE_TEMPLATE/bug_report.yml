@@ -1,0 +1,53 @@
+name: 问题报告
+description: 启动器出现错误、崩溃或与预期不符的行为
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        安全问题（凭据泄露、组件校验可被绕过等）**不要**在这里提交，请按 SECURITY.md 私密报告。
+        请不要粘贴账号、令牌、登录日志或未脱敏的机器路径。
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 实际看到的现象，以及你期望看到的结果。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 以 -demo 启动
+        2. 点击……
+        3. 看到……
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: 运行模式
+      options:
+        - 正常模式（托管登录组件）
+        - 演示模式（-demo）
+        - 不确定
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: 构建版本
+      description: 发行版或开发构建，以及提交号（git rev-parse --short HEAD）。
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Windows 版本
+      placeholder: Windows 11 23H2
+  - type: textarea
+    id: extra
+    attributes:
+      label: 截图或补充信息
+      description: 截图请遮住账号信息；不要附带官方游戏文件。

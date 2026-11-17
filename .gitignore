@@ -1,0 +1,31 @@
+# Pre-existing private investigation and official assets: never publish by default.
+/analysis/
+/docs/adr/
+/docs/specs/
+/docs/research/
+/docs/validation/
+/docs/plan/
+/poc/
+/probes/
+/validation/
+/_nteupdate_gbk.txt
+
+# Local toolchain, caches, evidence containing machine paths, and test installs.
+/.tools/
+/artifacts/
+/scratch/
+/build/
+/dist/
+/.cache/
+/.vscode/
+obj/
+bin/
+*.exe
+*.dll
+*.zip
+*.db
+*.db-shm
+*.db-wal
+*.log
+.env
+.env.*

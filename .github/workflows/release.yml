@@ -1,0 +1,96 @@
+name: Release
+
+# Pushing a vX.Y.Z tag builds everything from source, signs the update
+# manifest and opens a DRAFT release. Nothing reaches users until a
+# maintainer reviews the draft and publishes it by hand.
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GOOS: windows
+  GOARCH: amd64
+  CGO_ENABLED: '0'
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+
+jobs:
+  release:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    permissions:
+      contents: write # create the draft release
+    steps:
+      - name: Read version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?)$') { throw "Tag must be vMAJOR.MINOR.PATCH[-pre]: $tag" }
+          "version=$($Matches[1])" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Require update signing configuration
+        shell: pwsh
+        env:
+          ODDWARD_UPDATE_KEY: ${{ secrets.ODDWARD_UPDATE_KEY }}
+        run: |
+          if (!$env:ODDWARD_UPDATE_KEY) { throw 'Secret ODDWARD_UPDATE_KEY is not set; run scripts/new-update-key.ps1 first.' }
+          if (Select-String -Path internal/buildinfo/buildinfo.go -Pattern 'UpdatePublicKey = ""' -Quiet) {
+            throw 'internal/buildinfo.UpdatePublicKey is empty; run scripts/new-update-key.ps1 and commit the public key.'
+          }
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.3'
+          cache: true
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0, resolved 2026-11-13
+        with:
+          global-json-file: compat/loginui/global.json
+      - name: Synthetic tests
+        run: go test -count=1 ./...
+      - name: Install Inno Setup
+        shell: pwsh
+        run: ./scripts/install-inno.ps1
+      - name: Release notes from the tag message
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = Join-Path $env:RUNNER_TEMP 'notes.md'
+          $ref = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:GITHUB_REF_NAME" | ConvertFrom-Json
+          $text = ''
+          if ($ref.object.type -eq 'tag') { $text = (gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$($ref.object.sha)" | ConvertFrom-Json).message }
+          $text = ($text -replace '(?s)-----BEGIN (PGP|SSH) SIGNATURE-----.*$', '').Trim()
+          if (!$text) { $text = "Oddward ${{ steps.version.outputs.version }}" }
+          Set-Content -LiteralPath $notes -Value $text -Encoding utf8NoBOM
+          "ODDWARD_NOTES=$notes" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+      # Builds the embedded launcher (WPF login window included), the stub, the
+      # signed update package and the installer.
+      - name: Build, sign and package
+        shell: pwsh
+        env:
+          ODDWARD_UPDATE_KEY: ${{ secrets.ODDWARD_UPDATE_KEY }}
+        run: ./scripts/build-release.ps1 -Version '${{ steps.version.outputs.version }}' -Notes $env:ODDWARD_NOTES
+      - name: Create draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $files = Get-ChildItem "artifacts/release/$version/publish" -File | ForEach-Object FullName
+          $sums = Join-Path $env:RUNNER_TEMP 'SHA256SUMS.txt'
+          $files | ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant(), (Split-Path -Leaf $_) } | Set-Content -LiteralPath $sums -Encoding utf8NoBOM
+          $pre = @()
+          if ($version.Contains('-')) { $pre = @('--prerelease') }
+          gh release create $env:GITHUB_REF_NAME --draft --verify-tag @pre --title "Oddward $version" --notes-file $env:ODDWARD_NOTES @files $sums
+          if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }

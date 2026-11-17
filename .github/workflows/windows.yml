@@ -1,0 +1,82 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOOS: windows
+  GOARCH: amd64
+  CGO_ENABLED: '0'
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+  DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
+
+jobs:
+  test:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.3'
+          cache: true
+      - name: Check formatting
+        shell: pwsh
+        run: |
+          $dirty = gofmt -l internal cmd tools
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($dirty) { throw "Unformatted Go files: $dirty" }
+      - name: Check module files
+        shell: pwsh
+        run: |
+          pwsh -File scripts/go.ps1 mod tidy -diff
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test
+        run: pwsh -File scripts/go.ps1 test -count=1 ./...
+      - name: Vet
+        run: pwsh -File scripts/go.ps1 vet ./...
+      - name: Build packages
+        run: pwsh -File scripts/go.ps1 build ./...
+
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.3'
+          cache: true
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73
+        with:
+          global-json-file: compat/loginui/global.json
+      - name: Install Inno Setup
+        shell: pwsh
+        run: ./scripts/install-inno.ps1
+      - name: Build launcher and installer
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'stage'
+          $app = Join-Path $stage 'app-0.0.0-ci'
+          New-Item -ItemType Directory -Force -Path $app | Out-Null
+          pwsh -File scripts/build-launcher.ps1 -Output (Join-Path $app 'oddward-launcher.exe')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -File scripts/go.ps1 build -trimpath -ldflags '-H=windowsgui -s -w' -o (Join-Path $stage 'Oddward.exe') ./cmd/stub
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath LICENSE -Destination (Join-Path $app 'LICENSE')
+          & $env:ODDWARD_ISCC '/DAppVersion=0.0.0-ci' "/DStageDir=$stage" "/O$env:RUNNER_TEMP" installer/oddward.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup failed.' }
