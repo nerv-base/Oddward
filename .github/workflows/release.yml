@@ -37,7 +37,7 @@ jobs:
           $tag = $env:GITHUB_REF_NAME
           if ($tag -notmatch '^v(\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?)$') { throw "Tag must be vMAJOR.MINOR.PATCH[-pre]: $tag" }
           "version=$($Matches[1])" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Require update signing configuration
@@ -49,7 +49,7 @@ jobs:
           if (Select-String -Path internal/buildinfo/buildinfo.go -Pattern 'UpdatePublicKey = ""' -Quiet) {
             throw 'internal/buildinfo.UpdatePublicKey is empty; run scripts/new-update-key.ps1 and commit the public key.'
           }
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.3'
           cache: true
