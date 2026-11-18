@@ -51,7 +51,7 @@ func OfficialDataHosts() []string {
 
 // OfficialImageHosts are the hosts that serve the launcher's artwork.
 func OfficialImageHosts() []string {
-	return []string{"yhvmg.wmupd.com"}
+	return []string{"yh.wanmei.com", "yhvmg.wmupd.com"}
 }
 
 // Client reads the official public announcements. The zero value is not

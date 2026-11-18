@@ -306,7 +306,7 @@ func TestWishReducerHandledBoundary(t *testing.T) {
 			t.Fatalf("closed wish reducer admitted %v", kind)
 		}
 	}
-	for _, kind := range []EventKind{Primary, DetailFailed, StartFeature, LoginRequested, OpenNewsBanner, ManagedLoad, UpdateCheck, NetworkApply, EventKind(255)} {
+	for _, kind := range []EventKind{Primary, DetailFailed, CheckInBegin, LoginRequested, OpenNewsBanner, ManagedLoad, UpdateCheck, NetworkApply, EventKind(255)} {
 		n, fx, handled := ReduceWish(m, Event{Kind: kind})
 		if handled || n != m || len(fx) != 0 {
 			t.Fatalf("wish reducer swallowed unrelated %v", kind)
@@ -449,29 +449,5 @@ func TestWishModelRemainsComparable(t *testing.T) {
 	n.Wish.Confirm.Path = "archive.json"
 	if n == m {
 		t.Fatal("wish data omitted from model equality")
-	}
-}
-
-func TestFeaturePreviewOnlyControlsCheckIn(t *testing.T) {
-	m := wishModel(WishIdle)
-	for _, kind := range []EventKind{StartFeature, CompleteFeature, FailFeature, ResetFeature} {
-		n, fx := Reduce(m, Event{Kind: kind, Page: WishAnalysis})
-		if n != m || len(fx) != 0 {
-			t.Fatalf("legacy preview changed wish for %v", kind)
-		}
-	}
-	m.Page = CheckIn
-	for _, tc := range []struct {
-		kind  EventKind
-		phase FeatureState
-	}{
-		{StartFeature, FeatureLoading}, {CompleteFeature, FeatureReady}, {ResetFeature, FeatureEmpty},
-		{StartFeature, FeatureLoading}, {FailFeature, FeatureFailed}, {ResetFeature, FeatureEmpty},
-	} {
-		n, fx := Reduce(m, Event{Kind: tc.kind, Page: CheckIn})
-		if n.CheckIn != tc.phase || n.Wish != m.Wish || len(fx) != 0 {
-			t.Fatalf("check-in=%+v fx=%+v", n, fx)
-		}
-		m = n
 	}
 }

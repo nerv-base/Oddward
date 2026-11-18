@@ -37,6 +37,15 @@ var (
 )
 
 const (
+	downloadInputHeight      float32 = 34
+	downloadGap              float32 = 10
+	downloadTitleSize        float32 = 20
+	downloadBodySize         float32 = 14
+	downloadCaptionSize      float32 = 12
+	downloadButtonHeight     float32 = 36
+	downloadMeterHeight      float32 = 4
+	downloadStatusHeight     float32 = 26
+	downloadStatusBottom     float32 = homeBottom - downloadStatusHeight - 8
 	brandMarkSize            float32 = 40
 	bezelWidth               float32 = 8
 	canvasRadius             float32 = 16
@@ -134,7 +143,44 @@ const (
 	// The pool card keeps Starward's compact 12/8 padding and 28px record
 	// rows; records get the vertical space instead of a separate chart.
 	wishSnapshotRadius float32 = 10
-	monoFont                   = "Bahnschrift"
+	// Check-in page: one sheet, an account row, two independent task cards and
+	// the game status panel. Sizes stay here so every page shares one scale.
+	checkinInset         float32 = 32
+	checkinBottomInset   float32 = 54 // clears the footer note, same as the wish columns
+	checkinHeaderTop     float32 = 64
+	checkinBodyTop       float32 = 154
+	checkinBodyGap       float32 = 12
+	checkinCardPadding   float32 = 20
+	checkinCardRadius    float32 = 16
+	checkinCardGap       float32 = 16
+	checkinStatusGap     float32 = 6
+	checkinTaskHeight    float32 = 154
+	checkinStatusMin     float32 = 230
+	checkinRowHeight     float32 = 26
+	checkinChipHeight    float32 = 24
+	checkinChipRadius    float32 = 12
+	checkinChipPadding   float32 = 10
+	checkinMeterHeight   float32 = 6
+	checkinMeterRadius   float32 = 3
+	checkinSourceDotSize float32 = 6
+	checkinStatGap       float32 = 24
+	checkinTextIndex     float32 = 11
+	checkinTextCaption   float32 = 11
+	checkinTextBody      float32 = 12
+	checkinTextHelp      float32 = 14
+	checkinTextValue     float32 = 22
+	checkinTextTitle     float32 = 30
+	checkinTextWatermark float32 = 240
+	checkinSpaceXXS      float32 = 4
+	checkinSpaceXS       float32 = 6
+	checkinSpaceSM       float32 = 8
+	checkinSpaceMD       float32 = 12
+	checkinSpaceLG       float32 = 18
+	checkinSpaceXL       float32 = 24
+	checkinHairlineWidth float32 = 1
+	checkinWatermarkOpp  float32 = .06
+	checkinStatusOpacity float32 = .18
+	monoFont                     = "Bahnschrift"
 )
 
 func launcherTheme() *ui.Theme {
@@ -291,6 +337,7 @@ func (s *Shell) action(c *ui.Context) {
 	if s.Model.NormalMode {
 		s.managedActionNote(c)
 	}
+	s.downloadStatus(c)
 	s.footer(c)
 }
 

@@ -18,7 +18,9 @@ import (
 	"github.com/egoist/mygo/ui/video"
 
 	"github.com/nerv-base/Oddward/internal/branding"
+	"github.com/nerv-base/Oddward/internal/brandingcache"
 	"github.com/nerv-base/Oddward/internal/buildinfo"
+	"github.com/nerv-base/Oddward/internal/checkin"
 	"github.com/nerv-base/Oddward/internal/cnlogin/accounts"
 	"github.com/nerv-base/Oddward/internal/launcher"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
@@ -78,15 +80,32 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	checkInRecords, err := checkin.Open(filepath.Join(filepath.Dir(cachePath), "checkin"))
+	if err != nil {
+		log.Fatal(err)
+	}
 	tajiduoClient, err := tajiduo.NewClient(tajiduo.Config{HTTPClient: &http.Client{Transport: network}})
 	if err != nil {
 		log.Fatal("cannot initialize Tajiduo client")
 	}
 	mygo.App.WhenReady(func() {
 		s := newApplicationShell(*demo)
-		s.WishLinkBackend = system.NewTajiduoBackend(accountStore, tajiduoClient, wishArchives)
+		tajiduoBackend := system.NewTajiduoBackend(accountStore, tajiduoClient, wishArchives, checkInRecords)
+		s.WishLinkBackend = tajiduoBackend
+		s.CheckInBackend = tajiduoBackend
 		s.WishBackend, s.WishLocation = wishArchives, time.Local
+		downloads := system.NewGameDownloadBackend(filepath.Dir(cachePath), store, &http.Client{Transport: network}, buildinfo.Version)
+		s.GameDownloads = downloads
+		prefs := saved.Downloads
+		if prefs == (launchsettings.Downloads{}) {
+			prefs = launchsettings.DefaultDownloads()
+		}
+		s.Model, _ = state.Reduce(s.Model, state.Event{Kind: state.DownloadSettingsLoaded, DownloadSettings: state.DownloadPreferences{
+			FilesInFlight: prefs.FilesInFlight, ConnectionsPerFile: prefs.ConnectionsPerFile, RateLimitKiB: prefs.RateLimitKiB,
+			CacheLimitGiB: prefs.CacheLimitGiB, AutoResume: prefs.AutoResume, PatchApply: prefs.PatchApply,
+		}})
 		s.ManagedBackend = system.NativeManagedBackend{
+			Downloads:       downloads,
 			LoginUI:         resolveLoginUI(executable, *loginUI),
 			Accounts:        accountStore,
 			HTTPClient:      &http.Client{Transport: network},
@@ -96,6 +115,19 @@ func main() {
 		s.InitialManagedRoot = *gameRoot
 		s.Model.Network, s.NetworkBackend = netState, system.SystemNetwork{Network: network, Store: store}
 		selfUpdate(s, executable, network, store, saved)
+		if cache, err := brandingcache.Open(filepath.Join(filepath.Dir(cachePath), "branding")); err == nil {
+			adapter := brandingCacheAdapter{cache: cache}
+			s.BrandingCache = adapter
+			if record, err := adapter.Load(context.Background()); err == nil {
+				if art, decodeErr := ui.DecodeBitmap(record.Image); decodeErr == nil {
+					s.Slogan = art
+					s.BrandingSlogan = record.Slogan
+					s.BrandingVersion = record.VersionName
+				}
+			}
+		} else {
+			log.Printf("branding cache unavailable: %v", err)
+		}
 		if art, err := launcher.LoadPoster(*background, *poster); err == nil {
 			s.Poster = art
 			// The launch tone follows each version's key art.
@@ -111,7 +143,10 @@ func main() {
 			log.Printf("logo unavailable: %v", err)
 		}
 		if art, err := launcher.LoadArtwork(*slogan); err == nil {
-			s.Slogan = art
+			if art != nil {
+				s.Slogan = art
+				s.SloganLocal = true
+			}
 		} else {
 			log.Printf("slogan unavailable: %v", err)
 		}

@@ -17,10 +17,39 @@ import (
 const maxResponseBytes = 8 << 20
 
 func (c *Client) request(ctx context.Context, isLaohu bool, method, path string, fields map[string]string, a Access) (any, error) {
+	root, status, e := c.exchange(ctx, isLaohu, method, path, fields, a)
+	if e != nil {
+		return nil, e
+	}
+	code, ok := codeValue(root["code"])
+	if !ok || code != 0 || status < 200 || status >= 300 {
+		return nil, ErrProtocolChanged
+	}
+	key := "data"
+	if isLaohu {
+		key = "result"
+	}
+	v, exists := root[key]
+	if !exists || v == nil {
+		// SMS and write APIs can succeed without a data object.
+		if path == "/m/newApi/sendPhoneCaptchaWithOutLogin" {
+			return nil, nil
+		}
+		return nil, ErrProtocolChanged
+	}
+	return v, nil
+}
+
+// exchange performs one protocol call and returns the decoded envelope with its
+// HTTP status. Transport, encoding, authentication and challenge failures are
+// typed errors; the business code and message stay with the caller, because
+// write endpoints report "already done" as a non-zero code rather than a
+// transport failure.
+func (c *Client) exchange(ctx context.Context, isLaohu bool, method, path string, fields map[string]string, a Access) (map[string]any, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	if ctx.Err() != nil {
-		return nil, ctx.Err()
+		return nil, 0, ctx.Err()
 	}
 	base := c.base
 	if isLaohu {
@@ -37,7 +66,7 @@ func (c *Client) request(ctx context.Context, isLaohu bool, method, path string,
 	}
 	req, e := http.NewRequestWithContext(ctx, method, target, strings.NewReader(body))
 	if e != nil {
-		return nil, ErrInvalidInput
+		return nil, 0, ErrInvalidInput
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Accept-Encoding", "identity")
@@ -49,7 +78,7 @@ func (c *Client) request(ctx context.Context, isLaohu bool, method, path string,
 	} else {
 		n, e := c.nonce()
 		if e != nil {
-			return nil, e
+			return nil, 0, e
 		}
 		req.Header.Set("User-Agent", userAgent)
 		req.Header.Set("platform", platform)
@@ -62,64 +91,46 @@ func (c *Client) request(ctx context.Context, isLaohu bool, method, path string,
 	resp, e := c.http.Do(req)
 	if e != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, 0, ctx.Err()
 		}
-		return nil, ErrNetwork
+		return nil, 0, ErrNetwork
 	}
 	defer resp.Body.Close()
-	if expired(resp.StatusCode) {
-		return nil, ErrAuthExpired
+	status := resp.StatusCode
+	if expired(status) {
+		return nil, status, ErrAuthExpired
 	}
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, ErrChallengeRequired
+	if status == http.StatusTooManyRequests {
+		return nil, status, ErrChallengeRequired
 	}
 	if resp.ContentLength > maxResponseBytes {
-		return nil, ErrProtocolChanged
+		return nil, status, ErrProtocolChanged
 	}
 	if enc := resp.Header.Get("Content-Encoding"); enc != "" && enc != "identity" {
-		return nil, ErrProtocolChanged
+		return nil, status, ErrProtocolChanged
 	}
 	raw, e := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	defer clear(raw)
 	if e != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, status, ctx.Err()
 		}
-		return nil, ErrNetwork
+		return nil, status, ErrNetwork
 	}
 	if len(raw) > maxResponseBytes {
-		return nil, ErrProtocolChanged
+		return nil, status, ErrProtocolChanged
 	}
 	root, e := decodeObject(raw)
 	if e != nil {
-		return nil, ErrProtocolChanged
+		return nil, status, ErrProtocolChanged
 	}
-	code, ok := codeValue(root["code"])
-	if ok && expired(code) {
-		return nil, ErrAuthExpired
+	if code, ok := codeValue(root["code"]); ok && expired(code) {
+		return nil, status, ErrAuthExpired
 	}
 	if challenge(root) {
-		return nil, ErrChallengeRequired
+		return nil, status, ErrChallengeRequired
 	}
-	if !ok {
-		return nil, ErrProtocolChanged
-	}
-	if code != 0 || resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, ErrProtocolChanged
-	}
-	key := "data"
-	if isLaohu {
-		key = "result"
-	}
-	v, exists := root[key]
-	if !exists || v == nil {
-		// SMS and write APIs can succeed without a data object.
-		if path == "/m/newApi/sendPhoneCaptchaWithOutLogin" {
-			return nil, nil
-		}
-		return nil, ErrProtocolChanged
-	}
-	return v, nil
+	return root, status, nil
 }
 func form(p map[string]string) string     { return laohu.FormParameters(p) }
 func expired(code int) bool               { return code == 401 || code == 402 || code == 403 }

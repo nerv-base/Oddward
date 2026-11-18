@@ -18,8 +18,55 @@ func TestVersionOneDocumentsStillLoad(t *testing.T) {
 	}
 	store, _ := launchsettings.NewStore(file)
 	got, err := store.Load(context.Background())
-	if err != nil || got != (launchsettings.Settings{}) {
+	if err != nil || got.Downloads != (launchsettings.Downloads{FilesInFlight: 4, ConnectionsPerFile: 4, AutoResume: true, PatchApply: true}) {
 		t.Fatalf("v1 = %+v, %v", got, err)
+	}
+	got.Downloads = launchsettings.Downloads{}
+	if got != (launchsettings.Settings{}) {
+		t.Fatalf("v1 changed unrelated settings: %+v", got)
+	}
+}
+
+func TestDownloadsMigrationAndValidation(t *testing.T) {
+	ctx := context.Background()
+	file := filepath.Join(t.TempDir(), "launch.json")
+	store, _ := launchsettings.NewStore(file)
+	if got, err := store.Load(ctx); err != nil || got != (launchsettings.Settings{}) {
+		t.Fatalf("missing settings = %+v, %v", got, err)
+	}
+	prefix := `,"gameRoot":"","riskVersion":"","skippedVersion":"v2.0.0","network":{}`
+	write := func(s string) {
+		t.Helper()
+		if err := os.WriteFile(file, []byte(s), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{"version":2` + prefix + `}`)
+	if got, err := store.Load(ctx); err != nil || got.Downloads != launchsettings.DefaultDownloads() {
+		t.Fatalf("v2 = %+v, %v", got, err)
+	}
+	want := launchsettings.Downloads{FilesInFlight: 8, ConnectionsPerFile: 16, RateLimitKiB: 128}
+	if err := store.Update(ctx, func(s *launchsettings.Settings) { s.Downloads = want }); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.Load(ctx); err != nil || got.Downloads != want || got.SkippedVersion != "v2.0.0" {
+		t.Fatalf("v3 = %+v, %v", got, err)
+	}
+	write(`{"version":3` + prefix + `,"downloads":{"filesInFlight":2,"connectionsPerFile":3,"rateLimitKiB":10}}`)
+	if got, err := store.Load(ctx); err != nil || !got.Downloads.AutoResume {
+		t.Fatalf("omitted autoResume: %+v, %v", got, err)
+	}
+	for _, suffix := range []string{
+		`}`, `,"downloads":null}`, `,"downloads":{}}`,
+		`,"downloads":{"filesInFlight":9,"connectionsPerFile":1,"rateLimitKiB":0}}`,
+		`,"downloads":{"filesInFlight":1,"connectionsPerFile":1,"rateLimitKiB":0,"autoResume":null}}`,
+		`,"downloads":{"filesInFlight":1,"connectionsPerFile":1,"rateLimitKiB":0,"unknown":true}}`,
+		`,"downloads":{"filesInFlight":1,"filesInFlight":2,"connectionsPerFile":1,"rateLimitKiB":0}}`,
+	} {
+		write(`{"version":3` + prefix + suffix)
+		if _, err := store.Load(ctx); err == nil {
+			t.Errorf("accepted %s", suffix)
+		}
 	}
 }
 
@@ -33,6 +80,7 @@ func TestNetworkAndSkippedVersionRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := store.Load(context.Background())
+	want.Downloads = launchsettings.DefaultDownloads()
 	if err != nil || got != want {
 		t.Fatalf("got %+v, %v", got, err)
 	}

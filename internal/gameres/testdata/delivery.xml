@@ -1,0 +1,11 @@
+<ResList version="9.0.2" tag="baseTag">
+  <Res filename="game/unchanged.bin" md5="11111111111111111111111111111111" filesize="2000"/>
+  <Res filename="game/update.bin" md5="22222222222222222222222222222222" filesize="4000"/>
+  <Res filename="game/cached.bin" md5="33333333333333333333333333333333" filesize="100"/>
+  <Package><Pak md5="44444444444444444444444444444444" filesize="100">
+    <Entry name="game/packed.bin" md5="55555555555555555555555555555555" size="75" offset="25"/>
+  </Pak></Package>
+  <BaseVersion version="9.0.2" tag="optional"><ResList>
+    <Res filename="game/bonus.bin" md5="66666666666666666666666666666666" filesize="800"/>
+  </ResList></BaseVersion>
+</ResList>

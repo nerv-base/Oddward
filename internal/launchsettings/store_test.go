@@ -31,6 +31,7 @@ func TestSaveLoadNonSecretSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := reopened.Load(context.Background())
+	want.Downloads = launchsettings.DefaultDownloads()
 	if err != nil || got != want {
 		t.Fatalf("reopened settings = %+v, %v; want %+v", got, err, want)
 	}
@@ -42,7 +43,7 @@ func TestSaveLoadNonSecretSettings(t *testing.T) {
 	if err := json.Unmarshal(data, &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document) != 5 || string(document["version"]) != "2" || document["gameRoot"] == nil || document["riskVersion"] == nil || document["network"] == nil || document["skippedVersion"] == nil {
+	if len(document) != 6 || string(document["version"]) != "3" || document["gameRoot"] == nil || document["riskVersion"] == nil || document["network"] == nil || document["skippedVersion"] == nil || document["downloads"] == nil {
 		t.Fatalf("settings must contain only schema version and non-secret choices: %s", data)
 	}
 }
@@ -50,7 +51,7 @@ func TestSaveLoadNonSecretSettings(t *testing.T) {
 func TestInvalidDocumentsAreRejectedAndPreserved(t *testing.T) {
 	cases := map[string]string{
 		"malformed":            `{`,
-		"unknown version":      `{"version":3,"gameRoot":"","riskVersion":""}`,
+		"unknown version":      `{"version":4,"gameRoot":"","riskVersion":""}`,
 		"v1 with v2 field":     `{"version":1,"gameRoot":"","riskVersion":"","skippedVersion":""}`,
 		"v2 missing network":   `{"version":2,"gameRoot":"","riskVersion":"","skippedVersion":""}`,
 		"v2 network secret":    `{"version":2,"gameRoot":"","riskVersion":"","skippedVersion":"","network":{"proxy":"","proxyURL":"","mirror":false,"mirrorPrefix":"","password":"x"}}`,
@@ -100,7 +101,7 @@ func TestDocumentAtLimitAndChoicesCanBeReplacedAndCleared(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := store.Load(context.Background()); err != nil || got != (launchsettings.Settings{}) {
+	if got, err := store.Load(context.Background()); err != nil || got != (launchsettings.Settings{Downloads: launchsettings.DefaultDownloads()}) {
 		t.Fatalf("exact-limit document = %+v, %v", got, err)
 	}
 	for _, want := range []launchsettings.Settings{
@@ -112,6 +113,7 @@ func TestDocumentAtLimitAndChoicesCanBeReplacedAndCleared(t *testing.T) {
 			t.Fatal(err)
 		}
 		got, err := store.Load(context.Background())
+		want.Downloads = launchsettings.DefaultDownloads()
 		if err != nil || got != want {
 			t.Fatalf("replacement/clear = %+v, %v; want %+v", got, err, want)
 		}

@@ -64,7 +64,7 @@ const (
 	MediaUnavailable
 )
 
-type EventKind uint8
+type EventKind uint16
 
 const (
 	Primary EventKind = iota
@@ -116,20 +116,41 @@ const (
 	WishExported
 	WishOperationFailed
 	WishImportNeedsConfirmation
+	// Check-in: account reads, two independent writes, the automatic
+	// switches and the game status panel.
+	CheckInStateRequested
+	CheckInStateLoaded
+	CheckInStateFailed
+	CheckInBegin
+	CheckInSigned
+	CheckInConfirm
+	CheckInAutoToggle
+	CheckInAutoSaved
+	CheckInAutoTick
+	CheckInStatusRequested
+	CheckInStatusLoaded
+	CheckInStatusFailed
 )
 
 type Event struct {
-	Kind              EventKind
-	Index             uint8
-	Media             Media
-	Page              Page
-	Overlay           Overlay
-	Flow              Flow
-	Token             uint64
-	Progress          float64
-	Message           string
-	Path              string
-	Downloaded, Total int64
+	Kind                    EventKind
+	Index                   uint8
+	Media                   Media
+	Page                    Page
+	Overlay                 Overlay
+	Flow                    Flow
+	Token                   uint64
+	Progress                float64
+	Message                 string
+	Path                    string
+	Downloaded, Total       int64
+	CurrentVersion          string
+	DownloadSettings        DownloadPreferences
+	Stage                   DownloadStage
+	FilesDone, FilesTotal   uint16
+	Reused, PatchBytes      int64
+	ETASecs                 int32
+	Needed, Free, Suggested int64
 	// Rate is the measured transfer rate in bytes per second; 0 is unknown.
 	Rate      int64
 	Enabled   bool
@@ -151,9 +172,11 @@ type Event struct {
 	WishNewCount, WishOutside, WishConflicts int
 	WishFailure                              WishFailureKind
 	WishFormat                               WishFormat
+	// Check carries the check-in facts a shell response reports.
+	Check CheckInPayload
 }
 
-type EffectKind uint8
+type EffectKind uint16
 
 const (
 	Simulate EffectKind = iota
@@ -172,6 +195,13 @@ const (
 	WishImport
 	WishPickExport
 	WishExport
+	// Check-in effects read the account's state, run one write, refresh the
+	// status panel and persist one automatic switch.
+	TajiduoCheckInState
+	TajiduoCheckInSign
+	TajiduoCheckInStatus
+	TajiduoCheckInAuto
+	TajiduoCheckInLaunch
 )
 
 type Effect struct {
@@ -181,7 +211,12 @@ type Effect struct {
 	Token      uint64
 	RoleID     string
 	WishFormat WishFormat
-	Confirmed  bool
+	// Confirmed marks a step the user explicitly approved: a lossy export or
+	// a retry of a check-in whose last answer never arrived.
+	Confirmed bool
+	// CheckInKind and Enabled address one daily task or one switch.
+	CheckInKind CheckInKind
+	Enabled     bool
 }
 
 // NewsStatus is the state of the official announcement feed. There is no
@@ -229,7 +264,7 @@ type Model struct {
 	Managed             ManagedState
 	Page                Page
 	Wish                WishState
-	CheckIn             FeatureState
+	CheckIn             CheckInState
 	DemoPaused          bool
 	NewsTab             uint8
 	NewsIndex           uint8
@@ -249,6 +284,7 @@ type Model struct {
 	ReducedMotion       bool
 	SystemReducedMotion bool
 	Closed              bool
+	Download            DownloadState
 	Update              UpdateState
 	Network             NetworkState
 	Login               LoginState
@@ -280,6 +316,9 @@ func Reduce(m Model, e Event) (Model, []Effect) {
 	if m.Closed {
 		return m, nil
 	}
+	if next, effects, handled := reduceDownload(m, e); handled {
+		return next, effects
+	}
 	if next, effects, handled := reduceUpdate(m, e); handled {
 		return next, effects
 	}
@@ -295,8 +334,8 @@ func Reduce(m Model, e Event) (Model, []Effect) {
 	if next, effects, handled := ReduceWish(m, e); handled {
 		return next, effects
 	}
-	if next, handled := ReduceFeature(m, e); handled {
-		return next, nil
+	if next, effects, handled := ReduceCheckIn(m, e); handled {
+		return next, effects
 	}
 	start := func(flow Flow, reset bool) (Model, []Effect) {
 		m.Token++
@@ -618,6 +657,22 @@ type Presentation struct {
 }
 
 func Present(m Model) Presentation {
+	if m.Download.Phase == DownloadRecoveryRequired {
+		return Presentation{Primary: "完成上次更新", Status: "上次更新未完成", Detail: DownloadNoteText("recovery-required"), Enabled: true}
+	}
+	if downloadMutation(m.Download) {
+		status := "正在提交更新"
+		if m.Download.Stage == StageApply || m.Download.Phase == DownloadRebuilding {
+			status = "正在重建文件"
+		}
+		return Presentation{Primary: "正在更新", Status: status, Detail: "请等待更新完成后启动游戏"}
+	}
+	if m.Download.GameRunning {
+		return Presentation{Primary: "游戏运行中", Status: "游戏正在运行", Detail: "退出游戏后可再次启动"}
+	}
+	if m.Download.OfficialRunning {
+		return Presentation{Primary: "等待官方启动器退出", Status: "安装目录正在使用", Detail: DownloadNoteText("official-running")}
+	}
 	if p, ok := managedPresentation(m); ok {
 		return p
 	}
