@@ -93,7 +93,7 @@ func main() {
 		s.WishLinkBackend = tajiduoBackend
 		s.CheckInBackend = tajiduoBackend
 		s.WishBackend, s.WishLocation = wishArchives, time.Local
-		downloads := &system.GameDownloadBackend{StateRoot: filepath.Dir(cachePath), Settings: store, Client: &http.Client{Transport: network}, Version: buildinfo.Version}
+		downloads := system.NewGameDownloadBackend(filepath.Dir(cachePath), store, &http.Client{Transport: network}, buildinfo.Version)
 		s.GameDownloads = downloads
 		prefs := saved.Downloads
 		if prefs == (launchsettings.Downloads{}) {

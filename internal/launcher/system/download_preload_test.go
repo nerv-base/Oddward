@@ -75,6 +75,13 @@ func preloadSystemDelivery(t *testing.T, root string) gameDelivery {
 	}
 	return gameDelivery{Config: cfg, Manifest: m, Graph: g, XML: xml, Branch: "PC_160", ConfigResponse: downloadResponse{Data: cfgData, Root: root, URL: root + "/observed-preload/config.xml"}}
 }
+func TestNewGameDownloadBackendWiresOfficialPreloadQuery(t *testing.T) {
+	backend := NewGameDownloadBackend(t.TempDir(), nil, nil, "test")
+	if backend.preloadQuery == nil {
+		t.Fatal("production backend did not wire the official pre-release query")
+	}
+}
+
 func TestSystemPreloadFormalHistoryCountsDistinctNewerVersions(t *testing.T) {
 	r := gameinstall.PreloadRecord{Version: "1.1.0"}
 	for _, version := range []string{"1.0.0", "1.1.0", "1.2.0", "1.2.0", "1.3.0"} {

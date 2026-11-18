@@ -36,6 +36,17 @@ type GameDownloadBackend struct {
 	availability   cachedDownloadAvailability
 }
 
+// NewGameDownloadBackend creates the production backend and wires the official
+// pre-release delivery query. Tests that build a backend literal keep the
+// query nil and therefore fail closed until they inject a verified route.
+func NewGameDownloadBackend(stateRoot string, settings *launchsettings.Store, client *http.Client, version string) *GameDownloadBackend {
+	backend := &GameDownloadBackend{StateRoot: stateRoot, Settings: settings, Client: client, Version: version}
+	backend.preloadQuery = func(ctx context.Context, branch, version string) (gameDelivery, error) {
+		return backend.metadata().delivery(ctx, branch, version)
+	}
+	return backend
+}
+
 type downloadPlan struct {
 	root, key, id      string
 	kind               state.DownloadKind

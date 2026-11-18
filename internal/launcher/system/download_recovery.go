@@ -16,29 +16,54 @@ import (
 
 var errDownloadMutation = errors.New("此安装正在启动或提交资源，请稍后重试")
 
-type downloadMutation windows.Handle
+type downloadMutation struct {
+	handle windows.Handle
+	owned  bool
+}
 
 // Keep an exclusive kernel object alive until launch-start or transaction
 // completion. Downloads use a separate work-root lease and can run meanwhile.
 func acquireDownloadMutation(root string) (downloadMutation, error) {
 	key, err := gameinstall.InstallKey(root)
 	if err != nil {
-		return 0, err
+		return downloadMutation{}, err
 	}
 	name, err := windows.UTF16PtrFromString(`Global\Oddward.GameMutation.` + key)
 	if err != nil {
-		return 0, err
+		return downloadMutation{}, err
 	}
-	h, err := windows.CreateMutex(nil, false, name)
-	if err != nil {
-		if h != 0 {
-			_ = windows.CloseHandle(h)
+	h, createErr := windows.CreateMutex(nil, false, name)
+	if h == 0 {
+		return downloadMutation{}, errDownloadMutation
+	}
+	wait, waitErr := windows.WaitForSingleObject(h, 0)
+	if waitErr != nil || (wait != windows.WAIT_OBJECT_0 && wait != windows.WAIT_ABANDONED) {
+		_ = windows.CloseHandle(h)
+		if waitErr != nil {
+			return downloadMutation{}, errDownloadMutation
 		}
-		return 0, errDownloadMutation
+		return downloadMutation{}, errDownloadMutation
 	}
-	return downloadMutation(h), nil
+	if createErr != nil && !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
+		_ = windows.ReleaseMutex(h)
+		_ = windows.CloseHandle(h)
+		return downloadMutation{}, errDownloadMutation
+	}
+	return downloadMutation{handle: h, owned: true}, nil
 }
-func (h downloadMutation) Close() error { return windows.CloseHandle(windows.Handle(h)) }
+func (h *downloadMutation) Close() error {
+	if h == nil || h.handle == 0 {
+		return nil
+	}
+	handle, owned := h.handle, h.owned
+	h.handle, h.owned = 0, false
+	var releaseErr error
+	if owned {
+		releaseErr = windows.ReleaseMutex(handle)
+	}
+	closeErr := windows.CloseHandle(handle)
+	return errors.Join(releaseErr, closeErr)
+}
 
 func (b *GameDownloadBackend) checkLaunch(ctx context.Context, root string) error {
 	store, err := b.installStore()
