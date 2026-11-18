@@ -58,14 +58,16 @@ func TestPrivateLogsProtectedACLAndDestroy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := sd.String()
-	for _, expected := range []string{"(A;OICI;FA;;;SY)", "(A;OICI;FA;;;" + sid.User.Sid.String() + ")"} {
-		if !strings.Contains(text, expected) {
-			t.Fatalf("DACL mismatch %q", text)
-		}
+	// Compare against the descriptor the launcher builds, in both cases formatted by the
+	// same API: SDDL abbreviates well-known principals, and a CI agent that runs as the
+	// built-in Administrator account is printed as "LA" instead of its SID. Equality still
+	// pins the exact ACE set: SYSTEM plus this process' user, inheritable, full control.
+	intended, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;" + sid.User.Sid.String() + ")")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Count(text, "(A;") != 2 {
-		t.Fatalf("extra ACL principals: %s", text)
+	if text, want := sd.String(), intended.String(); text != want {
+		t.Fatalf("DACL %q, want %q", text, want)
 	}
 	writeFile(t, filepath.Join(logs.path, "nested", "sdk.log"), "synthetic credential marker must be deleted")
 	path := logs.path
