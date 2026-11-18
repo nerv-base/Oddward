@@ -57,18 +57,30 @@ func write(t *testing.T, p, s string) {
 
 func TestInspectSupportedFolderLevels(t *testing.T) {
 	root := fixture(t)
+	// Inspect reports the caller's spelling of the tree it accepted. A temp directory can
+	// be reached through its 8.3 short name (CI uses C:\Users\RUNNER~1\...), so compare
+	// the directory each path names, not the characters it was spelled with.
+	want, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantExecutable := filepath.Join(want, filepath.FromSlash(executable))
 	for _, selected := range []string{root, filepath.Dir(root), filepath.Dir(filepath.Dir(root))} {
 		t.Run(filepath.Base(selected), func(t *testing.T) {
 			got, err := Inspect(context.Background(), selected)
 			if err != nil {
 				t.Fatal(err)
 			}
-			want, err := filepath.EvalSymlinks(root)
+			gotRoot, err := filepath.EvalSymlinks(got.Root)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Root != want || got.Executable != filepath.Join(want, "HT", "Binaries", "Win64", "HTGame.exe") || got.AppID != "1289" || got.Branch != "PC_150" {
-				t.Fatalf("unexpected installation: %+v", got)
+			gotExecutable, err := filepath.EvalSymlinks(got.Executable)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotRoot != want || gotExecutable != wantExecutable || got.AppID != "1289" || got.Branch != "PC_150" {
+				t.Fatalf("unexpected installation: %+v (root %q, executable %q)", got, gotRoot, gotExecutable)
 			}
 		})
 	}
