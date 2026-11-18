@@ -174,7 +174,7 @@ func TestSettingsShowsTheVersionAndChecksOnRequest(t *testing.T) {
 	f := &fakeUpdates{offer: UpdateOffer{Version: "0.1.0"}}
 	s, tt := updatableShell(t, f, 1280, 720)
 	waitFor(t, tt, "auto check", func() bool { return s.Model.Update.Phase == state.SelfUpdateCurrent })
-	if clickFailed(tt, "设置") {
+	if clickFailed(tt, "启动器设置") || clickFailed(tt, "关于") {
 		t.Fatal("settings unreachable")
 	}
 	if !tt.HasText("v0.1.0") || !tt.HasText("已是最新版本") {
@@ -190,10 +190,10 @@ func TestDevelopmentBuildsNeverCheck(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	t.Cleanup(s.Dispose)
 	tt := ui.NewTester(s.View, 1280, 720)
-	if clickFailed(tt, "设置") {
+	if clickFailed(tt, "启动器设置") || clickFailed(tt, "关于") {
 		t.Fatal("settings unreachable")
 	}
-	if !tt.HasText("开发构建") {
+	if !tt.HasText("开发版本") {
 		t.Fatal("unversioned builds must say so")
 	}
 	field, ok := tt.AccessByRole(ui.RoleButton, "检查更新")
@@ -226,10 +226,10 @@ func TestNetworkPanelEditsAFormAndSavesOnce(t *testing.T) {
 	f := &fakeNetwork{}
 	s.NetworkBackend = f
 	tt := ui.NewTester(s.View, 1024, 631)
-	if clickFailed(tt, "设置") || clickFailed(tt, "网络") {
+	if clickFailed(tt, "启动器设置") || clickFailed(tt, "网络") {
 		t.Fatal("network settings unreachable")
 	}
-	if s.Model.Overlay != state.NetworkSettings || !tt.HasText("跟随系统") {
+	if s.Model.Page != state.LauncherSettings || s.Model.Overlay != state.NoOverlay || s.Model.SettingsSection != state.SettingsNetwork || !tt.HasText("跟随系统") {
 		t.Fatal("network panel missing")
 	}
 	if err := tt.Click("自定义"); err != nil {
@@ -239,6 +239,9 @@ func TestNetworkPanelEditsAFormAndSavesOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	tt.Type("socks5://127.0.0.1:1080")
+	if clickFailed(tt, "关于") || clickFailed(tt, "网络") || s.NetworkForm.ProxyURL != "socks5://127.0.0.1:1080" {
+		t.Fatal("switching settings sections must preserve unsaved network edits")
+	}
 	if err := tt.Click("GitHub 加速"); err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +249,7 @@ func TestNetworkPanelEditsAFormAndSavesOnce(t *testing.T) {
 		t.Fatal("editing must not touch the saved preference")
 	}
 	save, ok := tt.Find("保存")
-	panel, _ := tt.AccessByRole(ui.RoleDialog, "网络")
+	panel, _ := tt.AccessByRole(ui.RoleGroup, "启动器设置内容")
 	if !ok || save.Y+save.H > panel.Bounds.Y+panel.Bounds.H {
 		t.Fatalf("save must stay reachable at the minimum window: %+v in %+v", save, panel.Bounds)
 	}
@@ -269,7 +272,8 @@ func TestNetworkPanelShowsWhyASaveFailed(t *testing.T) {
 	t.Cleanup(s.Dispose)
 	s.NetworkBackend = &fakeNetwork{err: errors.New("代理地址必须是 http:// 或 socks5://")}
 	tt := ui.NewTester(s.View, 1280, 720)
-	s.openNetworkSettings()
+	s.Dispatch(state.Event{Kind: state.Navigate, Page: state.LauncherSettings})
+	s.selectSettingsSection(state.SettingsNetwork)
 	tt.Frame()
 	if err := tt.Click("保存"); err != nil {
 		t.Fatal(err)
@@ -284,13 +288,13 @@ func TestSettingsStillFitWithTheVersionRowAtTheMinimumWindow(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	t.Cleanup(s.Dispose)
 	tt := ui.NewTester(s.View, 1024, 631)
-	if clickFailed(tt, "设置") {
+	if clickFailed(tt, "启动器设置") || clickFailed(tt, "关于") {
 		t.Fatal("settings unreachable")
 	}
 	tt.Advance(time.Second)
 	tt.Frame()
-	panel, _ := tt.AccessByRole(ui.RoleDialog, "设置")
-	for _, label := range []string{"检查更新", "状态预览", "网络", "关于"} {
+	panel, _ := tt.AccessByRole(ui.RoleGroup, "启动器设置内容")
+	for _, label := range []string{"检查更新", "常规", "网络", "关于"} {
 		r, ok := tt.Find(label)
 		if !ok || r.Y+r.H > panel.Bounds.Y+panel.Bounds.H-20 {
 			t.Fatalf("%s clipped: %+v in %+v", label, r, panel.Bounds)

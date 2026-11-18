@@ -3,6 +3,7 @@
 package launcher
 
 import (
+	"context"
 	"fmt"
 	"image/color"
 	"image/png"
@@ -18,9 +19,96 @@ import (
 func downloadFixture(phase state.DownloadPhase, stage state.DownloadStage) state.Model {
 	m := normalFixture(state.ManagedReady)
 	m.ReducedMotion = true
-	m.Overlay = state.DownloadDetails
+	m.HomeDownloadsOpen = true
 	m.Download = state.DownloadState{Phase: phase, Stage: stage, Kind: state.DownloadUpdate, Route: state.RoutePatch, Request: 9, Current: "1.0.0", Version: "1.1.0", Downloaded: 2 << 20, Total: 8 << 20, PatchBytes: 6 << 20, Reused: 20 << 20, FilesDone: 2, FilesTotal: 8, Located: true}
 	return m
+}
+
+func installPlanFixture(spaceShort bool) state.Model {
+	m := normalFixture(state.ManagedUnlocated)
+	m.Managed.Root = ""
+	m.ReducedMotion = true
+	m, _ = state.Reduce(m, state.Event{Kind: state.Primary})
+	m, _ = state.Reduce(m, state.Event{Kind: state.InstallLocateRequest, Enabled: true})
+	m, _ = state.Reduce(m, state.Event{Kind: state.InstallLocated, Token: m.Download.Request, Path: `E:\Games\Neverness`})
+	m, _ = state.Reduce(m, state.Event{Kind: state.DownloadPlanned, Token: m.Download.Request,
+		Message: "1.0.0", Total: 54 << 30, Needed: 92 << 30, Free: 184 << 30, Enabled: spaceShort})
+	return m
+}
+
+func TestInstallPathShowsPlanAndStartsProgressOnHome(t *testing.T) {
+	m := installPlanFixture(false)
+	s := NewShell(m)
+	defer s.Dispose()
+	s.GameDownloads = downloadBackendFunc(func(ctx context.Context, _ DownloadRequest, _ func(state.Event)) state.Event {
+		<-ctx.Done()
+		return state.Event{}
+	})
+	tt := ui.NewTester(s.View, 1024, 631)
+	for _, label := range []string{`E:\Games\Neverness`, "54.0 GiB", "92.0 GiB", "184.0 GiB"} {
+		if !tt.HasText(label) {
+			t.Errorf("planned install dialog missing %q", label)
+		}
+	}
+	if _, ok := tt.AccessByRole(ui.RoleButton, "更改目录"); !ok {
+		t.Fatal("selected directory cannot be changed")
+	}
+	if err := tt.Click("开始下载"); err != nil {
+		t.Fatal(err)
+	}
+	if s.Model.Overlay != state.NoOverlay || s.Model.Page != state.Home || !s.Model.HomeDownloadsOpen {
+		t.Fatalf("explicit start should reveal nonmodal Home progress: %+v", s.Model.Download)
+	}
+	s.Dispatch(state.Event{Kind: state.DownloadStarted, Token: s.Model.Download.Request})
+	s.Dispatch(state.Event{Kind: state.DownloadProgress, Token: s.Model.Download.Request, Stage: state.StageNetwork, Downloaded: 4 << 30, Total: 54 << 30})
+	tt.Frame()
+	if _, ok := tt.AccessByRole(ui.RoleProgress, "游戏下载进度"); !ok {
+		t.Fatal("Home lacks the embedded progress indicator")
+	}
+	if _, ok := tt.AccessByRole(ui.RoleButton, "下载进度"); !ok || !tt.HasText("4.0 GiB / 54.0 GiB") {
+		t.Fatal("Home does not show live first-install progress")
+	}
+}
+
+func TestRenderInstallPathPreviewFrames(t *testing.T) {
+	out := os.Getenv("ODDWARD_DOWNLOAD_PREVIEW_OUT")
+	if out == "" {
+		t.Skip("set ODDWARD_DOWNLOAD_PREVIEW_OUT for synthetic install path previews")
+	}
+	if err := os.MkdirAll(out, 0755); err != nil {
+		t.Fatal(err)
+	}
+	first := normalFixture(state.ManagedUnlocated)
+	first.Managed.Root = ""
+	first.ReducedMotion = true
+	first, _ = state.Reduce(first, state.Event{Kind: state.Primary})
+	ready := installPlanFixture(false)
+	progress, _ := state.Reduce(ready, state.Event{Kind: state.DownloadConfirm})
+	progress, _ = state.Reduce(progress, state.Event{Kind: state.DownloadStarted, Token: progress.Download.Request})
+	progress, _ = state.Reduce(progress, state.Event{Kind: state.DownloadProgress, Token: progress.Download.Request, Stage: state.StageNetwork, Downloaded: 15 << 30, Total: 54 << 30})
+	for _, tc := range []struct {
+		name string
+		m    state.Model
+	}{{"select", first}, {"ready", ready}, {"home-progress", progress}} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewShell(tc.m)
+			defer s.Dispose()
+			tt := ui.NewTester(s.View, 1024, 631)
+			tt.Frame()
+			f, err := os.Create(filepath.Join(out, "install-"+tc.name+".png"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = png.Encode(f, tt.Image())
+			closeErr := f.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if closeErr != nil {
+				t.Fatal(closeErr)
+			}
+		})
+	}
 }
 
 func TestDownloadPanelRendersSyntheticStates(t *testing.T) {
@@ -45,20 +133,25 @@ func TestDownloadPanelRendersSyntheticStates(t *testing.T) {
 			s := NewShell(m)
 			defer s.Dispose()
 			tt := ui.NewTester(s.View, 1280, 720)
-			panel, ok := tt.Find("游戏下载与更新")
+			panel, ok := tt.AccessByRole(ui.RoleGroup, "游戏下载与更新")
 			if !ok {
 				t.Fatal("download dialog has no accessible title")
 			}
-			action, ok := tt.Find(tc.label)
-			if !ok {
-				t.Fatalf("missing state action/label %q", tc.label)
+			bounds := panel.Bounds
+			inside := false
+			for _, node := range tt.AccessAll() {
+				r := node.Bounds
+				if node.Name == tc.label && !node.Offscreen && r.X >= bounds.X && r.Y >= bounds.Y && r.X+r.W <= bounds.X+bounds.W && r.Y+r.H <= bounds.Y+bounds.H {
+					inside = true
+					break
+				}
 			}
-			if action.X < panel.X || action.Y < panel.Y || action.X+action.W > panel.X+panel.W || action.Y+action.H > panel.Y+panel.H {
-				t.Fatalf("%q lies outside dialog: %+v panel %+v", tc.label, action, panel)
+			if !inside {
+				t.Fatalf("missing visible action or status %q in home downloads", tc.label)
 			}
 			snapshot := strings.Join(tt.Texts(), "\n")
-			if _, ok := tt.AccessByRole(ui.RoleDialog, "游戏下载与更新"); !ok {
-				t.Fatal("download panel is not an accessible dialog")
+			if _, ok := tt.AccessByRole(ui.RoleDialog, "游戏下载与更新"); ok {
+				t.Fatal("home download controls must not be modal")
 			}
 			if tc.stage == state.StageNetwork && tc.phase == state.DownloadRunning {
 				if !strings.Contains(snapshot, "计算中") {
@@ -126,10 +219,12 @@ func TestDownloadPanelShowsRouteFallbackAndBudget(t *testing.T) {
 func TestDownloadSettingsExposeSixPreferencesAndRejectInvalidInput(t *testing.T) {
 	m := normalFixture(state.ManagedReady)
 	m.Download.Settings = state.DefaultDownloadPreferences()
-	m.Overlay = state.Settings
 	s := NewShell(m)
 	defer s.Dispose()
 	tt := ui.NewTester(s.View, 1280, 720)
+	if err := tt.Click("游戏设置"); err != nil {
+		t.Fatal(err)
+	}
 	if err := tt.Click("下载设置"); err != nil {
 		t.Fatal(err)
 	}

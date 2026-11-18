@@ -4,12 +4,14 @@ package launcher
 
 import (
 	"bytes"
+	"context"
 	"image"
 	"image/color"
 	"image/png"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 
@@ -83,6 +85,38 @@ func TestPosterDefaultsToSiblingImageWithoutChangingFiles(t *testing.T) {
 	}
 	if art, err = LoadPoster(filepath.Join(dir, "bg.mp4"), filepath.Join(dir, "wrong.png")); art != nil || err == nil {
 		t.Fatal("explicit bad poster must not silently use another asset")
+	}
+}
+
+type posterFixture struct{}
+
+func (posterFixture) Load(context.Context) (string, image.Image, error) {
+	return "", image.NewRGBA(image.Rect(0, 0, 16, 9)), nil
+}
+
+func TestOfficialBackgroundWakesIdleWindowAndShowsStaticFallback(t *testing.T) {
+	s := NewShell(state.InitialNormal())
+	defer s.Dispose()
+	s.BackgroundSource = posterFixture{}
+	wake := make(chan struct{}, 1)
+	s.RequestFrame = func() {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+	tt := ui.NewTester(s.View, 1024, 631)
+	deadline := time.After(2 * time.Second)
+	for s.Poster == nil {
+		select {
+		case <-wake:
+			tt.Frame()
+		case <-deadline:
+			t.Fatal("completed background fetch did not wake the native window")
+		}
+	}
+	if s.Poster == nil || s.Player != nil || s.Model.Media != state.MediaUnavailable {
+		t.Fatalf("static fallback not applied: poster=%v, player=%v, media=%v", s.Poster != nil, s.Player != nil, s.Model.Media)
 	}
 }
 

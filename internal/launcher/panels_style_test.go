@@ -17,15 +17,15 @@ func sameColor(a, b color.RGBA, tolerance float32) bool {
 }
 
 func TestOverlayFloatsAsARoundedGlassSheet(t *testing.T) {
-	s := NewShell(settled(state.Ready))
+	s := NewShell(normalFixture(state.ManagedReady))
 	defer s.Dispose()
 	tt := ui.NewTester(s.View, 1280, 720)
-	if clickFailed(tt, "设置") {
-		t.Fatal("settings unreachable")
+	if clickFailed(tt, "游戏设置") {
+		t.Fatal("game settings unreachable")
 	}
 	tt.Advance(time.Second)
 	tt.Frame()
-	panel, ok := tt.AccessByRole(ui.RoleDialog, "设置")
+	panel, ok := tt.AccessByRole(ui.RoleDialog, "游戏设置")
 	if !ok {
 		t.Fatal("settings dialog missing")
 	}
@@ -39,6 +39,30 @@ func TestOverlayFloatsAsARoundedGlassSheet(t *testing.T) {
 	outside := img.RGBAAt(int(r.X-6), int(r.Y+2))
 	if sameColor(corner, inside, 3) && !sameColor(corner, outside, 3) {
 		t.Fatalf("sheet corners must be rounded: corner %+v inside %+v outside %+v", corner, inside, outside)
+	}
+}
+
+func TestLauncherSettingsFrostFollowsPosterWithOpaqueFallback(t *testing.T) {
+	s := NewShell(normalFixture(state.ManagedReady))
+	t.Cleanup(s.Dispose)
+	tt := ui.NewTester(s.View, 1024, 631)
+	if err := tt.Click("启动器设置"); err != nil {
+		t.Fatal(err)
+	}
+	pixel := func(poster color.RGBA) color.RGBA {
+		s.Poster = ui.NewBitmap(paintBands(32, 18, band{1, poster}))
+		tt.Frame()
+		return tt.Image().RGBAAt(850, 540)
+	}
+	warm, cool := color.RGBA{240, 65, 40, 255}, color.RGBA{40, 85, 240, 255}
+	if a, b := pixel(warm), pixel(cool); a.R <= b.R+20 || b.B <= a.B+20 {
+		t.Fatalf("settings background must pick up the poster colors, got %+v and %+v", a, b)
+	}
+	for _, prefs := range []ui.Preferences{{ReduceTransparency: true}, {HighContrast: true}} {
+		tt.SetPreferences(prefs)
+		if a, b := pixel(warm), pixel(cool); !sameColor(a, b, 2) {
+			t.Fatalf("settings background must be opaque with preferences %+v, got %+v and %+v", prefs, a, b)
+		}
 	}
 }
 

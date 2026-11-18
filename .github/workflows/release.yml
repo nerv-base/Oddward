@@ -2,10 +2,21 @@ name: Release
 
 # Pushing a vX.Y.Z tag builds everything from source, signs the update
 # manifest and opens a DRAFT release. Nothing reaches users until a
-# maintainer reviews the draft and publishes it by hand.
+# maintainer reviews the draft and publishes it by hand. Manual runs stage
+# the signed files in Actions without editing a public release.
 on:
   push:
     tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build and sign (without v)'
+        required: true
+        type: string
+      notes:
+        description: 'Plain-text notes for the signed update manifest'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -25,17 +36,21 @@ env:
 
 jobs:
   release:
+    if: github.event_name == 'workflow_dispatch' || !github.event.forced
     runs-on: windows-2025
     timeout-minutes: 45
     permissions:
       contents: write # create the draft release
     steps:
-      - name: Read version from tag
+      - name: Resolve release version
         id: version
         shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
           $tag = $env:GITHUB_REF_NAME
-          if ($tag -notmatch '^v(\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?)$') { throw "Tag must be vMAJOR.MINOR.PATCH[-pre]: $tag" }
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') { $tag = 'v' + $env:RELEASE_VERSION }
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?)$') { throw 'Version must be MAJOR.MINOR.PATCH[-pre].' }
           "version=$($Matches[1])" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -61,16 +76,19 @@ jobs:
       - name: Install Inno Setup
         shell: pwsh
         run: ./scripts/install-inno.ps1
-      - name: Release notes from the tag message
+      - name: Prepare signed release notes
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_NOTES: ${{ inputs.notes }}
         run: |
           $notes = Join-Path $env:RUNNER_TEMP 'notes.md'
-          $ref = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:GITHUB_REF_NAME" | ConvertFrom-Json
-          $text = ''
-          if ($ref.object.type -eq 'tag') { $text = (gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$($ref.object.sha)" | ConvertFrom-Json).message }
-          $text = ($text -replace '(?s)-----BEGIN (PGP|SSH) SIGNATURE-----.*$', '').Trim()
+          $text = $env:RELEASE_NOTES
+          if ($env:GITHUB_EVENT_NAME -eq 'push') {
+            $ref = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:GITHUB_REF_NAME" | ConvertFrom-Json
+            if ($ref.object.type -eq 'tag') { $text = (gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$($ref.object.sha)" | ConvertFrom-Json).message }
+            $text = ($text -replace '(?s)-----BEGIN (PGP|SSH) SIGNATURE-----.*$', '').Trim()
+          }
           if (!$text) { $text = "Oddward ${{ steps.version.outputs.version }}" }
           Set-Content -LiteralPath $notes -Value $text -Encoding utf8NoBOM
           "ODDWARD_NOTES=$notes" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
@@ -81,16 +99,31 @@ jobs:
         env:
           ODDWARD_UPDATE_KEY: ${{ secrets.ODDWARD_UPDATE_KEY }}
         run: ./scripts/build-release.ps1 -Version '${{ steps.version.outputs.version }}' -Notes $env:ODDWARD_NOTES
+      - name: Write release checksums
+        shell: pwsh
+        run: |
+          $publish = 'artifacts/release/${{ steps.version.outputs.version }}/publish'
+          Get-ChildItem -LiteralPath $publish -File | Sort-Object Name | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
+          } | Set-Content -LiteralPath (Join-Path $publish 'SHA256SUMS.txt') -Encoding utf8NoBOM
+      - name: Stage signed release files
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oddward-${{ steps.version.outputs.version }}-signed
+          path: artifacts/release/${{ steps.version.outputs.version }}/publish/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
       - name: Create draft release
+        if: github.event_name == 'push'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $version = '${{ steps.version.outputs.version }}'
           $files = Get-ChildItem "artifacts/release/$version/publish" -File | ForEach-Object FullName
-          $sums = Join-Path $env:RUNNER_TEMP 'SHA256SUMS.txt'
-          $files | ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant(), (Split-Path -Leaf $_) } | Set-Content -LiteralPath $sums -Encoding utf8NoBOM
           $pre = @()
           if ($version.Contains('-')) { $pre = @('--prerelease') }
-          gh release create $env:GITHUB_REF_NAME --draft --verify-tag @pre --title "Oddward $version" --notes-file $env:ODDWARD_NOTES @files $sums
+          gh release create $env:GITHUB_REF_NAME --draft --verify-tag @pre --title "Oddward $version" --notes-file $env:ODDWARD_NOTES @files
           if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }

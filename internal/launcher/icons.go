@@ -15,6 +15,8 @@ var launcherIcons = map[string]*ui.SVG{
 	"\uE9D9": lineIcon(`<path d="M4 20V13m5 7v-5m5 5v-8m5 8v-4M14 3l1.8 3.8L20 8.5l-4.2 1.7L14 14l-1.8-3.8L8 8.5l4.2-1.7Z"/>`),
 	"\uE787": lineIcon(`<rect x="4" y="5" width="16" height="16" rx="3"/><path d="M8 3v4m8-4v4M4 10h16m-12 5 2.5 2.5L16 13"/>`),
 	"\uE713": lineIcon(`<path d="m9 3-.5 3-2 1.2L3.8 6l-2 3.5L4 11v2l-2.2 1.5 2 3.5 2.7-1.2 2 1.2.5 3h6l.5-3 2-1.2 2.7 1.2 2-3.5L20 13v-2l2.2-1.5-2-3.5-2.7 1.2-2-1.2L15 3Z"/><circle cx="12" cy="12" r="3"/>`),
+	"\uE774": lineIcon(`<circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3.7 9h16.6M3.7 15h16.6"/>`),
+	"\uE946": lineIcon(`<circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/>`),
 	"\uE921": lineIcon(`<path d="M5 12h14"/>`),
 	"\uE922": lineIcon(`<rect x="5" y="5" width="14" height="14" rx="1.5"/>`),
 	"\uE8BB": lineIcon(`<path d="m6 6 12 12M18 6 6 18"/>`),

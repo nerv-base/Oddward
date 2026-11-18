@@ -9,7 +9,6 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"github.com/nerv-base/Oddward/internal/launcher/state"
-	"github.com/nerv-base/Oddward/internal/news"
 )
 
 // "Frame": the version's key art hangs in a rounded canvas inside a dark
@@ -37,109 +36,143 @@ var (
 )
 
 const (
-	downloadInputHeight      float32 = 34
-	downloadGap              float32 = 10
-	downloadTitleSize        float32 = 20
-	downloadBodySize         float32 = 14
-	downloadCaptionSize      float32 = 12
-	downloadButtonHeight     float32 = 36
-	downloadMeterHeight      float32 = 4
-	downloadStatusHeight     float32 = 26
-	downloadStatusBottom     float32 = homeBottom - downloadStatusHeight - 8
-	brandMarkSize            float32 = 40
-	bezelWidth               float32 = 8
-	canvasRadius             float32 = 16
-	homeLeft                         = railWidth + 40
-	newsWidth                float32 = 600
-	newsHeight               float32 = 152
-	coverWidth               float32 = 270
-	coverHeight                      = newsHeight
-	homeBottom                       = bezelWidth + 64
-	sheetInset                       = 12
-	sheetRadius                      = 20
-	dockRight                        = bezelWidth + 32
-	actionWidth              float32 = 248
-	actionHeight             float32 = 60
-	menuGap                  float32 = 10
-	dockWidth                        = actionWidth + menuGap + actionHeight
-	deckHeight                       = 96
-	deckGap                          = 12
-	captionSize              float32 = 32
-	sloganTop                float32 = 140
-	sloganWidth              float32 = 440
-	sloganHeight             float32 = 200
-	wishInset                float32 = 32
-	wishHeaderTop            float32 = 76
-	wishCardsTop             float32 = 192
-	wishImportReportHeight   float32 = 28
-	wishLinkNoteHeight       float32 = 28
-	wishCardMinWidth         float32 = 300
-	wishCardGap              float32 = 16
-	wishCardRadius           float32 = 8
-	wishCardPaddingX         float32 = 12
-	wishCardPaddingY         float32 = 8
-	wishRowHeight            float32 = 28
-	wishRowGap               float32 = 2
-	wishIconSize             float32 = 28
-	wishNarrowCardH          float32 = 440
-	wishBottomInset          float32 = 54
-	wishRecordBarInsetTop    float32 = 2
-	wishRecordBarInsetBottom float32 = 2
-	wishRecordBarRadius      float32 = 4
-	wishRecordBarOpacity     float32 = .32
-	wishOpaqueBarMix         float32 = .72
-	wishRecordPityWidth      float32 = 60
-	wishPoolHeaderHeight     float32 = 24
-	wishPoolMetaHeight       float32 = 15
-	wishPoolStatRowHeight    float32 = 18
-	wishPoolSectionHeight    float32 = 24
-	wishMonospace                    = "Consolas"
-	wishIconCacheSize                = 128
-	wishIconDecodeEdge               = 96
-	wishTextFootnote         float32 = 9
-	wishTextIndex            float32 = 10
-	wishTextCaption          float32 = 11
-	wishTextBody             float32 = 12
-	wishTextNumber           float32 = 13
-	wishTextHelp             float32 = 14
-	wishTextPool             float32 = 16
-	wishTextIcon             float32 = 14
-	wishTextDialog           float32 = 22
-	wishTextTitle            float32 = 30
-	wishTextWatermark        float32 = 240
-	wishSpaceXXS             float32 = 4
-	wishSpaceXS              float32 = 5
-	wishSpaceSM              float32 = 6
-	wishSpaceMD              float32 = 8
-	wishSpaceLG              float32 = 10
-	wishSpaceXL              float32 = 12
-	wishSpaceXXL             float32 = 16
-	wishSpaceHero            float32 = 18
-	wishHairlineWidth        float32 = 1
-	wishHeaderHeight         float32 = 44
-	wishActionsHeight        float32 = 42
-	wishNarrowHeaderExtra    float32 = 40
-	wishSourceDotSize        float32 = 6
-	wishEmptyPadding         float32 = 28
-	wishRecordsMinHeight     float32 = 80
-	wishIconRadius           float32 = 4
-	wishIconInitialLeft      float32 = 9
-	wishIconInitialTop       float32 = 4
-	wishIconCornerRight      float32 = 3
-	wishIconCornerBottom     float32 = 2
-	wishConfirmWidth         float32 = 440
-	wishConfirmOffsetY       float32 = 130
-	wishConfirmPadding       float32 = 26
-	wishBloomSize            float32 = 720
-	wishBloomRight           float32 = -200
-	wishBloomBottom          float32 = -260
-	wishWatermarkRight       float32 = 48
-	wishWatermarkBottom      float32 = 28
-	wishHighlightOpacity     float32 = .12
-	wishWatermarkOpacity     float32 = .06
-	wishBackdropOpacity      float32 = .72
-	wishOpaqueHighlightMix   float32 = .82
-	wishBodyLineHeight       float32 = 1.6
+	downloadInputHeight       float32 = 34
+	downloadGap               float32 = 10
+	downloadTitleSize         float32 = 20
+	downloadBodySize          float32 = 14
+	downloadCaptionSize       float32 = 12
+	downloadButtonHeight      float32 = 36
+	downloadMeterHeight       float32 = 4
+	downloadStatusHeight      float32 = 26
+	homeDownloadWidth         float32 = 360
+	homeDownloadHeight        float32 = 374
+	homeDownloadInset         float32 = 16
+	homeDownloadGap           float32 = 14
+	homeDownloadDockClearance float32 = 34
+	locateActionGap           float32 = 4
+	locateActionTextSize      float32 = 12
+	downloadStatusBottom      float32 = homeBottom - downloadStatusHeight - 8
+	brandMarkSize             float32 = 40
+	bezelWidth                float32 = 8
+	canvasRadius              float32 = 16
+	homeLeft                          = railWidth + 40
+	newsWidth                 float32 = 600
+	newsHeight                float32 = 152
+	coverWidth                float32 = 270
+	coverHeight                       = newsHeight
+	homeBottom                        = bezelWidth + 64
+	sheetInset                        = 12
+	sheetEnterDistance        float32 = 12
+	sheetRadius                       = 20
+	sheetGap                  float32 = 14
+	sheetWidth                float32 = 408
+	locateGameDialogWidth     float32 = 544
+	locateGameDialogHeight    float32 = 520
+	gameSettingsWidthRatio    float32 = 2.0 / 3.0
+	gameSettingsHeightRatio   float32 = .72
+	gameSettingsNavWidth      float32 = 148
+	gameSettingsTabHeight     float32 = 40
+	gameSettingsTabRadius     float32 = 8
+	gameSettingsTabGap        float32 = 6
+	gameSettingsTabInset      float32 = 12
+	gameSettingsTabMark       float32 = 3
+	gameSettingsPaneGap       float32 = 18
+	gameSettingsHeadingSize   float32 = 17
+	launcherSettingsTop       float32 = 68
+	launcherSettingsInset     float32 = 28
+	launcherSettingsTitleSize float32 = 25
+	launcherSettingsNavWidth  float32 = 218
+	launcherSettingsTabHeight float32 = 40
+	launcherSettingsGap       float32 = 16
+	launcherSettingsBodyWidth float32 = 620
+	launcherSettingsColumnGap float32 = 32
+	launcherSettingsMarkSize  float32 = 56
+	dockRight                         = bezelWidth + 32
+	actionWidth               float32 = 248
+	actionHeight              float32 = 60
+	menuGap                   float32 = 10
+	gameSettingsIconSize      float32 = 16
+	gameSettingsLabelSize     float32 = 10
+	gameSettingsLabelGap      float32 = 3
+	dockWidth                         = actionWidth + menuGap + actionHeight
+	deckHeight                        = 96
+	deckGap                           = 12
+	captionSize               float32 = 32
+	sloganTop                 float32 = 140
+	sloganWidth               float32 = 440
+	sloganHeight              float32 = 200
+	wishInset                 float32 = 32
+	wishHeaderTop             float32 = 76
+	wishCardsTop              float32 = 192
+	wishImportReportHeight    float32 = 28
+	wishLinkNoteHeight        float32 = 28
+	wishCardMinWidth          float32 = 300
+	wishCardGap               float32 = 16
+	wishCardRadius            float32 = 8
+	wishCardPaddingX          float32 = 12
+	wishCardPaddingY          float32 = 8
+	wishRowHeight             float32 = 28
+	wishRowGap                float32 = 2
+	wishIconSize              float32 = 28
+	wishNarrowCardH           float32 = 440
+	wishBottomInset           float32 = 54
+	wishRecordBarInsetTop     float32 = 2
+	wishRecordBarInsetBottom  float32 = 2
+	wishRecordBarRadius       float32 = 4
+	wishRecordBarOpacity      float32 = .32
+	wishOpaqueBarMix          float32 = .72
+	wishRecordPityWidth       float32 = 60
+	wishPoolHeaderHeight      float32 = 24
+	wishPoolMetaHeight        float32 = 15
+	wishPoolStatRowHeight     float32 = 18
+	wishPoolSectionHeight     float32 = 24
+	wishMonospace                     = "Consolas"
+	wishIconCacheSize                 = 128
+	wishIconDecodeEdge                = 96
+	wishTextFootnote          float32 = 9
+	wishTextIndex             float32 = 10
+	wishTextCaption           float32 = 11
+	wishTextBody              float32 = 12
+	wishTextNumber            float32 = 13
+	wishTextHelp              float32 = 14
+	wishTextPool              float32 = 16
+	wishTextIcon              float32 = 14
+	wishTextDialog            float32 = 22
+	wishTextTitle             float32 = 30
+	wishTextWatermark         float32 = 240
+	wishSpaceXXS              float32 = 4
+	wishSpaceXS               float32 = 5
+	wishSpaceSM               float32 = 6
+	wishSpaceMD               float32 = 8
+	wishSpaceLG               float32 = 10
+	wishSpaceXL               float32 = 12
+	wishSpaceXXL              float32 = 16
+	wishSpaceHero             float32 = 18
+	wishHairlineWidth         float32 = 1
+	wishHeaderHeight          float32 = 44
+	wishActionsHeight         float32 = 42
+	wishNarrowHeaderExtra     float32 = 40
+	wishSourceDotSize         float32 = 6
+	wishEmptyPadding          float32 = 28
+	wishRecordsMinHeight      float32 = 80
+	wishIconRadius            float32 = 4
+	wishIconInitialLeft       float32 = 9
+	wishIconInitialTop        float32 = 4
+	wishIconCornerRight       float32 = 3
+	wishIconCornerBottom      float32 = 2
+	wishConfirmWidth          float32 = 440
+	wishConfirmOffsetY        float32 = 130
+	wishConfirmPadding        float32 = 26
+	wishBloomSize             float32 = 720
+	wishBloomRight            float32 = -200
+	wishBloomBottom           float32 = -260
+	wishWatermarkRight        float32 = 48
+	wishWatermarkBottom       float32 = 28
+	wishHighlightOpacity      float32 = .12
+	wishWatermarkOpacity      float32 = .06
+	wishBackdropOpacity       float32 = .72
+	wishOpaqueHighlightMix    float32 = .82
+	wishBodyLineHeight        float32 = 1.6
 	// The pool card keeps Starward's compact 12/8 padding and 28px record
 	// rows; records get the vertical space instead of a separate chart.
 	wishSnapshotRadius float32 = 10
@@ -230,7 +263,7 @@ func (s *Shell) stage(c *ui.Context) {
 		// an unready/paused surface must not stop its initialization.
 		if s.Player != nil && !s.Model.MediaPreview && s.Model.Media != state.MediaUnavailable {
 			v := ui.Video(c, s.Player).Label("背景视频").Absolute().Left(0).Top(0).Right(0).Bottom(0).Fit(ui.Cover)
-			if s.Model.Media == state.MediaLoading || !s.Model.AnimateBackground() {
+			if s.Model.Page == state.LauncherSettings || s.Model.Media == state.MediaLoading || !s.Model.AnimateBackground() {
 				v.Opacity(0)
 			}
 		}
@@ -328,17 +361,48 @@ func (s *Shell) hero(c *ui.Context) {
 }
 
 func (s *Shell) action(c *ui.Context) {
+	p := state.Present(s.Model)
 	s.newsCard(c)
 	ui.Box(c.Key("action-area")).Absolute().Right(dockRight+actionHeight+menuGap).Bottom(homeBottom).Size(actionWidth, actionHeight).Children(func() {
-		s.primary(c, state.Present(s.Model))
+		s.primary(c, p)
 	})
-	s.launchOptions(c)
-	s.taskDeck(c, state.Present(s.Model))
-	if s.Model.NormalMode {
-		s.managedActionNote(c)
+	if p.LocateExisting {
+		s.locateExistingAction(c)
 	}
-	s.downloadStatus(c)
+	s.gameSettingsButton(c)
+	s.taskDeck(c, p)
+	if s.Model.NormalMode {
+		s.managedActionNote(c, p)
+	}
+	if s.Model.HomeDownloadsOpen {
+		s.homeDownloads(c)
+	} else {
+		s.downloadStatus(c, p.LocateExisting)
+	}
 	s.footer(c)
+}
+
+func (s *Shell) locateExistingAction(c *ui.Context) {
+	ui.Row(c.Key("locate-existing-row")).Absolute().Right(dockRight+actionHeight+menuGap).
+		Bottom(homeBottom-downloadStatusHeight-locateActionGap).Size(actionWidth, downloadStatusHeight).
+		Justify(ui.Center).AlignItems(ui.Center).Children(func() {
+		ui.Text(c, "已下载游戏？点击").FontSize(locateActionTextSize).TextColor(paper).SingleLine().PassThrough()
+		const label = "定位游戏"
+		b := ui.ButtonBase(c.Key("locate-existing")).Label(label).Height(downloadStatusHeight).Justify(ui.Center)
+		tone := s.tone()
+		if b.Hovered() || b.FocusVisible() {
+			b.Draw(func(p *ui.Painter, r ui.Rect) {
+				y := r.Y + r.H/2 + locateActionTextSize/2 + 2
+				p.Line(r.X, y, r.X+r.W, y, 1, tone)
+			})
+		}
+		b.Children(func() {
+			ui.Text(c, label).FontSize(locateActionTextSize).TextColor(tone).SingleLine().PassThrough()
+		}).OnClick(func() {
+			s.ManagedPathInput = ""
+			s.Dispatch(state.Event{Kind: state.OpenOverlay, Overlay: state.LocateGame})
+		})
+	})
 }
 
 func (s *Shell) dispatchWidth(c *ui.Context) float32 {
@@ -354,13 +418,13 @@ func (s *Shell) newsCard(c *ui.Context) {
 	if tab > 2 {
 		tab = 0
 	}
-	count := s.Model.NewsRows.Counts[tab]
-	headline, meta := s.newsHeadline(tab, 0, count)
 	width := s.dispatchWidth(c)
 	tone := s.tone()
-
-	ui.Box(c.Key("news-module")).Label("官方公告").Absolute().Left(homeLeft).Bottom(homeBottom).Size(width, newsHeight).
-		Radius(14).Clip().Material(frostedSurface{Tint: glassInk}).Children(func() {
+	module := ui.Box(c.Key("news-module")).Label("官方公告").Absolute().Left(homeLeft).Bottom(homeBottom).Size(width, newsHeight).
+		Radius(14).Clip().Material(frostedSurface{Tint: glassInk}).Bind(&s.bannerRotation.module)
+	s.updateBannerRotation(c, module)
+	headline, meta := s.newsHeadline()
+	module.Children(func() {
 		cover := ui.ButtonBase(c.Key("official-news")).Label("查看官方公告").Tooltip(s.newsTooltip()).Absolute().Left(0).Top(0).Bottom(0).Width(coverWidth).TextColor(paper).Clip()
 		cover.Children(func() {
 			s.bannerArtwork(c)
@@ -370,19 +434,14 @@ func (s *Shell) newsCard(c *ui.Context) {
 			if cover.Hovered() {
 				ui.Box(c).Fill().Background(ui.RGBA(255, 255, 255, .06))
 			}
-			// Provenance stays visible: this is the official feed, not a mock.
-			ui.Row(c).Absolute().Right(10).Top(10).Height(18).Padding(0, 7).Radius(4).Background(ui.RGBA(8, 9, 12, .62)).PassThrough().Children(func() {
-				mono(c, "OFFICIAL / "+state.NewsCategories[tab], 9).FontWeight(600).TextColor(ui.RGBA(245, 246, 247, .86))
-			})
 			ui.Column(c).Absolute().Left(16).Bottom(14).Right(16).Gap(3).PassThrough().Children(func() {
 				h := ui.Text(c, headline).FontSize(15).FontWeight(600).SingleLine()
 				if cover.Hovered() {
 					h.TextColor(tone)
 				}
-				ui.Row(c).Gap(6).Children(func() {
-					ui.Text(c, meta).FontSize(11).TextColor(muted).SingleLine().Grow(1)
-					ui.Box(c).TextColor(muted).Children(func() { glyph(c, "\uE76C", 12) })
-				})
+				if meta != "" {
+					ui.Text(c, meta).FontSize(11).TextColor(muted).SingleLine()
+				}
 			})
 		}).OnClick(func() {
 			if s.Model.News == state.NewsPresent && s.Model.NewsBanners.Count > 0 {
@@ -394,12 +453,12 @@ func (s *Shell) newsCard(c *ui.Context) {
 			}
 		})
 		s.bannerSelector(c)
-		s.newsReading(c, tab, count)
+		s.newsReading(c, tab)
 		ui.Box(c).Fill().Radius(14).Border(1, hairline).PassThrough()
 	})
 }
 
-func (s *Shell) newsReading(c *ui.Context, tab, count uint8) {
+func (s *Shell) newsReading(c *ui.Context, tab uint8) {
 	tone := s.tone()
 	ui.Column(c.Key("news-reading")).Label("公告分类").Absolute().Left(coverWidth).Right(0).Top(0).Bottom(0).Padding(10, 18, 10, 14).Gap(2).Children(func() {
 		ui.Row(c).Height(34).Gap(2).Children(func() {
@@ -418,7 +477,17 @@ func (s *Shell) newsReading(c *ui.Context, tab, count uint8) {
 				}).OnClick(func() { s.Dispatch(state.Event{Kind: state.SelectNewsTab, Index: index}) })
 			}
 			ui.Box(c).Grow(1)
-			mono(c, s.newsSummary(tab, count), 10).TextColor(muted)
+			if s.Model.NewsFromCache && !s.Model.NewsRefreshing {
+				b := ui.ButtonBase(c.Key("news-cache-retry")).Label("重新获取公告").Tooltip("当前显示离线缓存，点击重新获取公告").Height(30).Padding(0, 8).Radius(6).TextColor(muted)
+				if b.Hovered() {
+					b.Background(ui.RGBA(255, 255, 255, .07)).TextColor(paper)
+				}
+				b.Children(func() { ui.Text(c, "离线缓存").FontSize(11).SingleLine() }).OnClick(func() {
+					s.Dispatch(state.Event{Kind: state.NewsRequested})
+				})
+			} else if s.Model.NewsFromCache && s.Model.NewsRefreshing {
+				ui.Text(c, "刷新中…").FontSize(11).TextColor(muted)
+			}
 		})
 		ui.Box(c).Height(4)
 		switch s.Model.News {
@@ -454,15 +523,15 @@ func (s *Shell) newsReading(c *ui.Context, tab, count uint8) {
 					mono(c, date, 11).TextColor(muted)
 				}).OnClick(func() { s.Dispatch(state.Event{Kind: state.OpenOfficial, Index: item}) })
 			}
-			if rows < 3 {
-				ui.Text(c, "暂无更多公告").FontSize(12).TextColor(ui.RGBA(164, 168, 177, .7)).Padding(0, 10).Height(30).SingleLine()
+			if rows == 0 {
+				ui.Text(c, "暂无内容").FontSize(12).TextColor(ui.RGBA(164, 168, 177, .7)).Padding(0, 10).Height(30).SingleLine()
 			}
 		}
 	})
 }
 
 // newsHeadline is the cover's one story, or why there is none to show.
-func (s *Shell) newsHeadline(tab, featured, count uint8) (headline, meta string) {
+func (s *Shell) newsHeadline() (headline, meta string) {
 	switch s.Model.News {
 	case state.NewsUnavailable:
 		return state.NewsFailedHeadline, state.NewsFailedDetail
@@ -474,9 +543,9 @@ func (s *Shell) newsHeadline(tab, featured, count uint8) (headline, meta string)
 		if s.Model.NewsRows.Empty() {
 			return state.NewsEmptyHeadline, state.NewsEmptyDetail
 		}
-		return "官方公告", "暂无轮播推荐 · 请查看右侧分类"
+		return "官方公告", ""
 	}
-	return title, "官方启动器推荐"
+	return title, ""
 }
 
 func (s *Shell) newsTooltip() string {
@@ -486,20 +555,7 @@ func (s *Shell) newsTooltip() string {
 	case state.NewsPending:
 		return "正在读取官网公开公告"
 	}
-	return "官方公开公告，来源 yh.wanmei.com"
-}
-
-func (s *Shell) newsSummary(tab, count uint8) string {
-	switch s.Model.News {
-	case state.NewsUnavailable:
-		return "获取失败"
-	case state.NewsPending:
-		return "读取中"
-	}
-	if s.Model.NewsBanners.Source == news.SourceSiteFallback {
-		return "官网降级"
-	}
-	return fmt.Sprintf("%d 条", count)
+	return "查看官方公告"
 }
 
 func flowGlyph(f state.Flow) string {
@@ -523,8 +579,13 @@ func flowGlyph(f state.Flow) string {
 // lifts with a tinted glow under the pointer.
 func (s *Shell) primary(c *ui.Context, p state.Presentation) {
 	tone := s.tone()
-	b := ui.ButtonBase(c.Key("primary")).Label(p.Primary).Tooltip(p.Status+" · "+p.Detail).Size(actionWidth, actionHeight).
+	b := ui.ButtonBase(c.Key("primary")).Label(p.Primary).Size(actionWidth, actionHeight).
 		Radius(actionHeight / 2).TextColor(ink).Disabled(!p.Enabled).DimDisabled(false).Clip().ZIndex(1)
+	if p.Detail != "" {
+		b.Tooltip(p.Detail)
+	} else if p.Status != "" {
+		b.Tooltip(p.Status)
+	}
 	fill, glow := tone, float32(.45)
 	switch {
 	case !p.Enabled:
@@ -562,19 +623,20 @@ func (s *Shell) primary(c *ui.Context, p state.Presentation) {
 		if s.Model.Flow == state.Failed {
 			status = ui.Hex("#9E1030")
 		}
-		ui.Column(c).Absolute().Left(62).Top(11).Right(24).Gap(0).PassThrough().Children(func() {
-			ui.Row(c).Height(16).Gap(6).Children(func() {
-				ui.Text(c, p.Status).FontSize(11).FontWeight(600).TextColor(status).SingleLine().Grow(1)
-			})
+		ui.Column(c).Absolute().Left(62).Right(24).Top(0).Bottom(0).Justify(ui.Center).PassThrough().Children(func() {
+			if p.Status != "" {
+				ui.Text(c, p.Status).FontSize(11).FontWeight(600).TextColor(status).SingleLine()
+			}
 			ui.Text(c, p.Primary).FontSize(18).FontWeight(700).LetterSpacing(1).SingleLine()
 		})
 	}).OnClick(func() { s.Dispatch(state.Event{Kind: state.Primary}) })
 }
 
-// launchOptions is the round companion of the launch pill.
-func (s *Shell) launchOptions(c *ui.Context) {
-	b := ui.ButtonBase(c.Key("launch-options")).Label("启动选项").Tooltip("启动选项与设置").Absolute().Right(dockRight).Bottom(homeBottom).
-		Size(actionHeight, actionHeight).Radius(actionHeight/2).Justify(ui.Center).TextColor(paper).Border(1, hairline)
+// gameSettingsButton is the companion of the launch pill.
+func (s *Shell) gameSettingsButton(c *ui.Context) {
+	const label = "游戏设置"
+	b := ui.ButtonBase(c.Key("game-settings-button")).Label(label).Tooltip(label).Absolute().Right(dockRight).Bottom(homeBottom).
+		Size(actionHeight, actionHeight).Radius(actionHeight/2).Justify(ui.Center).TextColor(paper).Border(1, hairline).Disabled(!s.Model.NormalMode)
 	if b.Hovered() || b.FocusVisible() {
 		b.Material(frostedSurface{Tint: ui.RGBA(14, 15, 19, .78)}).Border(1, s.tone().Alpha(.6))
 	} else {
@@ -583,16 +645,15 @@ func (s *Shell) launchOptions(c *ui.Context) {
 	if b.Pressed() {
 		b.Opacity(.82)
 	}
-	b.Children(func() { glyph(c, "\uE700", 18) }).OnClick(func() {
-		s.Dispatch(state.Event{Kind: state.OpenOverlay, Overlay: state.Settings})
-	})
+	b.Children(func() {
+		ui.Column(c).Gap(gameSettingsLabelGap).AlignItems(ui.Center).PassThrough().Children(func() {
+			glyph(c, "\uE713", gameSettingsIconSize)
+			ui.Text(c, label).FontSize(gameSettingsLabelSize).SingleLine()
+		})
+	}).OnClick(func() { s.Dispatch(state.Event{Kind: state.OpenOverlay, Overlay: state.GameSettings}) })
 }
 
 func (s *Shell) demoNote(c *ui.Context) {
-	if s.Model.NormalMode {
-		ui.Text(c, "普通模式 · 官方公告").FontSize(10).TextColor(muted)
-		return
-	}
 	if s.ManagedBackend != nil {
 		if s.quietButton(c, "back-to-normal", "返回正常启动", false).Height(24).Clicked() {
 			s.Dispatch(state.Event{Kind: state.ManagedResume})
@@ -608,7 +669,7 @@ func (s *Shell) demoNote(c *ui.Context) {
 
 func (s *Shell) footer(c *ui.Context) {
 	ui.Row(c.Key("home-note")).Absolute().Left(homeLeft).Bottom(bezelWidth + 22).Height(14).Children(func() {
-		if s.Model.Page != state.WishAnalysis {
+		if !s.Model.NormalMode && s.Model.Page != state.WishAnalysis {
 			s.demoNote(c)
 		}
 	})

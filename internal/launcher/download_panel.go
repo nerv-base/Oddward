@@ -9,20 +9,39 @@ import (
 	"github.com/nerv-base/Oddward/internal/launcher/state"
 )
 
-func (s *Shell) openDownloads() {
-	s.DownloadSettingsOpen = false
-	s.Dispatch(state.Event{Kind: state.OpenOverlay, Overlay: state.DownloadDetails})
+func (s *Shell) homeDownloads(c *ui.Context) {
+	p := state.PresentDownload(s.Model)
+	bottom := homeBottom + actionHeight + homeDownloadGap + homeDownloadDockClearance
+	ui.Column(c.Key("home-downloads")).Role(ui.RoleGroup).Label("游戏下载与更新").Absolute().Right(dockRight).Bottom(bottom).
+		Size(homeDownloadWidth, homeDownloadHeight).Padding(homeDownloadInset).Gap(downloadGap).Radius(sheetRadius).Clip().
+		Border(1, hairline).Material(frostedSurface{Tint: ui.RGBA(18, 19, 24, .84)}).Children(func() {
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Height(30).Children(func() {
+			ui.Text(c, "游戏下载与更新").FontSize(downloadTitleSize).FontWeight(700).Grow(1)
+			iconButton(c, "home-download-collapse", "收起游戏下载与更新", "\uE8BB", 28, func() {
+				s.Dispatch(state.Event{Kind: state.CloseHomeDownloads})
+			})
+		})
+		s.downloadControls(c, p)
+		if p.CanConfirm {
+			s.accentButton(c, "download-confirm", "确认并开始").FillWidth().Height(downloadButtonHeight).Shrink(0).OnClick(func() {
+				s.Dispatch(state.Event{Kind: state.DownloadConfirm})
+			})
+		}
+	})
 }
 
-func (s *Shell) downloadPanel(c *ui.Context) {
-	if s.DownloadSettingsOpen {
-		s.downloadSettingsPanel(c)
-		return
-	}
-	p := state.PresentDownload(s.Model)
+func (s *Shell) downloadControls(c *ui.Context, p state.DownloadPresentation) {
 	ui.Scroll(c.Key("download-content")).Grow(1).MinHeight(0).FillWidth().Scrollbars(true).Children(func() {
 		ui.Column(c).FillWidth().Gap(downloadGap).Children(func() {
-			ui.Text(c, p.StageText).FontSize(downloadTitleSize).FontWeight(600).TextColor(s.tone())
+			ui.Text(c, p.StageText).FontSize(downloadBodySize).FontWeight(600).TextColor(s.tone())
+			freshInstall := s.Model.Download.Kind == state.DownloadInstall
+			formatBytes := megabytes
+			if freshInstall {
+				formatBytes = installSize
+			}
+			if root := s.Model.Managed.Root; freshInstall {
+				ui.Text(c, "安装目录："+root).Tooltip(root).FontSize(downloadCaptionSize).TextColor(muted).SingleLine()
+			}
 			if p.OfferVersion != "" {
 				ui.Text(c, "可用正式版本："+p.OfferVersion).FontSize(downloadCaptionSize).TextColor(muted)
 			}
@@ -39,18 +58,20 @@ func (s *Shell) downloadPanel(c *ui.Context) {
 				}
 				ui.Text(c, label).FontSize(downloadBodySize).SingleLine()
 			}
-			ui.Text(c, p.RouteText).FontSize(downloadBodySize).LineHeight(1.5)
+			if !freshInstall {
+				ui.Text(c, p.RouteText).FontSize(downloadBodySize).LineHeight(1.5)
+			}
 			if p.CacheRoot != "" {
 				ui.Text(c, "下载暂存目录："+p.CacheRoot).FontSize(downloadCaptionSize).TextColor(muted).LineHeight(1.5)
 			}
 			if p.StorageNote != "" {
 				ui.Text(c, p.StorageNote).FontSize(downloadCaptionSize).TextColor(s.tone()).LineHeight(1.5)
 			}
-			if p.Version != "" && (s.Model.Download.Stage == state.StagePlanning || s.Model.Download.Stage == state.StageNetwork) {
+			if !freshInstall && p.Version != "" && (s.Model.Download.Stage == state.StagePlanning || s.Model.Download.Stage == state.StageNetwork) {
 				ui.Text(c, "下载总量："+megabytes(p.Total)+" · 其中补丁 "+megabytes(p.PatchBytes)).FontSize(downloadCaptionSize).TextColor(muted).LineHeight(1.5)
 			}
-			if p.Version != "" {
-				ui.Text(c, "本地复用："+megabytes(p.Reused)).FontSize(downloadCaptionSize).TextColor(muted)
+			if p.Version != "" && (!freshInstall || p.Reused > 0) {
+				ui.Text(c, "本地复用："+formatBytes(p.Reused)).FontSize(downloadCaptionSize).TextColor(muted)
 			}
 			if p.FallbackNote {
 				ui.Text(c, "部分文件改为完整下载").FontSize(downloadCaptionSize).TextColor(s.tone())
@@ -60,9 +81,9 @@ func (s *Shell) downloadPanel(c *ui.Context) {
 			}
 			switch s.Model.Download.Stage {
 			case state.StageNetwork:
-				ui.Text(c, megabytes(p.Downloaded)+" / "+megabytes(p.Total)).FontSize(downloadBodySize)
+				ui.Text(c, formatBytes(p.Downloaded)+" / "+formatBytes(p.Total)).FontSize(downloadBodySize)
 				if p.ShowRate {
-					ui.Text(c, megabytes(p.Rate)+"/s").FontSize(downloadCaptionSize).TextColor(muted)
+					ui.Text(c, formatBytes(p.Rate)+"/s").FontSize(downloadCaptionSize).TextColor(muted)
 				} else if s.Model.Download.Phase == state.DownloadRunning {
 					ui.Text(c, "速度与剩余时间：计算中").FontSize(downloadCaptionSize).TextColor(muted)
 				}
@@ -101,9 +122,6 @@ func (s *Shell) downloadPanel(c *ui.Context) {
 			ui.Box(c).FillWidth().Height(1).Background(hairline)
 			button := func(key, label string, enabled bool, event state.EventKind) {
 				s.quietButton(c, key, label, !enabled).FillWidth().Height(downloadButtonHeight).OnClick(func() { s.Dispatch(state.Event{Kind: event}) })
-			}
-			if p.CanConfirm {
-				s.accentButton(c, "download-confirm", "确认并开始").FillWidth().Height(downloadButtonHeight).OnClick(func() { s.Dispatch(state.Event{Kind: state.DownloadConfirm}) })
 			}
 			if p.CanPause {
 				button("download-pause", "暂停下载", true, state.DownloadPause)
@@ -144,12 +162,9 @@ func (s *Shell) downloadPanel(c *ui.Context) {
 			if p.CanDiscard {
 				button("preload-discard", "清理预下载", true, state.PreloadDiscardRequest)
 			}
-			if s.Model.Managed.Root == "" {
-				s.quietButton(c, "download-locate", "定位游戏", false).FillWidth().Height(downloadButtonHeight).OnClick(func() { s.Dispatch(state.Event{Kind: state.InstallLocateRequest}) })
-				s.quietButton(c, "download-install-location", "选择安装目录", false).FillWidth().Height(downloadButtonHeight).OnClick(func() { s.Dispatch(state.Event{Kind: state.InstallLocateRequest, Enabled: true}) })
-			} else if s.Model.Download.Phase == state.DownloadIdle || s.Model.Download.Phase == state.DownloadDone {
+			if s.Model.Download.Phase == state.DownloadIdle || s.Model.Download.Phase == state.DownloadDone {
 				label := "检查游戏更新"
-				install := s.Model.Download.Kind == state.DownloadInstall && !s.Model.Download.Located
+				install := s.Model.Download.Kind == state.DownloadInstall && !s.Model.Download.Located && !s.Model.Download.Verified
 				if install {
 					label = "规划安装"
 				}
@@ -162,14 +177,21 @@ func (s *Shell) downloadPanel(c *ui.Context) {
 	})
 }
 
-func (s *Shell) downloadStatus(c *ui.Context) {
+func (s *Shell) downloadStatus(c *ui.Context, locateExisting bool) {
 	if !s.Model.NormalMode {
 		return
 	}
-	p := state.PresentDownload(s.Model)
+	bottom := downloadStatusBottom
 	label := "游戏下载与更新"
 	if s.Model.Download.Phase != state.DownloadIdle || s.Model.Download.Preload != state.PreloadStateUnavailable {
-		label = p.StageText
+		label = state.PresentDownload(s.Model).StageText
+		if locateExisting {
+			bottom -= downloadStatusHeight + locateActionGap
+		}
+	} else if locateExisting {
+		return
 	}
-	s.quietButton(c, "download-status", label, false).Absolute().Right(dockRight + actionHeight + menuGap).Bottom(downloadStatusBottom).Width(actionWidth).Height(downloadStatusHeight).OnClick(s.openDownloads)
+	s.quietButton(c, "download-status", label, false).Absolute().Right(dockRight + actionHeight + menuGap).Bottom(bottom).Width(actionWidth).Height(downloadStatusHeight).OnClick(func() {
+		s.Dispatch(state.Event{Kind: state.OpenHomeDownloads})
+	})
 }

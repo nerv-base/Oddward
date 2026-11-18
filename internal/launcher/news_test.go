@@ -95,7 +95,7 @@ func TestBoardReadsOnlyFromTheConnectedHome(t *testing.T) {
 	if _, fx := state.Reduce(away, state.Event{Kind: state.NewsRequested}); len(fx) != 0 {
 		t.Fatal("a background page must not read the feed")
 	}
-	open, _ := state.Reduce(state.Initial(), state.Event{Kind: state.OpenOverlay, Overlay: state.Settings})
+	open, _ := state.Reduce(state.Initial(), state.Event{Kind: state.OpenOverlay, Overlay: state.Scenarios})
 	if _, fx := state.Reduce(open, state.Event{Kind: state.NewsRequested}); len(fx) != 0 {
 		t.Fatal("a modal panel must not read the feed")
 	}
@@ -107,7 +107,7 @@ func TestOfficialBoardIsNotLabelledAsMockAndOpensNoBrowser(t *testing.T) {
 	s.Dispatch(state.Event{Kind: state.NewsLoaded, Token: s.Model.NewsRequest, Rows: state.ProjectNews(officialFeed())})
 	tt := ui.NewTester(s.View, 1280, 720)
 	tt.Frame()
-	if !tt.HasText("测试服维护公告") || !tt.HasText("OFFICIAL / 公告") {
+	if !tt.HasText("测试服维护公告") || tt.HasText("OFFICIAL / 公告") {
 		t.Fatal("the board must show the official announcement it read")
 	}
 	if tt.HasText("资讯示例") || tt.HasText("本地模拟资讯") || tt.HasText("模拟内容") {
@@ -128,7 +128,7 @@ func TestOfficialBoardIsNotLabelledAsMockAndOpensNoBrowser(t *testing.T) {
 	}
 	s.Dispatch(state.Event{Kind: state.DetailLoaded, Token: s.Model.DetailRequest, Body: "测试正文第一段。\n\n第二段。"})
 	tt.Frame()
-	if !tt.HasText("测试正文第一段。") || !tt.HasText("OFFICIAL · 官网公告") {
+	if !tt.HasText("测试正文第一段。") || !tt.HasText("官方公告") {
 		t.Fatal("the detail panel must show the official text")
 	}
 	if urls := tt.OpenedURLs(); len(urls) != 0 {
@@ -145,7 +145,7 @@ func TestBoardReportsFailureAndRetries(t *testing.T) {
 	s.Dispatch(state.Event{Kind: state.NewsFailed, Token: s.Model.NewsRequest, Message: "网络不可用"})
 	tt := ui.NewTester(s.View, 1280, 720)
 	tt.Frame()
-	if !tt.HasText("暂时无法获取官方公告") || !tt.HasText("获取失败") {
+	if !tt.HasText("暂时无法获取官方公告") {
 		t.Fatal("a failed read must say so instead of inventing announcements")
 	}
 	before := s.Model.NewsRequest

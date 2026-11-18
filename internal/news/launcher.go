@@ -23,6 +23,28 @@ const maxLauncherPage = 128 << 10
 // 月/日 and nothing else.
 var dateSpanPattern = regexp.MustCompile(`^([0-9]{1,2})/([0-9]{1,2})$`)
 
+var launcherLogoURL = regexp.MustCompile(`^https://yh\.wanmei\.com/images/launcher[0-9]{6}/logo\.png$`)
+
+// LogoAsset reads the original logo referenced by the official launcher page.
+func (c *Client) LogoAsset(ctx context.Context) ([]byte, error) {
+	page, err := c.get(ctx, c.origin()+LauncherPath, maxLauncherPage)
+	if err != nil {
+		return nil, err
+	}
+	doc, err := html.Parse(bytes.NewReader(page))
+	if err != nil {
+		return nil, err
+	}
+	for node := range doc.Descendants() {
+		if isElement(node, "img") && hasClass(node, "logo") {
+			if src := attr(node, "src"); launcherLogoURL.MatchString(src) {
+				return c.Image(ctx, src)
+			}
+		}
+	}
+	return nil, fmt.Errorf("%w: official launcher page has no logo", ErrImage)
+}
+
 // launcherFeed reads the official launcher's own news page and, independently,
 // its carousel. A carousel failure leaves Banners empty and preserves stories,
 // unless the caller canceled the whole operation.

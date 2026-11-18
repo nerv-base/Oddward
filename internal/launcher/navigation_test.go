@@ -34,7 +34,7 @@ func TestNavigationPreservesOperationAndRejectsHiddenActions(t *testing.T) {
 }
 
 func TestNavigationGuardsAndScenarioReturn(t *testing.T) {
-	for _, overlay := range []state.Overlay{state.Settings, state.Scenarios, state.About, state.ConfirmQuit} {
+	for _, overlay := range []state.Overlay{state.LaunchNotice, state.Scenarios, state.ConfirmQuit} {
 		m := settled(state.Ready)
 		m.Overlay = overlay
 		next, fx := state.Reduce(m, state.Event{Kind: state.Navigate, Page: state.CheckIn})
@@ -88,7 +88,7 @@ func TestNativeFeatureNavigationKeepsPagesHonest(t *testing.T) {
 			if _, ok := tt.AccessByRole(ui.RoleButton, "启动游戏"); ok {
 				t.Fatal("hidden game CTA must not remain accessible")
 			}
-			if err := tt.Click("设置"); err != nil {
+			if err := tt.Click("启动器设置"); err != nil {
 				t.Fatalf("settings must remain available off home (%s at %v, bar=%v): %v", item.label, size, s.Model.Bar, err)
 			}
 			tt.Key(0, ui.KeyEscape)
@@ -124,7 +124,7 @@ func TestNativeSpineCellsKeepAccessibleTargets(t *testing.T) {
 		t.Cleanup(s.Dispose)
 		tt := ui.NewTester(s.View, size[0], size[1])
 
-		for _, label := range []string{"游戏主页", "抽卡分析", "自动签到", "设置"} {
+		for _, label := range []string{"游戏主页", "抽卡分析", "自动签到", "启动器设置"} {
 			a, ok := tt.AccessByRole(ui.RoleButton, label)
 			if !ok || a.Bounds.X != (railWidth-tileSize)/2 || a.Bounds.W != tileSize || a.Bounds.H != tileSize || !a.Focusable {
 				t.Fatalf("rail must retain a centered tile target: %s %+v", label, a)
@@ -133,7 +133,7 @@ func TestNativeSpineCellsKeepAccessibleTargets(t *testing.T) {
 				t.Fatalf("icon %s lost its tooltip: %+v", label, a)
 			}
 		}
-		settings, _ := tt.AccessByRole(ui.RoleButton, "设置")
+		settings, _ := tt.AccessByRole(ui.RoleButton, "启动器设置")
 		if settings.Bounds.Y+settings.Bounds.H < float32(size[1])-24 {
 			t.Fatal("settings must anchor at the full-height rail bottom")
 		}
@@ -191,7 +191,7 @@ func TestNativeColdWhiteSwitchRetainsHitAreaAndSemantics(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	t.Cleanup(s.Dispose)
 	tt := ui.NewTester(s.View, 1280, 720)
-	if clickFailed(tt, "设置") {
+	if clickFailed(tt, "启动器设置") {
 		t.Fatal("settings unavailable")
 	}
 	sw, ok := tt.AccessByRole(ui.RoleSwitch, "减少动态效果")

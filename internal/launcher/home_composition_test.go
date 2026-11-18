@@ -22,11 +22,11 @@ func TestNativeSingleGameHasFunctionalNavigation(t *testing.T) {
 			t.Fatalf("functional rail entry missing: %s %+v", label, item)
 		}
 	}
-	settings, ok := tt.Find("设置")
+	settings, ok := tt.Find("启动器设置")
 	if !ok || settings.X > 30 || settings.Y < 550 {
 		t.Fatalf("settings must anchor the bottom of the functional rail, got %+v", settings)
 	}
-	if clickFailed(tt, "设置") || clickFailed(tt, "关于") || s.Model.Overlay != state.About {
+	if clickFailed(tt, "启动器设置") || clickFailed(tt, "关于") || (s.Model.Page != state.LauncherSettings || s.Model.Overlay != state.NoOverlay || s.Model.SettingsSection != state.SettingsAbout) {
 		t.Fatal("about must remain available through settings")
 	}
 }
@@ -94,7 +94,7 @@ func TestNativeSwitchChangeDispatchesOnlyOnce(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	t.Cleanup(s.Dispose)
 	tt := ui.NewTester(s.View, 1024, 631)
-	if clickFailed(tt, "设置") || clickFailed(tt, "减少动态效果") {
+	if clickFailed(tt, "启动器设置") || clickFailed(tt, "减少动态效果") {
 		t.Fatal("switch unavailable")
 	}
 	for range 3 {

@@ -248,7 +248,7 @@ func (s *Shell) updatePanel(c *ui.Context) {
 // versionSetting is the settings row with the version and a manual check.
 func (s *Shell) versionSetting(c *ui.Context) {
 	u := s.Model.Update
-	version, status := "开发构建", u.Note
+	version, status := "开发版本", ""
 	if u.Current != "" {
 		version = "v" + u.Current
 	}
@@ -267,10 +267,12 @@ func (s *Shell) versionSetting(c *ui.Context) {
 	ui.Row(c.Key("version-setting")).FillWidth().Gap(10).Children(func() {
 		ui.Column(c).Grow(1).Gap(3).Children(func() {
 			ui.Row(c).Gap(8).Children(func() {
-				ui.Text(c, "Oddward").FontSize(14)
-				mono(c, version, 12).TextColor(muted)
+				ui.Text(c, "当前版本").FontSize(14)
+				ui.Text(c, version).FontSize(13).TextColor(muted)
 			})
-			ui.Text(c, status).FontSize(11).TextColor(muted).SingleLine().Tooltip(status)
+			if status != "" {
+				ui.Text(c, status).FontSize(12).TextColor(muted).LineHeight(1.5)
+			}
 		})
 		if state.UpdateOffered(u.Phase) {
 			s.quietButton(c, "open-update", "查看更新", false).Height(32).Padding(0, 12).OnClick(func() {

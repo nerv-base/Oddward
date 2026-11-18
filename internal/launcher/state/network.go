@@ -22,8 +22,14 @@ type NetworkState struct {
 	Request      uint64
 }
 
-// NetworkSettings is the network panel.
-const NetworkSettings Overlay = 41
+// LauncherSettingsSection identifies a category on the launcher settings page.
+type LauncherSettingsSection uint8
+
+const (
+	SettingsGeneral LauncherSettingsSection = iota
+	SettingsNetwork
+	SettingsAbout
+)
 
 const (
 	// NetworkApply carries the edited form: Index proxy mode, Path proxy URL,
@@ -39,16 +45,13 @@ const SaveNetwork EffectKind = 240
 func reduceNetwork(m Model, e Event) (Model, []Effect, bool) {
 	n := &m.Network
 	switch e.Kind {
-	case OpenOverlay:
-		if e.Overlay != NetworkSettings {
-			return m, nil, false
-		}
-		if m.Overlay != ConfirmQuit {
-			m.Overlay, n.Saved, n.Error = NetworkSettings, false, ""
-			m.Bar, m.OverlayFromMedia = MediaBarHidden, false
+	case SelectLauncherSettingsSection:
+		section := LauncherSettingsSection(e.Index)
+		if m.Page == LauncherSettings && m.Overlay == NoOverlay && section <= SettingsAbout {
+			m.SettingsSection = section
 		}
 	case NetworkApply:
-		if n.Saving || e.Index > ProxyCustom {
+		if m.Page != LauncherSettings || m.Overlay != NoOverlay || m.SettingsSection != SettingsNetwork || n.Saving || e.Index > ProxyCustom {
 			break
 		}
 		n.Request++

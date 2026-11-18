@@ -40,19 +40,19 @@ const (
 	Home Page = iota
 	WishAnalysis
 	CheckIn
+	LauncherSettings
 )
 
 type Overlay uint8
 
 const (
 	NoOverlay Overlay = iota
-	Settings
 	Scenarios
-	About
 	ConfirmQuit
 	NewsDetails
 	LocateGame
 	LaunchNotice
+	GameSettings
 )
 
 type Media uint8
@@ -130,6 +130,9 @@ const (
 	CheckInStatusRequested
 	CheckInStatusLoaded
 	CheckInStatusFailed
+	SettingsBack
+	SelectLauncherSettingsSection
+	SelectGameSettingsSection
 )
 
 type Event struct {
@@ -273,7 +276,11 @@ type Model struct {
 	BarDeadline         time.Time
 	Flow                Flow
 	Overlay             Overlay
-	OverlayFromMedia    bool
+	SettingsSection     LauncherSettingsSection
+	GameSettingsSection GameSettingsSection
+	settingsReturnPage  Page
+	settingsFromMedia   bool
+	locateFromSettings  bool
 	Media               Media
 	MediaPreview        bool
 	Token               uint64
@@ -285,16 +292,19 @@ type Model struct {
 	SystemReducedMotion bool
 	Closed              bool
 	Download            DownloadState
+	HomeDownloadsOpen   bool
 	Update              UpdateState
 	Network             NetworkState
 	Login               LoginState
 
 	// The official announcement board.
-	News        NewsStatus
-	NewsRows    NewsRow
-	NewsBanners BannerRow
-	NewsError   string
-	NewsRequest uint64
+	News           NewsStatus
+	NewsRows       NewsRow
+	NewsBanners    BannerRow
+	NewsError      string
+	NewsRequest    uint64
+	NewsFromCache  bool
+	NewsRefreshing bool
 
 	// The opened announcement.
 	Detail        NewsStatus
@@ -364,17 +374,17 @@ func Reduce(m Model, e Event) (Model, []Effect) {
 	}
 	switch e.Kind {
 	case RevealMediaBar:
-		if m.Overlay == NoOverlay {
+		if m.Overlay == NoOverlay && m.Page != LauncherSettings {
 			m.Bar = MediaBarVisible
 			m.BarDeadline = time.Time{}
 		}
 	case HideMediaBar:
-		if m.Overlay == NoOverlay {
+		if m.Overlay == NoOverlay && m.Page != LauncherSettings {
 			m.Bar = MediaBarDismissed
 			m.BarDeadline = time.Time{}
 		}
 	case MediaBarActivity:
-		if m.Overlay != NoOverlay {
+		if m.Overlay != NoOverlay || m.Page == LauncherSettings {
 			break
 		}
 		occupied := e.Enabled || e.Focused
@@ -422,6 +432,10 @@ func Reduce(m Model, e Event) (Model, []Effect) {
 		if m.Overlay == NoOverlay && m.Page == Home && e.Index < m.NewsBanners.Count && e.Index < 8 {
 			m.NewsIndex, m.NewsItem = e.Index, 0
 		}
+	case AdvanceNewsBanner:
+		if m.Page == Home && m.Overlay == NoOverlay && m.News == NewsPresent && !m.ReducedMotion && !m.SystemReducedMotion && m.NewsBanners.Count > 1 {
+			m.NewsIndex = (m.NewsIndex + 1) % min(m.NewsBanners.Count, uint8(len(m.NewsBanners.Titles)))
+		}
 	case OpenOfficial:
 		if m.Overlay == NoOverlay && m.Page == Home && e.Index <= 2 {
 			m.NewsItem = e.Index
@@ -448,26 +462,43 @@ func Reduce(m Model, e Event) (Model, []Effect) {
 	case NewsRequested:
 		// Only the connected home board reads the public site, and only when
 		// no modal panel is in front of it.
-		if m.Page != Home || m.Overlay != NoOverlay || (m.News == NewsPending && m.NewsRequest != 0) {
+		if m.Page != Home || m.Overlay != NoOverlay || m.NewsRefreshing {
 			break
 		}
 		m.NewsRequest++
-		m.News, m.NewsError = NewsPending, ""
+		m.NewsRefreshing, m.NewsError = true, ""
+		if !m.NewsFromCache {
+			m.News = NewsPending
+		}
 		return m, []Effect{{Kind: FetchNews, Token: m.NewsRequest}}
+	case NewsCacheLoaded:
+		if e.Token != m.NewsRequest || !m.NewsRefreshing || m.News == NewsPresent || (e.Rows.Empty() && e.Banners.Count == 0) {
+			break
+		}
+		m.News, m.NewsFromCache, m.NewsRows, m.NewsBanners = NewsPresent, true, e.Rows, e.Banners
+		m.NewsIndex, m.NewsItem = 0, 0
 	case NewsLoaded:
-		// A response to an earlier request is dropped, not merged.
 		if e.Token != m.NewsRequest {
 			break
+		}
+		m.NewsRefreshing = false
+		if m.NewsFromCache && e.Rows.Empty() && e.Banners.Count == 0 {
+			break
+		}
+		if !m.NewsFromCache || m.NewsBanners != e.Banners {
+			m.NewsIndex = 0
 		}
 		m.News, m.NewsError, m.NewsRows, m.NewsBanners = NewsPresent, "", e.Rows, e.Banners
-		m.NewsIndex, m.NewsItem = 0, 0
+		m.NewsFromCache, m.NewsItem = false, 0
 	case NewsFailed:
-		// A response to an earlier request replaced by a later one is dropped.
 		if e.Token != m.NewsRequest {
 			break
 		}
-		m.News, m.NewsError, m.NewsRows, m.NewsBanners = NewsUnavailable, e.Message, NewsRow{}, BannerRow{}
-		m.NewsIndex, m.NewsItem = 0, 0
+		m.NewsRefreshing, m.NewsError = false, e.Message
+		if !m.NewsFromCache {
+			m.News, m.NewsRows, m.NewsBanners = NewsUnavailable, NewsRow{}, BannerRow{}
+			m.NewsIndex, m.NewsItem = 0, 0
+		}
 	case DetailLoaded:
 		if e.Token != m.DetailRequest || m.Overlay != NewsDetails {
 			break
@@ -479,24 +510,53 @@ func Reduce(m Model, e Event) (Model, []Effect) {
 		}
 		m.Detail, m.DetailError, m.DetailBody = NewsUnavailable, e.Message, ""
 	case Navigate:
-		if m.Overlay == NoOverlay && e.Page <= CheckIn {
+		if m.Overlay == NoOverlay && e.Page <= LauncherSettings && e.Page != m.Page {
+			if e.Page == LauncherSettings {
+				m.settingsReturnPage, m.settingsFromMedia = m.Page, e.FromMedia
+				m.SettingsSection = SettingsGeneral
+				m.Bar, m.BarDeadline = MediaBarHidden, time.Time{}
+				if !m.Network.Saving {
+					m.Network.Saved, m.Network.Error = false, ""
+				}
+			}
 			m.Page = e.Page
 		}
 	case OpenOverlay:
-		if (e.Overlay >= Settings && e.Overlay <= About || e.Overlay == LocateGame) && m.Overlay != ConfirmQuit {
-			if m.Overlay == NoOverlay {
-				m.OverlayFromMedia = e.FromMedia && (m.Bar == MediaBarVisible || m.Bar == MediaBarLeaving)
+		gameSettings := e.Overlay == GameSettings && m.NormalMode && m.Page == Home && m.Overlay == NoOverlay
+		if (e.Overlay == Scenarios || e.Overlay == LocateGame || gameSettings) && m.Overlay != ConfirmQuit {
+			if gameSettings {
+				m.GameSettingsSection = GameSettingsBasic
 			}
+			m.locateFromSettings = e.Overlay == LocateGame && m.Overlay == GameSettings
 			m.Overlay = e.Overlay
 		}
-	case Dismiss:
-		m.Overlay = NoOverlay
-		if m.OverlayFromMedia {
-			m.OverlayFromMedia = false
-			m.Bar = MediaBarVisible
-			m.BarDeadline = time.Time{}
-			return m, []Effect{{Kind: FocusMediaConsole}}
+	case SelectGameSettingsSection:
+		if section := GameSettingsSection(e.Index); m.GameSettingsVisible() && section <= GameSettingsDownloads {
+			m.Overlay = GameSettings
+			m.GameSettingsSection = section
+			m.locateFromSettings = false
 		}
+	case Dismiss, SettingsBack:
+		if e.Kind == SettingsBack {
+			if m.Overlay == LocateGame && m.locateFromSettings {
+				m.Overlay = GameSettings
+				m.locateFromSettings = false
+				break
+			}
+			if m.Overlay != LocateGame {
+				break
+			}
+		}
+		if m.Overlay == NoOverlay && m.Page == LauncherSettings {
+			m.Page = m.settingsReturnPage
+			if m.settingsFromMedia {
+				m.settingsFromMedia = false
+				m.Bar, m.BarDeadline = MediaBarVisible, time.Time{}
+				return m, []Effect{{Kind: FocusMediaConsole}}
+			}
+		}
+		m.Overlay = NoOverlay
+		m.locateFromSettings = false
 	case Primary:
 		if m.Overlay != NoOverlay || m.Page != Home {
 			break
@@ -521,7 +581,6 @@ func Reduce(m Model, e Event) (Model, []Effect) {
 			break
 		}
 		m.Overlay = NoOverlay
-		m.OverlayFromMedia = false
 		wasNormal := m.NormalMode
 		if m.NormalMode {
 			m.Managed.Request++
@@ -533,6 +592,7 @@ func Reduce(m Model, e Event) (Model, []Effect) {
 			}
 		}
 		m.NormalMode = false
+		m.HomeDownloadsOpen = false
 		m.Page = Home
 		m.Progress = 0
 		m.Error = ""
@@ -601,12 +661,12 @@ func Reduce(m Model, e Event) (Model, []Effect) {
 			return closeNow()
 		}
 	case ToggleMotion:
-		if m.Overlay == NoOverlay || m.Overlay == Settings {
+		if m.Overlay == NoOverlay {
 			m.Motion = !m.Motion
 			syncMedia()
 		}
 	case ToggleReducedMotion:
-		if m.Overlay == Settings {
+		if m.Page == LauncherSettings && m.Overlay == NoOverlay {
 			m.ReducedMotion = !m.ReducedMotion
 			syncMedia()
 		}
@@ -649,11 +709,12 @@ func Active(f Flow) bool {
 }
 
 type Presentation struct {
-	Primary  string
-	Status   string
-	Detail   string
-	Enabled  bool
-	Progress bool
+	Primary        string
+	Status         string
+	Detail         string
+	Enabled        bool
+	Progress       bool
+	LocateExisting bool
 }
 
 func Present(m Model) Presentation {
@@ -679,27 +740,27 @@ func Present(m Model) Presentation {
 	var p Presentation
 	switch m.Flow {
 	case Checking:
-		p = Presentation{"正在检查", "正在准备", "读取演示环境…", false, false}
+		p = Presentation{Primary: "正在检查", Status: "正在准备", Detail: "读取演示环境…"}
 	case NotInstalled:
-		p = Presentation{"下载游戏", "尚未安装", "选择下载后体验完整交互流程", true, false}
+		p = Presentation{Primary: "下载游戏", Status: "尚未安装", Detail: "选择下载后体验完整交互流程", Enabled: true}
 	case Ready:
-		p = Presentation{"启动游戏", "准备就绪", "下一站，海特洛。", true, false}
+		p = Presentation{Primary: "启动游戏", Status: "准备就绪", Detail: "下一站，海特洛。", Enabled: true}
 	case UpdateAvailable:
-		p = Presentation{"更新游戏", "发现新版本", "演示更新包 · 不会下载真实文件", true, false}
+		p = Presentation{Primary: "更新游戏", Status: "发现新版本", Detail: "演示更新包 · 不会下载真实文件", Enabled: true}
 	case Downloading:
-		p = Presentation{"暂停下载", "正在下载", "演示传输 · 不写入游戏目录", true, true}
+		p = Presentation{Primary: "暂停下载", Status: "正在下载", Detail: "演示传输 · 不写入游戏目录", Enabled: true, Progress: true}
 	case Paused:
-		p = Presentation{"继续下载", "下载已暂停", "进度已保留，随时继续", true, true}
+		p = Presentation{Primary: "继续下载", Status: "下载已暂停", Detail: "进度已保留，随时继续", Enabled: true, Progress: true}
 	case Verifying:
-		p = Presentation{"正在校验", "检查文件完整性", "演示校验 · 请稍候", false, true}
+		p = Presentation{Primary: "正在校验", Status: "检查文件完整性", Detail: "演示校验 · 请稍候", Progress: true}
 	case Launching:
-		p = Presentation{"正在启动", "正在连接城市", "演示启动 · 不会运行游戏进程", false, false}
+		p = Presentation{Primary: "正在启动", Status: "正在连接城市", Detail: "演示启动 · 不会运行游戏进程"}
 	case Running:
-		p = Presentation{"游戏运行中", "旅程已开始", "演示状态 · 可在状态预览中返回", false, false}
+		p = Presentation{Primary: "游戏运行中", Status: "旅程已开始", Detail: "演示状态 · 可在状态预览中返回"}
 	case Failed:
-		p = Presentation{"重试", "暂时无法继续", m.Error, true, false}
+		p = Presentation{Primary: "重试", Status: "暂时无法继续", Detail: m.Error, Enabled: true}
 	default:
-		p = Presentation{"不可用", "未知状态", "请重新打开启动器", false, false}
+		p = Presentation{Primary: "不可用", Status: "未知状态", Detail: "请重新打开启动器"}
 	}
 	return p
 }

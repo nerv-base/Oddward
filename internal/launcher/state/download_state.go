@@ -129,7 +129,14 @@ const (
 	downloadOperationDiscard
 	downloadOperationCacheLocate
 )
-const DownloadDetails Overlay = 42
+
+const OverlayInstallPath Overlay = 43
+
+const (
+	OpenInstallPath EventKind = 257 + iota
+	OpenHomeDownloads
+	CloseHomeDownloads
+)
 const (
 	DownloadRequest EventKind = 260 + iota
 	DownloadPlanned
@@ -291,12 +298,26 @@ func downloadCanReplan(d DownloadState) bool {
 func downloadCanDiscoverPreload(d DownloadState) bool {
 	return d.Preload == PreloadStateUnavailable || d.Preload == PreloadStateAvailable || d.Preload == PreloadStateStale || d.Preload == PreloadStateFailed || d.Preload == PreloadStateCompleted
 }
+func pendingGameInstall(d DownloadState) bool {
+	return d.Kind == DownloadInstall && !d.Located && !d.Verified
+}
+
+// CanSelectInstallPath allows a validated draft to be replaced before starting.
+func CanSelectInstallPath(m Model) bool {
+	d := m.Download
+	return m.Overlay == OverlayInstallPath && (!downloadUnfinished(d) || d.AwaitingConfirmation && !downloadBusy(d))
+}
+
 func downloadLaunchBlocked(m Model) bool {
 	return downloadMutation(m.Download) || m.Download.Phase == DownloadRecoveryRequired || m.Download.OfficialRunning || m.Download.GameRunning
 }
 
 func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 	if next, fx, handled := reduceDownloadCache(m, e); handled {
+		if m.Overlay == OverlayInstallPath && e.Kind == DownloadCacheLocated && e.Path != "" &&
+			m.Download.operation == downloadOperationCacheLocate && next.Download.operation == downloadOperationNone {
+			return reduceDownload(next, Event{Kind: DownloadRequest, Enabled: true})
+		}
 		return next, fx, true
 	}
 	if next, fx, handled := reduceDownloadOffer(m, e); handled {
@@ -307,13 +328,47 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 	}
 	d := &m.Download
 	recognized := e.Kind >= DownloadRequest && e.Kind <= DownloadRestored
-	if e.Kind == OpenOverlay && e.Overlay == DownloadDetails {
-		if m.Overlay != ConfirmQuit {
-			m.Overlay = DownloadDetails
+	switch e.Kind {
+	case OpenHomeDownloads:
+		if m.NormalMode && m.Page == Home && m.Overlay == NoOverlay {
+			m.HomeDownloadsOpen = true
 			m.Bar = MediaBarHidden
-			m.OverlayFromMedia = false
 		}
 		return m, nil, true
+	case OpenInstallPath:
+		if m.NormalMode && m.Page == Home && m.Overlay == NoOverlay && m.Managed.Root == "" &&
+			!downloadUnfinished(*d) && !ManagedBusy(m.Managed.Phase) && !ManagedActive(m.Managed.Phase) {
+			m.Overlay = OverlayInstallPath
+			m.HomeDownloadsOpen = false
+			m.Bar = MediaBarHidden
+		}
+		return m, nil, true
+	case CloseHomeDownloads:
+		m.HomeDownloadsOpen = false
+		return m, nil, true
+	}
+	if m.Overlay == OverlayInstallPath {
+		switch e.Kind {
+		case OpenOverlay:
+			return m, nil, true
+		case Dismiss, RequestQuit:
+			m.Overlay = NoOverlay
+			d.Request++
+			d.operation = downloadOperationNone
+			d.locateInstall = false
+			d.Phase, d.Stage = DownloadIdle, StageIdle
+			d.AwaitingConfirmation, d.SpaceShort = false, false
+			if m.Managed.Root != "" {
+				m.Managed.Root, m.Managed.Phase = "", ManagedUnlocated
+			}
+			d.CacheRoot, d.cacheInstallRoot = "", ""
+			d.Note, d.Error = "", ""
+			if e.Kind == RequestQuit {
+				next, fx := Reduce(m, e)
+				return next, fx, true
+			}
+			return m, nil, true
+		}
 	}
 	if e.Kind == RequestQuit && downloadUnfinished(*d) {
 		m.Overlay = ConfirmQuit
@@ -325,12 +380,12 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		d.Request++
 		return m, []Effect{{Kind: EffectDownloadPause, Token: d.Request, Path: m.Managed.Root}, {Kind: CancelOperation}, {Kind: CloseWindow}}, true
 	}
-	if e.Kind == ManagedAcceptLaunch && downloadLaunchBlocked(m) {
+	if e.Kind == ManagedAcceptLaunch && (downloadLaunchBlocked(m) || pendingGameInstall(*d)) {
 		return m, nil, true
 	}
 	if e.Kind == Primary && downloadLaunchBlocked(m) {
 		if m.Page == Home && m.Overlay == NoOverlay && d.Phase == DownloadRecoveryRequired {
-			m.Overlay = DownloadDetails
+			m.HomeDownloadsOpen = true
 		}
 		return m, nil, true
 	}
@@ -396,7 +451,7 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 	}
 	switch e.Kind {
 	case DownloadRequest:
-		if downloadUnfinished(*d) && !downloadCanReplan(*d) || m.Managed.Root == "" || DownloadNetworkBlocked(m) != "" {
+		if m.Overlay == OverlayInstallPath && !e.Enabled || downloadUnfinished(*d) && !downloadCanReplan(*d) || m.Managed.Root == "" || DownloadNetworkBlocked(m) != "" {
 			break
 		}
 		kind := DownloadUpdate
@@ -497,6 +552,11 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		if d.Kind == DownloadPreload {
 			k = EffectPreloadRun
 			d.Preload = PreloadStateDownloading
+		}
+		if m.Overlay == OverlayInstallPath {
+			m.Overlay = NoOverlay
+			m.HomeDownloadsOpen = true
+			return m, []Effect{{Kind: SaveManagedSettings, Token: m.Managed.Request, Path: m.Managed.Root}, {Kind: k, Token: d.Request, Path: m.Managed.Root}}, true
 		}
 		return effect(k)
 	case DownloadStarted, PreloadStarted:
@@ -711,7 +771,10 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 			d.Current, d.Verified = e.CurrentVersion, e.Enabled
 		}
 	case InstallLocateRequest, InstallAdoptRequest, InstallVerifyRequest:
-		if downloadUnfinished(*d) || m.NormalMode && (ManagedBusy(m.Managed.Phase) || ManagedActive(m.Managed.Phase)) {
+		choosingDraft := m.Overlay == OverlayInstallPath && e.Kind == InstallLocateRequest && e.Enabled
+		if m.Overlay == OverlayInstallPath && (!choosingDraft || !CanSelectInstallPath(m)) ||
+			!choosingDraft && downloadUnfinished(*d) ||
+			m.NormalMode && (ManagedBusy(m.Managed.Phase) || ManagedActive(m.Managed.Phase)) {
 			break
 		}
 		if e.Kind != InstallLocateRequest && m.Managed.Root == "" {
@@ -743,6 +806,8 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		if e.Path != "" {
 			root = e.Path
 		}
+		fresh := d.locateInstall
+		d.locateInstall = false
 		if root == "" {
 			break
 		}
@@ -752,12 +817,20 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		}
 		m.Managed.Root, m.Managed.Phase, m.Managed.Error = root, ManagedReady, ""
 		m.Managed.restoredConsentRoot = ""
-		d.Located, d.Verified = !d.locateInstall, e.Enabled && !d.locateInstall
-		if d.locateInstall {
+		d.Located, d.Verified = !fresh, e.Enabled && !fresh
+		if fresh {
 			d.Kind = DownloadInstall
 			d.Current = ""
+			if m.Overlay == OverlayInstallPath {
+				d.AwaitingConfirmation = false
+				if reason := DownloadNetworkBlocked(m); reason != "" {
+					d.Phase, d.Stage = DownloadIdle, StageIdle
+					d.Note = reason
+					break
+				}
+				return startPlan(DownloadInstall)
+			}
 		}
-		d.locateInstall = false
 		return m, []Effect{{Kind: SaveManagedSettings, Token: m.Managed.Request, Path: root}}, true
 	case InstallAdopted, InstallVerified:
 		expected := downloadOperationAdopt

@@ -82,7 +82,7 @@ func reduceUpdate(m Model, e Event) (Model, []Effect, bool) {
 		}
 		if UpdateOffered(u.Phase) && m.Overlay != ConfirmQuit {
 			m.Overlay = UpdateDetails
-			m.Bar, m.OverlayFromMedia = MediaBarHidden, false
+			m.Bar = MediaBarHidden
 		}
 	case UpdateCheck:
 		switch u.Phase {

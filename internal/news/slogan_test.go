@@ -3,6 +3,7 @@
 package news
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -83,6 +84,26 @@ func TestClientSloganReadsAndValidatesOfficialImage(t *testing.T) {
 	}
 	if imageHits.Load() != 1 {
 		t.Fatalf("image requests = %d, want one", imageHits.Load())
+	}
+}
+
+func TestClientLogoFollowsOfficialLauncherMarkup(t *testing.T) {
+	want := syntheticPNG(t, 11, 7)
+	p := newProbe(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.RequestURI() {
+		case LauncherPath:
+			w.Write([]byte(`<img src="https://example.com/unused/https://yh.wanmei.com/images/launcher111111/logo.png"><img class="logo" src="https://yh.wanmei.com/images/launcher209912/logo.png" />`))
+		case "/images/launcher209912/logo.png":
+			w.Write(want)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	p.client.HTTP = rewriteHTTPClient(p.client.HTTP, p.server.URL)
+	p.client.ImageHosts = append(p.client.ImageHosts, "yh.wanmei.com")
+	got, err := p.client.LogoAsset(context.Background())
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("official launcher logo: got %d bytes, error %v", len(got), err)
 	}
 }
 

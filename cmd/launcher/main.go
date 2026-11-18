@@ -166,8 +166,8 @@ func main() {
 				log.Print("background unavailable: local file not found")
 			}
 		}
-		if s.Player == nil {
-			s.Dispatch(state.Event{Kind: state.MediaFailed})
+		if !*demo && *background == "" && *poster == "" {
+			s.BackgroundSource = system.NewLauncherBackground(filepath.Join(filepath.Dir(cachePath), "cache", "launcher-media"), network)
 		}
 		options := launcherWindowOptions()
 		options.Content = ui.View(s.View)
@@ -232,7 +232,7 @@ func main() {
 		s.RequestFrame = w.Invalidate
 		feed := news.NewClient()
 		feed.HTTP.Transport = network
-		s.Source = feed
+		s.Source = system.NewLauncherNews(feed, filepath.Join(filepath.Dir(cachePath), "cache", "news"))
 		images, err := system.NewWishImages(filepath.Join(filepath.Dir(cachePath), "cache", "gamemedia"), feed.HTTP)
 		if err != nil {
 			log.Printf("wish item images unavailable: %v", err)

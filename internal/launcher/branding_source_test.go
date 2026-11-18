@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"image"
+	"image/color"
 	"image/png"
 	"sync/atomic"
 	"testing"
@@ -21,6 +22,7 @@ import (
 type brandingStub struct {
 	stubSource
 	image       []byte
+	logo        []byte
 	sloganCalls atomic.Int32
 	version     news.VersionName
 	sloganErr   error
@@ -34,6 +36,8 @@ func (s *brandingStub) SloganAsset(context.Context, news.Slogan) ([]byte, news.S
 	}
 	return s.image, news.Slogan{CoverCode: "cover261105", URL: "https://yh.wanmei.com/images/cover261105/slogan.png", ETag: `"v1"`, MD5: "synthetic"}, nil
 }
+
+func (s *brandingStub) LogoAsset(context.Context) ([]byte, error) { return s.logo, nil }
 
 func (s *brandingStub) VersionName(context.Context) (string, string, string, error) {
 	if s.versionErr != nil {
@@ -68,6 +72,60 @@ func TestShellRefreshesBrandingOffThread(t *testing.T) {
 	frameUntil(t, tt, func() bool { return s.BrandingVersion.Name == "致电，空想迷数" && s.Slogan != nil })
 	if stub.sloganCalls.Load() != 1 {
 		t.Fatalf("slogan reads = %d, want one", stub.sloganCalls.Load())
+	}
+}
+
+func TestShellShowsOfficialLogoEvenIfVersionNewsFails(t *testing.T) {
+	stub := &brandingStub{logo: brandingTestPNG(t, 0x7f), versionErr: errors.New("version news unavailable")}
+	s := NewShell(settled(state.Ready))
+	defer s.Dispose()
+	s.Source = stub
+	tt := ui.NewTester(s.View, 1280, 720)
+	frameUntil(t, tt, func() bool { return !s.brandingRetryAt.IsZero() })
+	if _, ok := tt.Find("异环官方标志"); !ok || s.Logo == nil {
+		t.Fatal("the official logo must display independently of version news")
+	}
+}
+
+func TestFetchedLogoPreservesItsOriginalColorsAndAlpha(t *testing.T) {
+	picture := image.NewNRGBA(image.Rect(0, 0, 12, 4))
+	for y := range 4 {
+		for x := range 8 {
+			alpha := uint8(255)
+			if x >= 4 {
+				alpha = 128
+			}
+			picture.SetNRGBA(x, y, color.NRGBA{R: 10, G: 20, B: 30, A: alpha})
+		}
+	}
+	var data bytes.Buffer
+	if err := png.Encode(&data, picture); err != nil {
+		t.Fatal(err)
+	}
+	s := NewShell(settled(state.Ready))
+	defer s.Dispose()
+	tt := ui.NewTester(s.View, 1280, 720)
+	before := tt.Image()
+	s.Source = &brandingStub{logo: data.Bytes()}
+	frameUntil(t, tt, func() bool { return s.Logo != nil })
+	r, ok := tt.Find("异环官方标志")
+	if !ok {
+		t.Fatal("official logo not rendered")
+	}
+	y := int(r.Y + r.H/2)
+	frame := tt.Image()
+	if got, want := frame.RGBAAt(int(r.X+r.W/6), y), (color.RGBA{R: 10, G: 20, B: 30, A: 255}); got != want {
+		t.Fatalf("opaque logo should retain its source color, got %v, want %v", got, want)
+	}
+	x := int(r.X + r.W/2)
+	back, half := before.RGBAAt(x, y), frame.RGBAAt(x, y)
+	want := (10 + int(back.R)) / 2
+	if difference := int(half.R) - want; difference < -3 || difference > 3 {
+		t.Fatalf("translucent logo should keep alpha, got %v over %v", half, back)
+	}
+	x = int(r.X + r.W*5/6)
+	if got, want := frame.RGBAAt(x, y), before.RGBAAt(x, y); got != want {
+		t.Fatalf("transparent logo pixel should leave background visible, got %v, want %v", got, want)
 	}
 }
 

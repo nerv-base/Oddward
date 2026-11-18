@@ -20,9 +20,8 @@ func networkForm(n state.NetworkState) NetworkForm {
 	return NetworkForm{Proxy: n.Proxy, ProxyURL: n.ProxyURL, Mirror: n.Mirror, MirrorPrefix: n.MirrorPrefix}
 }
 
-func (s *Shell) openNetworkSettings() {
-	s.NetworkForm = networkForm(s.Model.Network)
-	s.Dispatch(state.Event{Kind: state.OpenOverlay, Overlay: state.NetworkSettings})
+func (s *Shell) selectSettingsSection(section state.LauncherSettingsSection) {
+	s.Dispatch(state.Event{Kind: state.SelectLauncherSettingsSection, Index: uint8(section)})
 }
 
 func (s *Shell) networkPanel(c *ui.Context) {
@@ -48,7 +47,7 @@ func (s *Shell) networkPanel(c *ui.Context) {
 		})
 		switch form.Proxy {
 		case state.ProxySystem:
-			ui.Text(c, "使用 Windows「设置 › 网络 › 代理」中的手动代理。不读取自动配置脚本 (PAC)。").FontSize(12).TextColor(muted).LineHeight(1.6)
+			ui.Text(c, "使用 Windows 手动代理设置。").FontSize(12).TextColor(muted).LineHeight(1.6)
 		case state.ProxyDirect:
 			ui.Text(c, "所有请求直接连接，忽略系统代理。").FontSize(12).TextColor(muted).LineHeight(1.6)
 		case state.ProxyCustom:
@@ -59,9 +58,8 @@ func (s *Shell) networkPanel(c *ui.Context) {
 			caption := ui.Text(c, "GitHub 加速").FontSize(15).FontWeight(500).Grow(1)
 			s.formSwitch(c, "mirror-setting", caption, &form.Mirror, n.Saving)
 		})
-		ui.Text(c, "通过第三方镜像前缀下载启动器更新。更新清单会验签，文件会校验哈希。").FontSize(12).TextColor(muted).LineHeight(1.6)
+		ui.Text(c, "通过第三方镜像下载启动器更新。").FontSize(12).TextColor(muted).LineHeight(1.6)
 		input("mirror-prefix", "镜像前缀", "https://gh-proxy.com/", &form.MirrorPrefix, !form.Mirror)
-		ui.Text(c, "保存后应用代理和镜像设置。").FontSize(12).TextColor(muted).LineHeight(1.6)
 		switch {
 		case n.Error != "":
 			ui.Text(c, n.Error).FontSize(12).TextColor(warning).LineHeight(1.5)

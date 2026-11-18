@@ -79,8 +79,8 @@ func TestNativeConsoleIsFullWidthAndHasItsOwnBottomLane(t *testing.T) {
 				t.Fatalf("missing working console action %s", label)
 			}
 		}
-		if clickFailed(tt, "背景设置") || s.Model.Overlay != state.Settings {
-			t.Fatal("background settings must enter existing reducer overlay")
+		if clickFailed(tt, "背景设置") || s.Model.Page != state.LauncherSettings || s.Model.Overlay != state.NoOverlay {
+			t.Fatal("background settings must navigate to the launcher settings page")
 		}
 		if _, ok := tt.AccessByRole(ui.RoleToolbar, "背景播放控制"); ok {
 			t.Fatal("console must yield to settings")
@@ -117,7 +117,7 @@ func TestNativeConsoleRestoresKeyboardFocusAfterSettings(t *testing.T) {
 	tt.Key(0, ui.KeyTab)
 	tt.Key(0, ui.KeyTab)
 	tt.Key(0, ui.KeySpace)
-	if s.Model.Overlay != state.Settings {
+	if s.Model.Page != state.LauncherSettings || s.Model.Overlay != state.NoOverlay {
 		t.Fatal("keyboard background settings did not open")
 	}
 	tt.Advance(300 * time.Millisecond) // Let the modal entrance become interactive.

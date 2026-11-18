@@ -59,10 +59,10 @@ func TestMediaBarEscapeAndModalDoNotImmediatelyReopen(t *testing.T) {
 	if m.Bar != state.MediaBarVisible {
 		t.Fatal("next genuine pointer enter must work")
 	}
-	m, _ = state.Reduce(m, state.Event{Kind: state.OpenOverlay, Overlay: state.Settings})
+	m, _ = state.Reduce(m, state.Event{Kind: state.Navigate, Page: state.LauncherSettings})
 	m, _ = state.Reduce(m, state.Event{Kind: state.RevealMediaBar})
 	if m.Bar != state.MediaBarHidden {
-		t.Fatal("modal must suppress media bar")
+		t.Fatal("launcher settings must suppress the home media bar")
 	}
 }
 
@@ -119,7 +119,7 @@ func TestNativeMediaBarHidesAfterMouseLeavesAndYieldsToModal(t *testing.T) {
 	}
 	tt.Move(600, 719)
 	tt.Key(0, ui.KeyF6)
-	if clickFailed(tt, "设置") {
+	if clickFailed(tt, "启动器设置") {
 		t.Fatal("bar intercepts unrelated navigation")
 	}
 	tt.Key(0, ui.KeyF6)

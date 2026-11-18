@@ -398,11 +398,8 @@ func TestCheckInAutoWaitsForTheLaunch(t *testing.T) {
 	}
 	waitCheckIn(t, tt, func() bool {
 		_, signs := fake.counts()
-		return signs == 1
+		return signs == 1 && s.Model.CheckIn.Phase[state.CheckGame] == state.CheckInDone
 	})
-	if s.Model.CheckIn.Phase[state.CheckGame] != state.CheckInDone {
-		t.Fatalf("the armed task must be signed by the launch, got %v", s.Model.CheckIn.Phase[state.CheckGame])
-	}
 	if s.Model.CheckIn.Phase[state.CheckCommunity] != state.CheckInReady {
 		t.Fatalf("a disabled switch must stay untouched, got %v", s.Model.CheckIn.Phase[state.CheckCommunity])
 	}

@@ -21,7 +21,6 @@ const (
 	NewsFailedDetail    = "网络或官网暂时不可用，可稍后重试"
 	NewsEmptyHeadline   = "官网暂无公告"
 	NewsEmptyDetail     = "公告发布后会显示在这里"
-	NewsOfficialNote    = "正文来自官网公开公告页面，仅用于本窗口阅读；不会打开外部网站。"
 )
 
 // projectNews maps the official feed onto the model's comparable projection:

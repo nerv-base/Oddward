@@ -32,8 +32,11 @@ func TestLauncherWindowOptionsFixedSize(t *testing.T) {
 	if o.DisableMove || o.DisableMinimize || o.DisableClose {
 		t.Error("fixed size must preserve normal moving, minimizing and closing")
 	}
-	if o.Title != "Oddward · 异环" || o.TitleBarStyle != mygo.TitleBarHidden || !o.HideWindowButtons || o.BackgroundColor != "#0D1218" {
-		t.Errorf("native launcher chrome changed unexpectedly: Title=%q, TitleBarStyle=%q, HideWindowButtons=%v, BackgroundColor=%q", o.Title, o.TitleBarStyle, o.HideWindowButtons, o.BackgroundColor)
+	if o.Title != "Oddward" {
+		t.Errorf("desktop window title = %q, want Oddward", o.Title)
+	}
+	if o.TitleBarStyle != mygo.TitleBarHidden || !o.HideWindowButtons || o.BackgroundColor != "#0D1218" {
+		t.Errorf("native launcher chrome changed unexpectedly: TitleBarStyle=%q, HideWindowButtons=%v, BackgroundColor=%q", o.TitleBarStyle, o.HideWindowButtons, o.BackgroundColor)
 	}
 	if o.Content != nil {
 		t.Error("Content must remain unset for main to attach the native shell")

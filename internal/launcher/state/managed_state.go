@@ -104,6 +104,7 @@ func reduceManaged(m Model, e Event) (Model, []Effect, bool) {
 		p.Downloaded, p.Total = 0, 0
 		m.Progress = 0
 		m.Overlay = NoOverlay
+		m.HomeDownloadsOpen = false
 		// The user asked to start the game, so the daily check-in may run now
 		// (when its switch is on). It is one more effect: the launch path never
 		// waits on it and a failed launch does not cancel it.
@@ -114,8 +115,10 @@ func reduceManaged(m Model, e Event) (Model, []Effect, bool) {
 			return m, nil, true
 		}
 		if p.Root == "" {
-			m.Overlay = LocateGame
-			return m, nil, true
+			return reduceDownload(m, Event{Kind: OpenInstallPath})
+		}
+		if pendingGameInstall(m.Download) {
+			return reduceDownload(m, Event{Kind: OpenHomeDownloads})
 		}
 		if !p.RiskAccepted {
 			m.Overlay = LaunchNotice
@@ -288,7 +291,7 @@ func managedPresentation(m Model) (Presentation, bool) {
 	if p.Error != "" {
 		detail = p.Error
 	}
-	out := Presentation{Primary: "定位游戏", Status: "尚未定位", Detail: detail, Enabled: true}
+	out := Presentation{Primary: "下载游戏", Detail: detail, Enabled: true}
 	switch p.Phase {
 	case ManagedLoading:
 		out.Primary, out.Status, out.Enabled = "读取设置", "正在准备", false
@@ -303,8 +306,15 @@ func managedPresentation(m Model) (Presentation, bool) {
 	case ManagedUnobserved:
 		out.Primary, out.Status, out.Enabled = "状态待确认", "已保留启动锁", false
 	default:
-		if p.Root != "" {
-			out.Primary, out.Status = "启动游戏", "已定位游戏"
+		switch {
+		case p.Root == "":
+			out.LocateExisting = true
+		case pendingGameInstall(m.Download):
+			if m.Overlay == NoOverlay && (m.Download.Phase != DownloadIdle || m.Download.Stage == StageNetwork) {
+				out.Primary, out.Status = "下载进度", PresentDownload(m).StageText
+			}
+		default:
+			out.Primary = "启动游戏"
 			if p.Phase == ManagedFailed {
 				out.Primary = "重试启动"
 			}

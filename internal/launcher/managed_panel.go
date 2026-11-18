@@ -3,7 +3,6 @@
 package launcher
 
 import (
-	"path/filepath"
 	"strings"
 
 	"github.com/egoist/mygo/ui"
@@ -11,36 +10,57 @@ import (
 	"github.com/nerv-base/Oddward/internal/launcher/state"
 )
 
+func (s *Shell) gameBasicInformation(c *ui.Context) {
+	ui.Text(c, "游戏目录").FontSize(gameSettingsHeadingSize).FontWeight(600)
+	ui.Row(c.Key("current-game-path")).FillWidth().Gap(downloadGap).Children(func() {
+		root := s.Model.Managed.Root
+		path := root
+		if path == "" {
+			path = "未选择目录"
+		}
+		ui.Row(c.Key("game-path-value")).Grow(1).MinWidth(0).Height(downloadButtonHeight).Padding(0, downloadGap).AlignItems(ui.Center).
+			Radius(gameSettingsTabRadius).Border(1, hairline).Tooltip(root).Children(func() {
+			ui.Text(c, path).Grow(1).MinWidth(0).FontSize(downloadBodySize).SingleLine()
+		})
+		s.quietButton(c, "locate-game", "定位游戏", false).Shrink(0).Height(downloadButtonHeight).OnClick(func() {
+			s.ManagedPathInput = root
+			s.Dispatch(state.Event{Kind: state.OpenOverlay, Overlay: state.LocateGame})
+		})
+	})
+	ui.Text(c, "定位已有安装时只读检查游戏文件。").FontSize(downloadCaptionSize).TextColor(muted).LineHeight(1.5)
+}
+
 func (s *Shell) managedLocationPanel(c *ui.Context) {
 	p := s.Model.Managed
 	locked := state.ManagedBusy(p.Phase) || state.ManagedActive(p.Phase)
-	ui.Column(c.Key("managed-location")).Grow(1).MinHeight(0).FillWidth().Gap(14).Children(func() {
-		ui.Text(c, "选择已有的异环游戏").FontSize(17).FontWeight(600)
-		ui.Text(c, "只读检查已有安装，不移动、不修复、不重新下载游戏。").FontSize(13).TextColor(muted).LineHeight(1.5)
-		ui.Text(c, "可选择游戏根目录、Client、WindowsNoEditor，或粘贴 HTGame.exe 的完整路径。").FontSize(12).TextColor(muted).LineHeight(1.5)
-		ui.TextInput(c.Key("managed-game-path"), &s.ManagedPathInput).Label("游戏目录").FillWidth().Height(40).Padding(9, 10).Radius(10).Border(1, hairline).Background(ui.RGBA(255, 255, 255, .05)).TextColor(paper).FontSize(13).Placeholder("选择或粘贴已有游戏目录").ReadOnly(locked).Disabled(locked)
-		if s.quietButton(c, "managed-browse", "浏览游戏目录", locked).FillWidth().Height(42).Clicked() {
-			s.Dispatch(state.Event{Kind: state.ManagedBrowse})
-		}
-		if p.Root != "" {
-			ui.Text(c, "当前目录："+p.Root).FontSize(12).TextColor(muted).LineHeight(1.5)
-		}
-		if p.Phase == state.ManagedLocating {
-			ui.Text(c, "正在只读检查所选目录…").FontSize(13).TextColor(paper)
-		}
-		if p.Error != "" {
-			ui.Text(c, p.Error).FontSize(12).TextColor(warning).LineHeight(1.5)
-		}
-		ui.Box(c).Grow(1)
-		ui.Row(c).FillWidth().Gap(8).Children(func() {
-			if s.quietButton(c, "managed-location-back", "返回", false).Grow(1).Height(40).Clicked() {
-				s.Dispatch(state.Event{Kind: state.Dismiss})
+	ui.Scroll(c.Key("managed-location")).Grow(1).MinHeight(0).FillWidth().Scrollbars(true).Children(func() {
+		ui.Column(c).FillWidth().Gap(sheetGap).Children(func() {
+			ui.Text(c, "选择已有的异环游戏").FontSize(17).FontWeight(600)
+			ui.Text(c, "只读检查已有安装，不移动、不修复、不重新下载游戏。").FontSize(13).TextColor(muted).LineHeight(1.5)
+			ui.Text(c, "可选择游戏根目录、Client、WindowsNoEditor，或粘贴 HTGame.exe 的完整路径。").FontSize(12).TextColor(muted).LineHeight(1.5)
+			ui.TextInput(c.Key("managed-game-path"), &s.ManagedPathInput).Label("游戏目录").FillWidth().Height(40).Padding(9, 10).Radius(10).Border(1, hairline).Background(ui.RGBA(255, 255, 255, .05)).TextColor(paper).FontSize(13).Placeholder("选择或粘贴已有游戏目录").ReadOnly(locked).Disabled(locked)
+			if s.quietButton(c, "managed-browse", "浏览游戏目录", locked).FillWidth().Clicked() {
+				s.Dispatch(state.Event{Kind: state.ManagedBrowse})
 			}
-			if s.quietButton(c, "managed-adopt", "定位此目录", locked || strings.TrimSpace(s.ManagedPathInput) == "").Grow(1).Height(40).Clicked() {
-				s.Dispatch(state.Event{Kind: state.ManagedSelectPath, Path: strings.TrimSpace(s.ManagedPathInput)})
+			if p.Root != "" {
+				ui.Text(c, "当前目录："+p.Root).FontSize(12).TextColor(muted).SingleLine().Tooltip(p.Root)
+			}
+			if p.Phase == state.ManagedLocating {
+				ui.Text(c, "正在只读检查所选目录…").FontSize(13).TextColor(paper)
+			}
+			ui.Text(c, "结构检查不等于版本完整性或登录兼容性验证。仅保存目录记录。").FontSize(11).TextColor(muted).LineHeight(1.5)
+			if p.Error != "" {
+				ui.Text(c, p.Error).FontSize(12).TextColor(warning).LineHeight(1.5)
 			}
 		})
-		ui.Text(c, "结构检查不等于版本完整性或登录兼容性验证。仅保存目录记录。").FontSize(11).TextColor(muted).LineHeight(1.5)
+	})
+	ui.Row(c.Key("managed-location-actions")).FillWidth().Gap(downloadGap).Children(func() {
+		if s.quietButton(c, "managed-location-back", "返回", false).Grow(1).Height(downloadButtonHeight).Clicked() {
+			s.Dispatch(state.Event{Kind: state.SettingsBack})
+		}
+		if s.quietButton(c, "managed-adopt", "定位此目录", locked || strings.TrimSpace(s.ManagedPathInput) == "").Grow(1).Height(downloadButtonHeight).Clicked() {
+			s.Dispatch(state.Event{Kind: state.ManagedSelectPath, Path: strings.TrimSpace(s.ManagedPathInput)})
+		}
 	})
 }
 
@@ -63,10 +83,10 @@ func (s *Shell) managedNoticePanel(c *ui.Context) {
 	})
 }
 
-func (s *Shell) managedActionNote(c *ui.Context) {
+func (s *Shell) managedActionNote(c *ui.Context, presentation state.Presentation) {
 	p := s.Model.Managed
 	bottom := float32(homeBottom + actionHeight + 14)
-	if state.Present(s.Model).Progress {
+	if presentation.Progress {
 		bottom += deckHeight + deckGap
 	}
 	ui.Column(c.Key("managed-status")).Absolute().Right(dockRight).Bottom(bottom).Width(actionWidth).Gap(6).Children(func() {
@@ -82,25 +102,15 @@ func (s *Shell) managedActionNote(c *ui.Context) {
 		if text != "" {
 			ui.Text(c, text).FontSize(12).TextColor(color).LineHeight(1.5)
 		}
-		ui.Row(c).FillWidth().Gap(6).Children(func() {
-			label := "尚未定位游戏"
-			if p.Root != "" {
-				label = "已定位 · " + filepath.Base(p.Root)
-			}
-			ui.Text(c, label).Tooltip(p.Root).FontSize(11).TextColor(muted).Grow(1).SingleLine()
-			if s.Model.Login.Phase == state.LoginWaiting {
-				if s.quietButton(c, "login-reopen", "打开登录窗口", false).Height(28).Clicked() {
-					s.Dispatch(state.Event{Kind: state.LoginReopen})
-				}
-			}
-			if p.Phase == state.ManagedPreparing || p.Phase == state.ManagedLocating {
-				if s.quietButton(c, "managed-cancel", "取消准备", false).Height(28).Clicked() {
-					s.Dispatch(state.Event{Kind: state.ManagedCancel})
-				}
-			} else if s.quietButton(c, "managed-location-menu", "游戏目录", state.ManagedActive(p.Phase)).Height(28).Clicked() {
-				s.ManagedPathInput = p.Root
-				s.Dispatch(state.Event{Kind: state.OpenOverlay, Overlay: state.LocateGame})
-			}
-		})
+		if s.Model.Login.Phase == state.LoginWaiting {
+			s.quietButton(c, "login-reopen", "打开登录窗口", false).Height(28).AlignSelf(ui.End).OnClick(func() {
+				s.Dispatch(state.Event{Kind: state.LoginReopen})
+			})
+		}
+		if p.Phase == state.ManagedPreparing || p.Phase == state.ManagedLocating {
+			s.quietButton(c, "managed-cancel", "取消准备", false).Height(28).AlignSelf(ui.End).OnClick(func() {
+				s.Dispatch(state.Event{Kind: state.ManagedCancel})
+			})
+		}
 	})
 }

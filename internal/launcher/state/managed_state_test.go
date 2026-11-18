@@ -13,15 +13,27 @@ func hasManagedEffect(fx []Effect, kind EffectKind) bool {
 	return false
 }
 
-func TestNormalPrimaryRoutesToLocateRatherThanFakeLaunch(t *testing.T) {
+func TestNormalPrimaryOpensInstallPathWithoutStartingWork(t *testing.T) {
 	m := normalFixture(ManagedUnlocated)
 	m.Managed.Root = ""
-	if p := Present(m); p.Primary != "定位游戏" || !p.Enabled {
-		t.Fatalf("unlocated action = %+v", p)
+	if p := Present(m); p.Primary != "下载游戏" || !p.Enabled {
+		t.Errorf("unlocated action = %+v", p)
 	}
 	next, fx := Reduce(m, Event{Kind: Primary})
-	if next.Overlay != LocateGame || next.Flow != m.Flow || hasManagedEffect(fx, Simulate) {
-		t.Fatalf("missing game still fake-launches: %+v fx=%+v", next, fx)
+	if next.Overlay == NoOverlay || next.HomeDownloadsOpen || next.Flow != m.Flow || len(fx) != 0 {
+		t.Fatalf("unlocated primary should open an install dialog without starting work: overlay=%v fx=%+v", next.Overlay, fx)
+	}
+}
+
+func TestNormalPrimaryReturnsToDownloadsForUninstalledSelectedRoot(t *testing.T) {
+	m := normalFixture(ManagedReady)
+	m.Download.Kind = DownloadInstall
+	if p := Present(m); p.Primary != "下载游戏" || !p.Enabled || p.LocateExisting {
+		t.Fatalf("an empty installation directory must remain a download target: %+v", p)
+	}
+	next, fx := Reduce(m, Event{Kind: Primary})
+	if !next.HomeDownloadsOpen || next.Overlay != NoOverlay || len(fx) != 0 {
+		t.Fatalf("primary must reopen downloads without starting work, got overlay=%v effects=%+v", next.Overlay, fx)
 	}
 }
 
@@ -112,7 +124,7 @@ func TestNormalCancelInvalidatesPreparation(t *testing.T) {
 }
 
 func TestNormalModalAndWrongPageCannotStart(t *testing.T) {
-	for _, overlay := range []Overlay{Settings, NewsDetails, LocateGame, About} {
+	for _, overlay := range []Overlay{NewsDetails, LocateGame, GameSettings} {
 		m := normalFixture(ManagedReady)
 		m.Managed.RiskAccepted = true
 		m.Overlay = overlay

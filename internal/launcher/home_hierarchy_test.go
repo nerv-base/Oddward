@@ -75,7 +75,7 @@ func TestOfficialNewsIntentIsGuardedAndNeverOpensExternalSite(t *testing.T) {
 	if len(fx) != 1 || fx[0].Kind != state.FetchDetail || fx[0].Token != next.DetailRequest {
 		t.Fatalf("a story must ask for its own official text only: %+v", fx)
 	}
-	for _, overlay := range []state.Overlay{state.Settings, state.Scenarios, state.About, state.ConfirmQuit, state.NewsDetails} {
+	for _, overlay := range []state.Overlay{state.LaunchNotice, state.Scenarios, state.ConfirmQuit, state.NewsDetails} {
 		m.Overlay = overlay
 		next, fx = state.Reduce(m, state.Event{Kind: state.OpenOfficial})
 		if next != m || len(fx) != 0 {
@@ -95,7 +95,7 @@ func TestOfficialNewsIntentIsGuardedAndNeverOpensExternalSite(t *testing.T) {
 	if clickFailed(tt, "查看官方公告") || s.Model.Overlay != state.NewsDetails {
 		t.Fatal("the official cover is inaccessible")
 	}
-	if !tt.HasText("OFFICIAL · 官网公告") || tt.HasText("MOCK · 本地资讯示例") {
+	if _, ok := tt.AccessByRole(ui.RoleDialog, "官方公告"); !ok || tt.HasText("MOCK · 本地资讯示例") {
 		t.Fatal("the announcement must be identified as the official page, not as a mock")
 	}
 	if urls := tt.OpenedURLs(); len(urls) != 0 {

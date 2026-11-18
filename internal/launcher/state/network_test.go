@@ -6,8 +6,9 @@ import "testing"
 
 func TestNetworkPanelSavesThroughTheShell(t *testing.T) {
 	m := InitialNormal()
-	m, _ = Reduce(m, Event{Kind: OpenOverlay, Overlay: NetworkSettings})
-	if m.Overlay != NetworkSettings {
+	m, _ = Reduce(m, Event{Kind: Navigate, Page: LauncherSettings})
+	m, _ = Reduce(m, Event{Kind: SelectLauncherSettingsSection, Index: uint8(SettingsNetwork)})
+	if m.Page != LauncherSettings || m.Overlay != NoOverlay || m.SettingsSection != SettingsNetwork {
 		t.Fatal("panel did not open")
 	}
 	m, fx := Reduce(m, Event{Kind: NetworkApply, Index: ProxyCustom, Path: "socks5://127.0.0.1:7890", Enabled: true, Message: "https://gh-proxy.com/"})
@@ -27,7 +28,7 @@ func TestNetworkPanelSavesThroughTheShell(t *testing.T) {
 		t.Fatalf("failed: %+v", failed.Network)
 	}
 	saved, _ := Reduce(m, Event{Kind: NetworkSaved, Token: n.Request})
-	if saved.Network.Saving || !saved.Network.Saved || saved.Overlay != NetworkSettings {
+	if saved.Network.Saving || !saved.Network.Saved || saved.Page != LauncherSettings || saved.Overlay != NoOverlay || saved.SettingsSection != SettingsNetwork {
 		t.Fatalf("saved: %+v", saved.Network)
 	}
 	if bad, fx := Reduce(saved, Event{Kind: NetworkApply, Index: 9}); len(fx) != 0 || bad.Network.Proxy != ProxyCustom {

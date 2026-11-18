@@ -139,7 +139,7 @@ func TestRenderMockStateFrames(t *testing.T) {
 		}},
 		{"16-settings", func(s *Shell, tt *ui.Tester) {
 			loaded(s)
-			s.Dispatch(state.Event{Kind: state.OpenOverlay, Overlay: state.Settings})
+			s.Dispatch(state.Event{Kind: state.Navigate, Page: state.LauncherSettings})
 		}},
 		{"17-scenarios", func(s *Shell, tt *ui.Tester) {
 			loaded(s)
@@ -147,7 +147,8 @@ func TestRenderMockStateFrames(t *testing.T) {
 		}},
 		{"18-about", func(s *Shell, tt *ui.Tester) {
 			loaded(s)
-			s.Dispatch(state.Event{Kind: state.OpenOverlay, Overlay: state.About})
+			s.Dispatch(state.Event{Kind: state.Navigate, Page: state.LauncherSettings})
+			s.selectSettingsSection(state.SettingsAbout)
 		}},
 		{"19-confirm-quit", func(s *Shell, tt *ui.Tester) {
 			loaded(s)
@@ -273,12 +274,14 @@ func TestRenderMockStateFrames(t *testing.T) {
 		{"30-settings-version", func(s *Shell, _ *ui.Tester) {
 			loaded(s)
 			s.Model.Update = previewUpdate(state.SelfUpdateAvailable, 0)
-			s.Dispatch(state.Event{Kind: state.OpenOverlay, Overlay: state.Settings})
+			s.Dispatch(state.Event{Kind: state.Navigate, Page: state.LauncherSettings})
+			s.selectSettingsSection(state.SettingsAbout)
 		}},
 		{"31-network", func(s *Shell, _ *ui.Tester) {
 			loaded(s)
 			s.Model.Network = state.NetworkState{Proxy: state.ProxyCustom, ProxyURL: "socks5://127.0.0.1:7890", Mirror: true, MirrorPrefix: "https://gh-proxy.com/"}
-			s.openNetworkSettings()
+			s.Dispatch(state.Event{Kind: state.Navigate, Page: state.LauncherSettings})
+			s.selectSettingsSection(state.SettingsNetwork)
 		}},
 		{"32-launch-notice", func(s *Shell, _ *ui.Tester) {
 			loaded(s)

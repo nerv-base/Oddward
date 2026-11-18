@@ -92,8 +92,8 @@ func TestProgressFiniteMonotonicAndBounded(t *testing.T) {
 }
 func TestOverlayGuardsAndQuitConfirmation(t *testing.T) {
 	m := settled(Ready)
-	m, _ = Reduce(m, Event{Kind: OpenOverlay, Overlay: Settings})
-	if m.Overlay != Settings {
+	m, _ = Reduce(m, Event{Kind: OpenOverlay, Overlay: Scenarios})
+	if m.Overlay != Scenarios {
 		t.Fatal("settings not opened")
 	}
 	if send(m, Primary) != m {
@@ -140,7 +140,7 @@ func TestMediaIsIndependentAndSettingsAreGuarded(t *testing.T) {
 		t.Fatal("motion toggle crossed regions")
 	}
 	m = send(m, ToggleMotion)
-	m, _ = Reduce(m, Event{Kind: OpenOverlay, Overlay: Settings})
+	m, _ = Reduce(m, Event{Kind: Navigate, Page: LauncherSettings})
 	m = send(m, ToggleReducedMotion)
 	if m.AnimateBackground() {
 		t.Fatal("reduced motion should pause")
@@ -168,7 +168,7 @@ func TestMediaPausedCanResumeFromUserAndSystemPreferences(t *testing.T) {
 	if m.Media != MediaPlaying || !m.AnimateBackground() {
 		t.Fatal("clearing system preference must resume user-enabled motion")
 	}
-	m.Overlay = Settings
+	m, _ = Reduce(m, Event{Kind: Navigate, Page: LauncherSettings})
 	m = send(m, ToggleReducedMotion)
 	m = send(m, ToggleReducedMotion)
 	if m.Media != MediaPlaying || !m.AnimateBackground() {

@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"path/filepath"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
@@ -27,6 +28,65 @@ func TestNativeLaunchBlockAcrossAllFlows(t *testing.T) {
 			}
 			s.Dispose()
 		}
+	}
+}
+
+func TestNativeUnlocatedHomeHasSeparateDownloadAndLocateActions(t *testing.T) {
+	m := state.InitialNormal()
+	m.Managed.Phase = state.ManagedUnlocated
+	s := NewShell(m)
+	defer s.Dispose()
+	tt := ui.NewTester(s.View, 1024, 631)
+	const locateLabel = "定位游戏"
+	const promptLabel = "已下载游戏？点击"
+	if tt.HasText("尚未定位") || tt.HasText("尚未定位游戏") {
+		t.Error("the download and locate actions already describe what a first-time user can do")
+	}
+	download, downloadOK := tt.AccessByRole(ui.RoleButton, "下载游戏")
+	locate, locateOK := tt.AccessByRole(ui.RoleButton, locateLabel)
+	prompt, promptOK := tt.Find(promptLabel)
+	if !downloadOK || !locateOK || !promptOK || locate.Bounds.Y < download.Bounds.Y+download.Bounds.H ||
+		locate.Bounds.X < prompt.X+prompt.W || locate.Bounds.X+locate.Bounds.W > download.Bounds.X+download.Bounds.W {
+		t.Fatalf("locate link must follow the prompt, below download: download=%+v prompt=%+v locate=%+v", download, prompt, locate)
+	}
+	tt.ClickAt(prompt.X+prompt.W/2, prompt.Y+prompt.H/2)
+	if s.Model.Overlay != state.NoOverlay {
+		t.Fatal("clicking the prompt opened a panel")
+	}
+	if err := tt.Click("下载游戏"); err != nil || s.Model.Page != state.Home {
+		t.Fatalf("download action must stay on home: %v, overlay=%v, page=%v", err, s.Model.Overlay, s.Model.Page)
+	}
+	panel, found := tt.AccessByRole(ui.RoleDialog, "选择安装路径")
+	if !found || math.Abs(float64(panel.Bounds.X+panel.Bounds.W/2-512)) > 1 ||
+		math.Abs(float64(panel.Bounds.Y+panel.Bounds.H/2-315.5)) > 1 || panel.Bounds.W > 560 || panel.Bounds.H > 400 {
+		t.Fatalf("install path should open a compact, centered modal: %+v", panel.Bounds)
+	}
+	if _, ok := tt.AccessByRole(ui.RoleButton, "选择目录"); !ok {
+		t.Fatal("install dialog does not offer directory selection")
+	}
+	if !tt.HasText("尚未选择目录") {
+		t.Fatal("install dialog needs an honest empty path state")
+	}
+	if err := tt.Click("关闭安装路径"); err != nil || s.Model.Overlay != state.NoOverlay {
+		t.Fatalf("close install dialog: %v, overlay=%v", err, s.Model.Overlay)
+	}
+	if err := tt.Click(locateLabel); err != nil || s.Model.Overlay != state.LocateGame {
+		t.Fatalf("locate action: %v, overlay=%v", err, s.Model.Overlay)
+	}
+}
+
+func TestNativeLocatedHomeOmitsFirstRunCopy(t *testing.T) {
+	s := NewShell(normalFixture(state.ManagedReady))
+	defer s.Dispose()
+	tt := ui.NewTester(s.View, 1280, 720)
+	if _, ok := tt.AccessByRole(ui.RoleButton, "定位游戏"); ok || tt.HasText("已下载游戏？点击") {
+		t.Error("located home still offers the first-run locate action")
+	}
+	if tt.HasText("普通模式 · 官方公告") || tt.HasText("已定位游戏") || tt.HasText("已定位 · "+filepath.Base(s.Model.Managed.Root)) {
+		t.Error("normal home still shows redundant mode or directory status")
+	}
+	if _, ok := tt.AccessByRole(ui.RoleButton, "游戏目录"); ok {
+		t.Error("normal home duplicates the game directory action from game settings")
 	}
 }
 

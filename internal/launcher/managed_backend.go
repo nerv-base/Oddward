@@ -156,7 +156,6 @@ func (s *Shell) beginManagedLocate(token uint64, path string, pick bool) {
 				e.Message = state.BriefError(err)
 			} else {
 				e.Path = root
-				e.Message = "已定位游戏 · 结构检查通过"
 			}
 		}
 		postManaged(ctx, out, wake, managedResult{event: e})

@@ -120,6 +120,68 @@ func TestDownloadFreshInstallLocationIsExplicitAndDoesNotAdopt(t *testing.T) {
 		t.Fatal("fresh install planned as update")
 	}
 }
+func TestInstallDialogPlansSelectedPathBeforeExplicitStart(t *testing.T) {
+	m := normalFixture(ManagedUnlocated)
+	m.Managed.Root = ""
+	m, _ = Reduce(m, Event{Kind: Primary})
+	m, fx := Reduce(m, Event{Kind: InstallLocateRequest, Enabled: true})
+	if len(fx) != 1 || fx[0].Kind != EffectInstallLocate || !fx[0].Enabled {
+		t.Fatalf("select must request the fresh-install picker: %+v", fx)
+	}
+	const selected = `E:\SyntheticEmpty`
+	m, fx = Reduce(m, Event{Kind: InstallLocated, Token: m.Download.Request, Path: selected})
+	requireDownloadEffect(t, m, fx, EffectDownloadPlan)
+	if fx[0].Path != selected || m.Download.Kind != DownloadInstall || m.Download.Located || m.Download.Verified {
+		t.Fatalf("selection must plan only for the chosen fresh path: %+v %+v", m.Download, fx)
+	}
+	if _, early := Reduce(m, Event{Kind: DownloadConfirm}); len(early) != 0 {
+		t.Fatalf("start before planning emitted effects: %+v", early)
+	}
+	m, fx = Reduce(m, Event{Kind: DownloadPlanned, Token: m.Download.Request, Message: "v2", Total: 419, Needed: 804, Free: 1960})
+	if p := PresentDownload(m); len(fx) != 0 || !p.CanConfirm || p.Total != 419 || p.Needed != 804 || p.Free != 1960 {
+		t.Fatalf("plan must display backend facts and wait: %+v %+v", p, fx)
+	}
+	m, fx = Reduce(m, Event{Kind: DownloadConfirm})
+	if len(fx) != 2 || fx[0].Kind != SaveManagedSettings || fx[1].Kind != EffectDownloadRun || fx[1].Path != selected ||
+		m.Overlay != NoOverlay || !m.HomeDownloadsOpen {
+		t.Fatalf("explicit start must save the target, start the transfer and reveal Home progress: %+v %+v", m.Download, fx)
+	}
+}
+
+func TestInstallDialogDirectoryChangeAndDismissIgnoreStalePlans(t *testing.T) {
+	m := normalFixture(ManagedUnlocated)
+	m.Managed.Root = ""
+	m, _ = Reduce(m, Event{Kind: Primary})
+	m, _ = Reduce(m, Event{Kind: InstallLocateRequest, Enabled: true})
+	m, _ = Reduce(m, Event{Kind: InstallLocated, Token: m.Download.Request, Path: `E:\First`})
+	firstPlan := Event{Kind: DownloadPlanned, Token: m.Download.Request, Message: "v2", Total: 419, Needed: 804, Free: 600, Enabled: true}
+	m, _ = Reduce(m, firstPlan)
+	if p := PresentDownload(m); p.CanConfirm || !p.SpaceShort || !CanSelectInstallPath(m) {
+		t.Fatalf("a short volume must allow changing path but prevent starting: %+v", p)
+	}
+	m, _ = Reduce(m, Event{Kind: InstallLocateRequest, Enabled: true})
+	m, _ = Reduce(m, Event{Kind: InstallLocated, Token: m.Download.Request})
+	if m.Managed.Root != `E:\First` || !PresentDownload(m).SpaceShort {
+		t.Fatal("closing the native picker must preserve the previous plan")
+	}
+	m, _ = Reduce(m, Event{Kind: InstallLocateRequest, Enabled: true})
+	m, fx := Reduce(m, Event{Kind: InstallLocated, Token: m.Download.Request, Path: `F:\Second`})
+	requireDownloadEffect(t, m, fx, EffectDownloadPlan)
+	m, _ = Reduce(m, firstPlan)
+	if p := PresentDownload(m); p.AwaitingConfirmation || p.Total != 0 || m.Managed.Root != `F:\Second` {
+		t.Fatalf("pending second path must ignore first path's budget: %+v", p)
+	}
+	secondPlan := Event{Kind: DownloadPlanned, Token: m.Download.Request, Message: "v2", Total: 419, Needed: 804, Free: 1960}
+	m, fx = Reduce(m, Event{Kind: Dismiss})
+	if len(fx) != 0 || m.Managed.Root != "" || m.Overlay != NoOverlay || m.HomeDownloadsOpen {
+		t.Fatalf("dismiss must discard the draft without running work: overlay=%v root=%q effects=%+v", m.Overlay, m.Managed.Root, fx)
+	}
+	m, fx = Reduce(m, secondPlan)
+	if len(fx) != 0 || PresentDownload(m).AwaitingConfirmation {
+		t.Fatal("closed modal accepted a pending plan")
+	}
+}
+
 func TestPreloadCheckOnlyReconcileAndDiscardAreUserDriven(t *testing.T) {
 	m := downloadModel()
 	m, fx := Reduce(m, Event{Kind: PreloadCheckRequest})

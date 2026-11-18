@@ -30,6 +30,7 @@ func (s *Shell) navigation(c *ui.Context) {
 		{"wish-analysis", "抽卡分析", "\uE9D9", state.WishAnalysis},
 		{"check-in", "自动签到", "\uE787", state.CheckIn},
 	}
+	settingsSelected := s.Model.Page == state.LauncherSettings
 	current := 0
 	for i, item := range items {
 		if s.Model.Page == item.page {
@@ -41,10 +42,14 @@ func (s *Shell) navigation(c *ui.Context) {
 		s.railMark(c)
 		y := tileTop + float32(current)*(tileSize+tileGap) + 12
 		bar := ui.Box(c.Key("rail-indicator")).Absolute().Left(1).Width(3).Height(tileSize - 24).Radius(1.5).Background(tone).PassThrough()
-		if s.motion() {
-			y = bar.AnimateTo("y", y, ui.Animation{Duration: 260 * time.Millisecond})
+		if settingsSelected {
+			bar.Bottom(28)
+		} else {
+			if s.motion() {
+				y = bar.AnimateTo("y", y, ui.Animation{Duration: 260 * time.Millisecond})
+			}
+			bar.Top(y)
 		}
-		bar.Top(y)
 		ui.Column(c).Absolute().Left((railWidth - tileSize) / 2).Top(tileTop).Gap(tileGap).Children(func() {
 			for _, item := range items {
 				item := item
@@ -69,9 +74,13 @@ func (s *Shell) navigation(c *ui.Context) {
 				})
 			}
 		})
-		settings := ui.ButtonBase(c.Key("settings")).Label("设置").Tooltip("设置").Absolute().Left((railWidth-tileSize)/2).Bottom(16).
+		settings := ui.ButtonBase(c.Key("settings")).Label("启动器设置").Tooltip("启动器设置").Absolute().Left((railWidth-tileSize)/2).Bottom(16).
 			Size(tileSize, tileSize).Radius(12).Justify(ui.Center).TextColor(muted)
 		fill := ui.Transparent
+		if settingsSelected {
+			fill = ui.RGBA(255, 255, 255, .10)
+			settings.TextColor(paper).Current(ui.CurrentPage).Bind(&s.navigationFocus)
+		}
 		if settings.Hovered() {
 			fill = ui.RGBA(255, 255, 255, .08)
 			settings.TextColor(paper)
@@ -81,7 +90,7 @@ func (s *Shell) navigation(c *ui.Context) {
 		}
 		s.controlFill(settings, fill)
 		settings.Children(func() { glyph(c, "\uE713", 20) }).OnClick(func() {
-			s.Dispatch(state.Event{Kind: state.OpenOverlay, Overlay: state.Settings})
+			s.Dispatch(state.Event{Kind: state.Navigate, Page: state.LauncherSettings})
 		})
 	})
 }

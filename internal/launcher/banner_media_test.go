@@ -315,7 +315,7 @@ func TestBannerMediaKeepsArtworkButHidesActionsUnderModal(t *testing.T) {
 	call.reply <- bannerTestReply{data: bannerTestImage(t, 12, 6, false, shade)}
 	awaitBannerWake(t, wake)
 	tt.Frame()
-	s.Model.Overlay = state.Settings
+	s.Model.Overlay = state.LaunchNotice
 	tt.Frame()
 	assertBannerPixel(t, tt, shade)
 	for _, node := range tt.AccessAll() {

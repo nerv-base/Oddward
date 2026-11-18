@@ -142,6 +142,38 @@ func TestShellReadsTheAnnouncementBodyOnRequest(t *testing.T) {
 	}
 }
 
+type snapshotNewsSource struct {
+	*stubSource
+	cached news.Feed
+}
+
+func (s *snapshotNewsSource) CachedFeed(context.Context) (news.Feed, error) {
+	return s.cached, nil
+}
+
+func TestShellShowsCachedNewsDuringRefreshAndKeepsItOnFailure(t *testing.T) {
+	base := &stubSource{feed: officialFeed(), feedErr: errors.New("网络不可用"), hold: make(chan struct{})}
+	src := &snapshotNewsSource{stubSource: base, cached: officialFeed()}
+	s := NewShell(settled(state.Ready))
+	defer s.Dispose()
+	s.Source = src
+	tt := ui.NewTester(s.View, 1280, 720)
+	frameUntil(t, tt, func() bool { return tt.HasText("测试服维护公告") })
+	close(base.hold)
+	frameUntil(t, tt, func() bool { return !s.newsPending })
+	if !tt.HasText("测试服维护公告") || !tt.HasText("离线缓存") {
+		t.Fatalf("failed refresh erased or mislabeled the cache: %q", tt.Texts())
+	}
+	base.feedErr = nil
+	if err := tt.Click("重新获取公告"); err != nil {
+		t.Fatal(err)
+	}
+	frameUntil(t, tt, func() bool { return base.feeds.Load() == 2 && !s.newsPending })
+	if !tt.HasText("测试服维护公告") || tt.HasText("离线缓存") {
+		t.Fatalf("successful refresh did not replace the offline status: %q", tt.Texts())
+	}
+}
+
 func TestDisposeCancelsAnOutstandingRead(t *testing.T) {
 	stub := &stubSource{feed: officialFeed(), hold: make(chan struct{}), cancelled: make(chan struct{})}
 	s := NewShell(settled(state.Ready))

@@ -75,7 +75,7 @@ func TestNativeViewProjectsAndDispatches(t *testing.T) {
 func TestNativeSettingsAndEscape(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	tt := ui.NewTester(s.View, 1040, 640)
-	if clickFailed(tt, "设置") || s.Model.Overlay != state.Settings {
+	if clickFailed(tt, "启动器设置") || s.Model.Page != state.LauncherSettings || s.Model.Overlay != state.NoOverlay {
 		t.Fatal("settings inaccessible")
 	}
 	if clickFailed(tt, "减少动态效果") {
@@ -95,7 +95,8 @@ func TestNativeSettingsAndEscape(t *testing.T) {
 func TestNativeScenariosAndProgressControls(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	tt := ui.NewTester(s.View, 1280, 720)
-	if clickFailed(tt, "设置") || clickFailed(tt, "状态预览") || clickFailed(tt, "有可用更新") {
+	tt.Key(0, ui.KeyF8)
+	if clickFailed(tt, "有可用更新") {
 		t.Fatal("scenario picker inaccessible")
 	}
 	if s.Model.Flow != state.UpdateAvailable || clickFailed(tt, "更新游戏") {
@@ -125,7 +126,7 @@ func TestNativeScenariosAndProgressControls(t *testing.T) {
 func TestNativeQuitConfirmation(t *testing.T) {
 	s := NewShell(settled(state.Downloading))
 	tt := ui.NewTester(s.View, 1040, 640)
-	if clickFailed(tt, "关闭窗口") || !tt.HasText("离开前暂停一下？") {
+	if clickFailed(tt, "关闭窗口") || !tt.HasText("退出启动器？") {
 		t.Fatal("missing close guard")
 	}
 	if clickFailed(tt, "继续留在这里") || s.Model.Overlay != state.NoOverlay {
@@ -151,15 +152,15 @@ func TestNativeSystemReducedMotionIsProjected(t *testing.T) {
 		t.Fatal("clearing system preference should restore user preference and pause action")
 	}
 }
-func TestNativeSwitchSemanticsAndModalIsolation(t *testing.T) {
+func TestNativeSettingsSwitchSemanticsAndPageNavigation(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	t.Cleanup(s.Dispose)
 	tt := ui.NewTester(s.View, 1024, 631)
-	if clickFailed(tt, "设置") {
+	if clickFailed(tt, "启动器设置") {
 		t.Fatal("settings inaccessible")
 	}
 	if _, ok := tt.AccessByRole(ui.RoleButton, "启动游戏"); ok {
-		t.Fatal("background control leaked into modal accessibility tree")
+		t.Fatal("home control still visible on the settings page")
 	}
 	sw, ok := tt.AccessByRole(ui.RoleSwitch, "动态背景")
 	if !ok || !sw.Checked {
@@ -173,11 +174,12 @@ func TestNativeSwitchSemanticsAndModalIsolation(t *testing.T) {
 		t.Fatal("reduce motion switch not announced")
 	}
 	tt.Key(0, ui.KeyEscape)
-	a, ok := tt.AccessByRole(ui.RoleButton, "设置")
-	if !ok || !a.Focused {
-		t.Fatal("dismiss must restore opener focus")
+	a, ok := tt.AccessByRole(ui.RoleButton, "游戏主页")
+	if !ok || !a.Focused || s.Model.Page != state.Home {
+		t.Fatal("Escape must return to the previous page and focus its rail entry")
 	}
-	if clickFailed(tt, "设置") || clickFailed(tt, "状态预览") || clickFailed(tt, "重新检查") {
+	tt.Key(0, ui.KeyF8)
+	if clickFailed(tt, "重新检查") {
 		t.Fatal("last scenario inaccessible at minimum client size")
 	}
 }
@@ -188,8 +190,16 @@ func TestNativeHomeKeepsDeveloperToolsSecondary(t *testing.T) {
 	if _, ok := tt.AccessByRole(ui.RoleButton, "状态预览"); ok {
 		t.Fatal("developer scenarios must not occupy the game navigation")
 	}
-	if clickFailed(tt, "设置") || clickFailed(tt, "状态预览") || s.Model.Overlay != state.Scenarios {
-		t.Fatal("scenario lab must remain reachable through settings")
+	if clickFailed(tt, "启动器设置") {
+		t.Fatal("launcher settings unreachable")
+	}
+	if _, ok := tt.AccessByRole(ui.RoleButton, "状态预览"); ok {
+		t.Fatal("developer scenarios must stay out of regular settings")
+	}
+	tt.Key(0, ui.KeyEscape)
+	tt.Key(0, ui.KeyF8)
+	if s.Model.Overlay != state.Scenarios {
+		t.Fatal("scenario lab must remain reachable through F8")
 	}
 }
 

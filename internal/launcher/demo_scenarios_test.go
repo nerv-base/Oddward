@@ -47,7 +47,7 @@ func TestMockNewsSelectionIsBoundedAndModalGuarded(t *testing.T) {
 			t.Fatalf("unbounded news event accepted: %+v", event)
 		}
 	}
-	for _, overlay := range []state.Overlay{state.Settings, state.Scenarios, state.About, state.ConfirmQuit, state.NewsDetails} {
+	for _, overlay := range []state.Overlay{state.LaunchNotice, state.Scenarios, state.ConfirmQuit, state.NewsDetails} {
 		blocked := m
 		blocked.Overlay = overlay
 		for _, event := range []state.Event{{Kind: state.SelectNewsTab, Index: 2}, {Kind: state.SelectNewsStory, Index: 1}, {Kind: state.OpenOfficial, Index: 1}} {
@@ -137,7 +137,7 @@ func TestMockFailureUsesCurrentTokenAndExplicitDemoMessage(t *testing.T) {
 }
 
 func TestMockScenarioControlsCannotLeakThroughOtherOverlays(t *testing.T) {
-	for _, overlay := range []state.Overlay{state.NoOverlay, state.Settings, state.About, state.ConfirmQuit, state.NewsDetails} {
+	for _, overlay := range []state.Overlay{state.NoOverlay, state.LaunchNotice, state.ConfirmQuit, state.NewsDetails} {
 		m := settled(state.Downloading)
 		m.Overlay = overlay
 		for _, event := range []state.Event{{Kind: state.ToggleDemoClock}, {Kind: state.StepDemo}, {Kind: state.FailDemo}, {Kind: state.SelectMediaState, Media: state.MediaUnavailable}, {Kind: state.ResetMediaPreview}} {
@@ -205,9 +205,14 @@ func TestMockNativeScenarioControlsFitMinimumWindow(t *testing.T) {
 	t.Cleanup(s.Dispose)
 	s.Model.Overlay, s.Model.ReducedMotion = state.Scenarios, true
 	tt := ui.NewTester(s.View, 1024, 631)
+	panel, ok := tt.AccessByRole(ui.RoleDialog, "状态预览")
+	if !ok {
+		t.Fatal("preview dialog missing")
+	}
 	for _, label := range []string{"准备就绪", "尚未安装", "有可用更新", "正在下载", "下载已暂停", "正在校验", "正在启动", "游戏运行中", "连接失败", "重新检查", "媒体加载", "媒体播放", "媒体暂停", "媒体不可用", "退出媒体预览"} {
 		node, ok := tt.AccessByRole(ui.RoleButton, label)
-		if !ok || node.Bounds.X < 604 || node.Bounds.Y < 0 || node.Bounds.X+node.Bounds.W > 1024 || node.Bounds.Y+node.Bounds.H > 600 || node.Bounds.H < 28 {
+		b, p := node.Bounds, panel.Bounds
+		if !ok || b.X < p.X || b.Y < p.Y || b.X+b.W > p.X+p.W || b.Y+b.H > p.Y+p.H || b.H < 28 {
 			t.Fatalf("all states must be readable and reachable without clipping at minimum size: %s %+v", label, node)
 		}
 	}
@@ -260,7 +265,7 @@ func TestMockNativeMediaPreviewButtonsDispatchIndependentState(t *testing.T) {
 }
 
 func TestMockNativeF8DoesNotDismissUnrelatedModals(t *testing.T) {
-	for _, overlay := range []state.Overlay{state.Settings, state.About, state.ConfirmQuit, state.NewsDetails} {
+	for _, overlay := range []state.Overlay{state.LaunchNotice, state.ConfirmQuit, state.NewsDetails} {
 		m := settled(state.Ready)
 		m.Overlay, m.ReducedMotion = overlay, true
 		s := NewShell(m)
@@ -281,7 +286,7 @@ func TestMockNativeF8DoesNotDismissUnrelatedModals(t *testing.T) {
 
 func TestMockNativeSettingsMarksMediaPreview(t *testing.T) {
 	m := settled(state.Ready)
-	m.Media, m.MediaPreview, m.Overlay, m.ReducedMotion = state.MediaPlaying, true, state.Settings, true
+	m.Media, m.MediaPreview, m.Page, m.ReducedMotion = state.MediaPlaying, true, state.LauncherSettings, true
 	s := NewShell(m)
 	t.Cleanup(s.Dispose)
 	tt := ui.NewTester(s.View, 1024, 631)
@@ -298,9 +303,9 @@ func TestNativeNewsDetailsIsModalAndReturnsLocally(t *testing.T) {
 		s.Model.ReducedMotion = true
 		s.Dispatch(state.Event{Kind: state.OpenOfficial, Index: 2})
 		tt := ui.NewTester(s.View, 1024, 631)
-		if !tt.HasText("OFFICIAL · 官网公告") || !tt.HasText("正文来自官网公开公告页面，仅用于本窗口阅读；不会打开外部网站。") {
+		if _, ok := tt.AccessByRole(ui.RoleDialog, "官方公告"); !ok || len(tt.OpenedURLs()) != 0 {
 			s.Dispose()
-			t.Fatal("the panel must say where the text comes from and that it stays in this window")
+			t.Fatal("the official article must open in a local dialog")
 		}
 		if _, ok := tt.AccessByRole(ui.RoleButton, "启动游戏"); ok {
 			s.Dispose()

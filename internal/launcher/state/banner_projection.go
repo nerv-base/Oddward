@@ -31,4 +31,8 @@ func ProjectBanners(feed news.Feed) BannerRow {
 	return r
 }
 
-const OpenNewsBanner EventKind = 180
+const (
+	OpenNewsBanner EventKind = 180 + iota
+	NewsCacheLoaded
+	AdvanceNewsBanner
+)

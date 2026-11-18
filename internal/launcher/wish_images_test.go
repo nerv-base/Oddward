@@ -22,7 +22,7 @@ func TestWishImagesHiddenStatesDoNotQueueAndResume(t *testing.T) {
 			s.WishImages = wishImageFixture{err: errors.New("unavailable")}
 			switch hidden {
 			case "overlay":
-				s.Model.Overlay = state.Settings
+				s.Model.Overlay = state.LaunchNotice
 			case "closed":
 				s.Model.Closed = true
 			case "cancelled":

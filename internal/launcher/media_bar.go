@@ -13,12 +13,21 @@ import (
 const consoleHeight float32 = 60
 
 func (s *Shell) mediaBarShown() bool {
-	return s.Model.Overlay == state.NoOverlay && (s.Model.Bar == state.MediaBarVisible || s.Model.Bar == state.MediaBarLeaving)
+	return s.Model.Page != state.LauncherSettings && s.Model.Overlay == state.NoOverlay && (s.Model.Bar == state.MediaBarVisible || s.Model.Bar == state.MediaBarLeaving)
 }
 
 // Pointer and focus are observations, not playback commands. Hidden controls
 // never remain hit-testable, unlike Starward's opacity-only background strip.
 func (s *Shell) updateMediaBar(c *ui.Context, root ui.Element) {
+	if s.Model.Page == state.LauncherSettings {
+		if s.Model.Overlay == state.NoOverlay && c.Shortcut(0, ui.KeyEscape) {
+			s.Dispatch(state.Event{Kind: state.Dismiss})
+			if s.Model.Bar != state.MediaBarVisible {
+				s.navigationFocus.Focus()
+			}
+		}
+		return
+	}
 	_, y, inside := root.PointerPosition()
 	bounds := root.Bounds()
 	near := inside && bounds.H > 0 && y >= bounds.H-consoleHeight
@@ -79,7 +88,7 @@ func (s *Shell) mediaBar(c *ui.Context) {
 	bar.Children(func() {
 		ui.Row(c.Key("media-icons")).Absolute().Left(0).Right(0).Bottom(4).Height(32).Gap(4).Justify(ui.Center).Children(func() {
 			s.mediaControl(c)
-			iconButton(c, "background-settings", "背景设置", "\uE713", 32, func() { s.Dispatch(state.Event{Kind: state.OpenOverlay, Overlay: state.Settings, FromMedia: true}) }).Radius(16).TextColor(paper)
+			iconButton(c, "background-settings", "背景设置", "\uE713", 32, func() { s.Dispatch(state.Event{Kind: state.Navigate, Page: state.LauncherSettings, FromMedia: true}) }).Radius(16).TextColor(paper)
 			iconButton(c, "hide-media-bar", "收起控制台", "\uE8BB", 32, s.dismissMediaBar).Radius(16).TextColor(paper)
 		})
 	})

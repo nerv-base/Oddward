@@ -99,7 +99,7 @@ func TestWishIntentGuards(t *testing.T) {
 			m := wishModel(WishReady)
 			switch guard {
 			case "overlay":
-				m.Overlay = Settings
+				m.Overlay = Scenarios
 			case "page":
 				m.Page = CheckIn
 			case "confirm":
@@ -130,7 +130,7 @@ func TestWishResultsOnlyUseToken(t *testing.T) {
 	for _, kind := range wishResults() {
 		m := wishModel(WishLoading)
 		m.Wish.Busy = true
-		m.Page, m.Overlay = Home, Settings
+		m.Page, m.Overlay = Home, Scenarios
 		e := Event{Kind: kind, Token: m.Wish.Token - 1, WishRoleID: "2002", WishCount: 2, Path: "archive.json", WishFailure: WishFailureFormat}
 		n, fx := Reduce(m, e)
 		if n != m || len(fx) != 0 {
@@ -141,7 +141,7 @@ func TestWishResultsOnlyUseToken(t *testing.T) {
 		if n == m && len(fx) == 0 {
 			t.Fatalf("current %v ignored away from page with overlay", kind)
 		}
-		if n.Page != Home || n.Overlay != Settings {
+		if n.Page != Home || n.Overlay != Scenarios {
 			t.Fatal("result changed navigation")
 		}
 		m.Closed = true
@@ -295,7 +295,7 @@ func TestWishReducerHandledBoundary(t *testing.T) {
 	m := wishModel(WishReady)
 	for kind := WishRequestList; kind <= WishImportNeedsConfirmation; kind++ {
 		guarded := m
-		guarded.Page, guarded.Overlay = Home, Settings
+		guarded.Page, guarded.Overlay = Home, Scenarios
 		_, _, handled := ReduceWish(guarded, Event{Kind: kind, Token: m.Wish.Token - 1})
 		if !handled {
 			t.Fatalf("wish reducer did not consume %v", kind)
@@ -345,7 +345,7 @@ func TestWishLoadingAndBusyBlockNewOperations(t *testing.T) {
 func TestWishConfirmationsRequireVisiblePage(t *testing.T) {
 	for _, confirm := range []WishConfirmationKind{WishConfirmDelete, WishConfirmImport, WishConfirmLossy} {
 		for _, kind := range []EventKind{WishAcceptConfirm, WishCancelConfirm} {
-			for _, overlay := range []Overlay{NoOverlay, Settings} {
+			for _, overlay := range []Overlay{NoOverlay, Scenarios} {
 				for _, page := range []Page{Home, WishAnalysis, CheckIn} {
 					if page == WishAnalysis && overlay == NoOverlay {
 						continue

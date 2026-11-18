@@ -11,7 +11,7 @@ import (
 	"github.com/nerv-base/Oddward/internal/news"
 )
 
-func TestNewsFallbackIsExplicitInNativeBoard(t *testing.T) {
+func TestNewsFallbackShowsHeadlinesWithoutTechnicalLabels(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	defer s.Dispose()
 	s.Model.News = state.NewsPresent
@@ -19,7 +19,7 @@ func TestNewsFallbackIsExplicitInNativeBoard(t *testing.T) {
 	s.Model.NewsRows = state.ProjectNews(officialFeed())
 	tt := ui.NewTester(s.View, 1280, 720)
 	tt.Frame()
-	if !tt.HasText("官网降级") {
-		t.Fatal("website fallback silently looks like the launcher feed")
+	if tt.HasText("官网降级") {
+		t.Fatal("the news board exposes an internal source label")
 	}
 }

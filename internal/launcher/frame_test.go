@@ -114,7 +114,7 @@ func TestDockSharesOneBaselineAcrossSizesAndFlows(t *testing.T) {
 			tt := ui.NewTester(s.View, size[0], size[1])
 			w, h := float32(size[0]), float32(size[1])
 			cta, ok := tt.AccessByRole(ui.RoleButton, state.Present(s.Model).Primary)
-			menu, menuOK := tt.AccessByRole(ui.RoleButton, "启动选项")
+			menu, menuOK := tt.AccessByRole(ui.RoleButton, "游戏设置")
 			news, newsOK := tt.Find("官方公告")
 			if !ok || !menuOK || !newsOK {
 				t.Fatal("dock needs the news card, the launch pill and its options button")
@@ -137,13 +137,13 @@ func TestDockSharesOneBaselineAcrossSizesAndFlows(t *testing.T) {
 	}
 }
 
-func TestOptionsButtonOpensSettings(t *testing.T) {
+func TestDemoGameSettingsButtonIsDisabled(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	defer s.Dispose()
 	tt := ui.NewTester(s.View, 1280, 720)
-	tt.Click("启动选项")
-	if s.Model.Overlay != state.Settings {
-		t.Fatalf("options must open settings, overlay=%v", s.Model.Overlay)
+	button, ok := tt.AccessByRole(ui.RoleButton, "游戏设置")
+	if !ok || !button.Disabled {
+		t.Fatalf("the demo must retain the dock layout without enabling real game settings: %+v", button)
 	}
 }
 
@@ -214,7 +214,7 @@ func TestRailHoldsRoundedPageTiles(t *testing.T) {
 			}
 			previous = b.Bounds
 		}
-		settings, ok := tt.AccessByRole(ui.RoleButton, "设置")
+		settings, ok := tt.AccessByRole(ui.RoleButton, "启动器设置")
 		if !ok || settings.Bounds.W != tileSize || settings.Bounds.Y+settings.Bounds.H < float32(size[1])-28 {
 			t.Fatalf("settings must close the rail at the bottom: %+v", settings.Bounds)
 		}

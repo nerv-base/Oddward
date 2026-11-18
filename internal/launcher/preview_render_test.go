@@ -73,7 +73,27 @@ func TestRenderPreviewFrames(t *testing.T) {
 			loaded(s)
 			tt.Key(0, ui.KeyF6)
 		}},
-		{"settings", 1280, 720, func(s *Shell, tt *ui.Tester) { loaded(s); _ = tt.Click("设置") }},
+		{"game-home", 1024, 631, func(s *Shell, tt *ui.Tester) {
+			s.Model.NormalMode = true
+			s.Model.Managed = normalFixture(state.ManagedReady).Managed
+			loaded(s)
+		}},
+		{"launcher-settings", 1024, 631, func(s *Shell, tt *ui.Tester) {
+			s.Model.NormalMode = true
+			s.Model.Managed = normalFixture(state.ManagedReady).Managed
+			loaded(s)
+			if err := tt.Click("启动器设置"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"game-settings", 1024, 631, func(s *Shell, tt *ui.Tester) {
+			s.Model.NormalMode = true
+			s.Model.Managed = normalFixture(state.ManagedReady).Managed
+			loaded(s)
+			if err := tt.Click("游戏设置"); err != nil {
+				t.Fatal(err)
+			}
+		}},
 		{"analysis", 1280, 720, func(s *Shell, tt *ui.Tester) { _ = tt.Click("抽卡分析") }},
 		{"no-art", 1280, 720, func(s *Shell, tt *ui.Tester) {
 			s.Poster, s.Logo, s.Slogan, s.News, s.Accent = nil, nil, nil, nil, ui.Color{}

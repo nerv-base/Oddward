@@ -100,7 +100,7 @@ pwsh -File scripts/build-release.ps1 -Version X.Y.Z
 
 输出在 `artifacts/release/X.Y.Z/`。发行内容包含 GPL 许可证和第三方声明；发布二进制时还需提供对应源码。
 
-[Release 工作流](../.github/workflows/release.yml)由 `vX.Y.Z` 标签触发，从源码构建并创建草稿 Release。维护者检查后再手动发布。不要把开发构建、未签名包或自动化构建当作正式版本。
+[Release 工作流](../.github/workflows/release.yml)由新建的 `vX.Y.Z` 标签触发，从源码构建并创建草稿 Release。维护者检查后再手动发布。需要重建同版本时，维护者可手动运行该工作流，从选定的提交构建、签名并下载 Actions 产物，再核对校验值和对应源码。手动运行只生成待审核的产物。
 
 ## 自更新
 

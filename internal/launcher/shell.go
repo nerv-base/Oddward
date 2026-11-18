@@ -21,9 +21,14 @@ type Source interface {
 	Detail(ctx context.Context, url string) (news.Detail, error)
 }
 
-// BrandingSource reads the official CN slogan and named version without
+type cachedNewsSource interface {
+	CachedFeed(context.Context) (news.Feed, error)
+}
+
+// BrandingSource reads the official CN logo, slogan and named version without
 // coupling the announcement board to the home artwork refresh.
 type BrandingSource interface {
+	LogoAsset(context.Context) ([]byte, error)
 	SloganAsset(context.Context, news.Slogan) ([]byte, news.Slogan, error)
 	VersionName(context.Context) (number, name, articleURL string, err error)
 }
@@ -49,6 +54,7 @@ type newsResult struct {
 	rows    state.NewsRow
 	banners state.BannerRow
 	err     error
+	cached  bool
 }
 
 type detailResult struct {
@@ -60,6 +66,7 @@ type detailResult struct {
 const brandingRetryDelay = 30 * time.Second
 
 type brandingResult struct {
+	logo        []byte
 	image       []byte
 	slogan      news.Slogan
 	versionName news.VersionName
@@ -95,6 +102,8 @@ type Shell struct {
 	managedSave        chan ManagedPreferences
 	managedSaveStarted bool
 	Player             *ui.VideoPlayer
+	BackgroundSource   BackgroundSource
+	backgroundOut      chan backgroundResult
 	Slogan             *ui.Bitmap
 	Logo               *ui.Bitmap
 	News               *ui.Bitmap
@@ -103,6 +112,7 @@ type Shell struct {
 	// zero value keeps the default tone.
 	Accent          ui.Color
 	bannerMedia     bannerMedia
+	bannerRotation  bannerRotation
 	mediaFocus      ui.Handle
 	navigationFocus ui.Handle
 	Minimize        func()
@@ -131,16 +141,15 @@ type Shell struct {
 	brandingStarted bool
 	brandingRetryAt time.Time
 	// GameDownloads performs native work through the injected system boundary.
-	GameDownloads        GameDownloads
-	download             downloadWork
-	DownloadForm         DownloadForm
-	DownloadSettingsOpen bool
-	UpdateBackend        UpdateBackend
-	NetworkBackend       NetworkBackend
-	NetworkForm          NetworkForm
-	workOut              chan state.Event
-	updateProgress       chan state.Event
-	updateAutoChecked    bool
+	GameDownloads     GameDownloads
+	download          downloadWork
+	DownloadForm      DownloadForm
+	UpdateBackend     UpdateBackend
+	NetworkBackend    NetworkBackend
+	NetworkForm       NetworkForm
+	workOut           chan state.Event
+	updateProgress    chan state.Event
+	updateAutoChecked bool
 	// CheckInBackend signs and reads the saved Tajiduo link. A nil backend
 	// leaves the page in its unlinked state and touches no network.
 	CheckInBackend CheckInBackend
@@ -190,8 +199,12 @@ func NewShell(m state.Model) *Shell {
 }
 
 func (s *Shell) Dispatch(e state.Event) {
+	previousPage := s.Model.Page
 	var fx []state.Effect
 	s.Model, fx = state.Reduce(s.Model, e)
+	if s.Model.Page == state.LauncherSettings && previousPage != state.LauncherSettings {
+		s.NetworkForm = networkForm(s.Model.Network)
+	}
 	s.apply(fx)
 	s.syncLoginWindow()
 }
@@ -248,19 +261,27 @@ func (s *Shell) beginNews(token uint64) {
 	src, ctx, wake := s.Source, s.ctx, s.RequestFrame
 	s.newsPending = true
 	go func() {
-		feed, err := src.Feed(ctx)
-		result := newsResult{token: token}
-		if err != nil {
-			result.err = err
-		} else {
-			result.rows, result.banners = state.ProjectNews(feed), state.ProjectBanners(feed)
-		}
-		select {
-		case s.newsOut <- result:
-			if wake != nil && ctx.Err() == nil {
-				wake()
+		publish := func(feed news.Feed, err error, cached bool) {
+			result := newsResult{token: token, err: err, cached: cached}
+			if err == nil {
+				result.rows, result.banners = state.ProjectNews(feed), state.ProjectBanners(feed)
 			}
-		case <-ctx.Done():
+			select {
+			case s.newsOut <- result:
+				if wake != nil && ctx.Err() == nil {
+					wake()
+				}
+			case <-ctx.Done():
+			}
+		}
+		if local, ok := src.(cachedNewsSource); ok {
+			if feed, err := local.CachedFeed(ctx); err == nil {
+				publish(feed, nil, true)
+			}
+		}
+		if ctx.Err() == nil {
+			feed, err := src.Feed(ctx)
+			publish(feed, err, false)
 		}
 	}()
 }
@@ -306,9 +327,14 @@ func (s *Shell) beginBranding() {
 	}
 	s.brandingStarted, s.brandingPending = true, true
 	ctx, wake, prior, priorVersion, cache := s.ctx, s.RequestFrame, s.BrandingSlogan, s.BrandingVersion, s.BrandingCache
+	needLogo := s.Logo == nil
 	go func() {
+		result := brandingResult{slogan: prior, versionName: priorVersion}
+		if needLogo {
+			result.logo, _ = src.LogoAsset(ctx)
+		}
 		image, slogan, sloganErr := src.SloganAsset(ctx, prior)
-		result := brandingResult{slogan: prior, versionName: priorVersion, image: image}
+		result.image = image
 		if sloganErr == nil {
 			result.slogan = slogan
 		}
@@ -370,6 +396,11 @@ func (s *Shell) syncBranding() {
 		} else {
 			s.brandingRetryAt = time.Time{}
 		}
+		if s.Logo == nil && len(result.logo) > 0 {
+			if bitmap, err := ui.DecodeBitmap(result.logo); err == nil {
+				s.Logo = bitmap
+			}
+		}
 		if result.err != nil {
 			return
 		}
@@ -390,6 +421,10 @@ func (s *Shell) syncNews() {
 	for {
 		select {
 		case result := <-s.newsOut:
+			if result.cached {
+				s.Dispatch(state.Event{Kind: state.NewsCacheLoaded, Token: result.token, Rows: result.rows, Banners: result.banners})
+				continue
+			}
 			s.newsPending = false
 			if result.err != nil {
 				s.Dispatch(state.Event{Kind: state.NewsFailed, Token: result.token, Message: state.BriefError(result.err)})
@@ -445,7 +480,7 @@ func (s *Shell) tick(c *ui.Context) {
 	}
 	s.clockPaused = s.Model.DemoPaused
 	if !s.Model.MediaPreview {
-		if s.Player == nil && s.Model.Media == state.MediaLoading {
+		if s.Player == nil && s.backgroundOut == nil && s.Model.Media == state.MediaLoading {
 			s.Dispatch(state.Event{Kind: state.MediaFailed})
 		} else if s.Player != nil {
 			if s.Player.Err() != nil && s.Model.Media != state.MediaUnavailable {
@@ -457,7 +492,7 @@ func (s *Shell) tick(c *ui.Context) {
 		}
 	}
 	if s.Player != nil && !s.Model.MediaPreview {
-		play := s.Model.AnimateBackground()
+		play := s.Model.Page != state.LauncherSettings && s.Model.AnimateBackground()
 		if play && !s.Player.Playing() {
 			s.Player.Play()
 		} else if !play && s.Player.Playing() {
@@ -481,6 +516,7 @@ func (s *Shell) tick(c *ui.Context) {
 }
 
 func (s *Shell) View(c *ui.Context) {
+	s.syncBackground()
 	tone := s.tone()
 	s.theme.Accent, s.theme.Focus, s.theme.InactiveAccent = tone, tone, tone
 	c.SetTheme(s.theme)
@@ -496,16 +532,21 @@ func (s *Shell) View(c *ui.Context) {
 	s.updateMediaBar(c, root)
 	root.Children(func() {
 		s.stage(c)
-		if s.Model.Page == state.Home {
+		if s.Model.Page != state.Home {
+			s.bannerRotation.deadline = time.Time{}
+		}
+		switch s.Model.Page {
+		case state.Home:
 			s.hero(c)
 			s.action(c)
-		} else {
-			if s.Model.Page == state.WishAnalysis {
-				s.wishPage(c, s.wishProjection())
-			} else {
-				s.checkInPage(c, s.checkInProjection())
-			}
+		case state.WishAnalysis:
+			s.wishPage(c, s.wishProjection())
 			s.footer(c)
+		case state.CheckIn:
+			s.checkInPage(c, s.checkInProjection())
+			s.footer(c)
+		case state.LauncherSettings:
+			s.launcherSettingsPage(c)
 		}
 		s.topbar(c)
 		s.mediaBar(c)
