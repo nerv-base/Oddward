@@ -24,10 +24,11 @@ import (
 )
 
 const (
-	maxMetadataBytes = 64 << 10
-	maxImageBytes    = 4 << 20
-	maxImageSide     = 4096
-	maxImagePixels   = 16 << 20
+	maxMetadataBytes    = 64 << 10
+	maxImageBytes       = 4 << 20
+	maxImageSide        = 4096
+	maxImagePixels      = 16 << 20
+	maxTransactionBytes = 8 << 20
 )
 
 var (
@@ -55,6 +56,13 @@ type Metadata struct {
 type Record struct {
 	Image    []byte   `json:"-"`
 	Metadata Metadata `json:"metadata"`
+}
+
+type transaction struct {
+	ImagePresent    bool   `json:"image_exists"`
+	Image           []byte `json:"image"`
+	MetadataPresent bool   `json:"metadata_exists"`
+	Metadata        []byte `json:"metadata"`
 }
 
 // Cache persists one slogan record in dir. A Cache serializes its operations
@@ -95,6 +103,9 @@ func (c *Cache) Load(ctx context.Context) (Record, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := ctx.Err(); err != nil {
+		return Record{}, err
+	}
+	if err := c.recover(ctx); err != nil {
 		return Record{}, err
 	}
 	imagePath := filepath.Join(c.dir, "slogan.png")
@@ -144,6 +155,9 @@ func (c *Cache) Save(ctx context.Context, r Record) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := c.recover(ctx); err != nil {
+		return err
+	}
 	imageStage, err := stageFile(c.dir, "slogan-image-", r.Image, ctx)
 	if err != nil {
 		return err
@@ -178,6 +192,22 @@ func (c *Cache) Save(ctx context.Context, r Record) error {
 			_ = os.Remove(metadataPath)
 		}
 	}
+	journalData, err := json.Marshal(transaction{
+		ImagePresent: oldImageExists, Image: oldImage,
+		MetadataPresent: oldMetadataExists, Metadata: oldMetadata,
+	})
+	if err != nil || len(journalData) > maxTransactionBytes {
+		return errors.New("brandingcache: transaction journal exceeds size limits")
+	}
+	journalStage, err := stageFile(c.dir, "branding-transaction-", journalData, ctx)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(journalStage)
+	journalPath := filepath.Join(c.dir, "transaction.json")
+	if err := replaceFile(journalStage, journalPath); err != nil {
+		return fmt.Errorf("brandingcache: publish transaction journal: %w", err)
+	}
 	if err := replaceFile(imageStage, imagePath); err != nil {
 		return fmt.Errorf("brandingcache: publish image: %w", err)
 	}
@@ -188,6 +218,9 @@ func (c *Cache) Save(ctx context.Context, r Record) error {
 	if err := replaceFile(metadataStage, metadataPath); err != nil {
 		rollback()
 		return fmt.Errorf("brandingcache: publish metadata: %w", err)
+	}
+	if err := os.Remove(journalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("brandingcache: remove transaction journal: %w", err)
 	}
 	return nil
 }
@@ -216,6 +249,11 @@ func validateRecord(r Record) error {
 		return fmt.Errorf("%w: %v", errInvalidRecord, err)
 	}
 	m := r.Metadata
+	for _, required := range []string{m.CoverCode, m.URL, m.MD5, m.VersionNumber, m.VersionName, m.ArticleURL} {
+		if required == "" {
+			return fmt.Errorf("%w: metadata is incomplete", errInvalidRecord)
+		}
+	}
 	for _, value := range []string{m.CoverCode, m.URL, m.ETag, m.MD5, m.VersionNumber, m.VersionName, m.ArticleURL} {
 		if !utf8.ValidString(value) {
 			return fmt.Errorf("%w: metadata is not UTF-8", errInvalidRecord)

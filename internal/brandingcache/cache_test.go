@@ -18,9 +18,17 @@ import (
 )
 
 func sloganFixture(t *testing.T, width, height int) []byte {
+	return sloganFixtureColor(t, width, height, 0)
+}
+
+func sloganFixtureColor(t *testing.T, width, height int, color uint8) []byte {
 	t.Helper()
+	picture := image.NewRGBA(image.Rect(0, 0, width, height))
+	for i := range picture.Pix {
+		picture.Pix[i] = color
+	}
 	var b bytes.Buffer
-	if err := png.Encode(&b, image.NewRGBA(image.Rect(0, 0, width, height))); err != nil {
+	if err := png.Encode(&b, picture); err != nil {
 		t.Fatal(err)
 	}
 	return b.Bytes()
@@ -142,6 +150,52 @@ func TestLoadRejectsCorruptOversizedAndMismatchedRecords(t *testing.T) {
 				t.Fatal("invalid pair accepted")
 			}
 		})
+	}
+}
+
+func TestLoadRecoversInterruptedTransaction(t *testing.T) {
+	c, dir := openCache(t)
+	oldData := sloganFixture(t, 8, 6)
+	old := validRecord(t, oldData)
+	newData := sloganFixtureColor(t, 8, 6, 0x7f)
+	new := validRecord(t, newData)
+	if err := os.WriteFile(filepath.Join(dir, "slogan.png"), new.Image, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeMetadata(t, dir, new.Metadata)
+	oldMetadata, err := json.Marshal(old.Metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := json.Marshal(map[string]any{
+		"image":           old.Image,
+		"image_exists":    true,
+		"metadata":        oldMetadata,
+		"metadata_exists": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "transaction.json"), journal, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.Image, old.Image) || got.Metadata != old.Metadata {
+		t.Fatalf("recovered pair = %+v, want old record", got.Metadata)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "transaction.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("transaction journal remains: %v", err)
+	}
+	imageData, err := os.ReadFile(filepath.Join(dir, "slogan.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(imageData, old.Image) {
+		t.Fatal("recovery did not restore old image bytes")
 	}
 }
 

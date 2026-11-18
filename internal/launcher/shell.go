@@ -57,10 +57,13 @@ type detailResult struct {
 	err   error
 }
 
+const brandingRetryDelay = 30 * time.Second
+
 type brandingResult struct {
 	image       []byte
 	slogan      news.Slogan
 	versionName news.VersionName
+	retry       bool
 	err         error
 }
 
@@ -126,6 +129,7 @@ type Shell struct {
 	detailPending   bool
 	brandingPending bool
 	brandingStarted bool
+	brandingRetryAt time.Time
 	// GameDownloads performs native work through the injected system boundary.
 	GameDownloads        GameDownloads
 	download             downloadWork
@@ -297,6 +301,9 @@ func (s *Shell) beginBranding() {
 	if !ok || s.brandingPending || s.brandingStarted {
 		return
 	}
+	if !s.brandingRetryAt.IsZero() && s.now.Before(s.brandingRetryAt) {
+		return
+	}
 	s.brandingStarted, s.brandingPending = true, true
 	ctx, wake, prior, priorVersion, cache := s.ctx, s.RequestFrame, s.BrandingSlogan, s.BrandingVersion, s.BrandingCache
 	go func() {
@@ -309,7 +316,11 @@ func (s *Shell) beginBranding() {
 		if versionErr == nil {
 			result.versionName = news.VersionName{Number: number, Name: name, ArticleURL: articleURL}
 		}
-		if sloganErr != nil && versionErr != nil {
+		if sloganErr != nil || versionErr != nil {
+			result.retry = true
+			result.image = nil
+			result.slogan = prior
+			result.versionName = priorVersion
 			result.err = sloganErr
 			if cache != nil {
 				if cached, loadErr := cache.Load(ctx); loadErr == nil {
@@ -319,8 +330,11 @@ func (s *Shell) beginBranding() {
 					result.err = nil
 				}
 			}
+			if result.err == nil && result.image == nil && versionErr != nil {
+				result.err = versionErr
+			}
 		}
-		if result.err == nil && cache != nil {
+		if result.err == nil && cache != nil && sloganErr == nil && versionErr == nil {
 			if len(result.image) == 0 {
 				if cached, loadErr := cache.Load(ctx); loadErr == nil {
 					result.image = cached.Image
@@ -350,6 +364,12 @@ func (s *Shell) syncBranding() {
 	select {
 	case result := <-s.brandingOut:
 		s.brandingPending = false
+		if result.retry {
+			s.brandingStarted = false
+			s.brandingRetryAt = s.now.Add(brandingRetryDelay)
+		} else {
+			s.brandingRetryAt = time.Time{}
+		}
 		if result.err != nil {
 			return
 		}
