@@ -14,7 +14,7 @@ if (-not $private) {
     $onPath = (Get-Command go -ErrorAction SilentlyContinue).Source
     $env:GOTOOLCHAIN = 'local'
     if (-not $onPath -or (& $onPath env GOVERSION) -ne 'go1.27.3') {
-        throw 'Install the verified Go 1.27.3 windows-amd64 toolchain described in README.md first.'
+        throw 'Install the verified Go 1.27.3 windows-amd64 toolchain described in docs/building.md first.'
     }
     $go = $onPath
 }
