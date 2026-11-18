@@ -42,47 +42,68 @@ func (c *Client) Image(ctx context.Context, rawURL string) ([]byte, error) {
 
 // imageBody fetches the bytes, re-checking the image allowlist on every hop.
 func (c *Client) imageBody(ctx context.Context, rawURL string) ([]byte, error) {
+	body, _, status, err := c.imageFetch(ctx, rawURL, "")
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("%w: %s: status %d", ErrImage, rawURL, status)
+	}
+	return body, nil
+}
+
+// imageFetch reads an allowlisted image and returns its response headers and
+// status. It supports a strong ETag validator for callers that retain a cache.
+func (c *Client) imageFetch(ctx context.Context, rawURL, etag string) ([]byte, http.Header, int, error) {
 	current := rawURL
 	for hop := 0; hop <= maxRedirects; hop++ {
 		if err := allowedBy(current, c.ImageHosts); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrImage, err)
+			return nil, nil, 0, fmt.Errorf("%w: %v", ErrImage, err)
 		}
 		if err := c.pause(ctx); err != nil {
-			return nil, err
+			return nil, nil, 0, err
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, current, nil)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrImage, err)
+			return nil, nil, 0, fmt.Errorf("%w: %v", ErrImage, err)
 		}
 		req.Header.Set("User-Agent", "oddward-launcher (read-only announcement reader)")
 		req.Header.Set("Accept", "image/png,image/jpeg;q=0.9")
+		if etag != "" {
+			req.Header.Set("If-None-Match", etag)
+		}
 		resp, err := c.httpClient().Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrImage, err)
+			return nil, nil, 0, fmt.Errorf("%w: %v", ErrImage, err)
+		}
+		headers := resp.Header.Clone()
+		if resp.StatusCode == http.StatusNotModified {
+			resp.Body.Close()
+			return nil, headers, resp.StatusCode, nil
 		}
 		body, readErr := readBounded(resp.Body, maxImage)
 		resp.Body.Close()
 		if readErr != nil {
-			return nil, fmt.Errorf("%w: %v", ErrImage, readErr)
+			return nil, nil, 0, fmt.Errorf("%w: %v", ErrImage, readErr)
 		}
 		switch {
 		case resp.StatusCode == http.StatusOK:
-			return body, nil
+			return body, headers, resp.StatusCode, nil
 		case resp.StatusCode >= 300 && resp.StatusCode < 400:
 			location := resp.Header.Get("Location")
 			if location == "" {
-				return nil, fmt.Errorf("%w: %s: status %d without a location", ErrImage, current, resp.StatusCode)
+				return nil, nil, 0, fmt.Errorf("%w: %s: status %d without a location", ErrImage, current, resp.StatusCode)
 			}
 			next, err := resolveURL(current, location)
 			if err != nil {
-				return nil, fmt.Errorf("%w: %v", ErrImage, err)
+				return nil, nil, 0, fmt.Errorf("%w: %v", ErrImage, err)
 			}
 			current = next
 		default:
-			return nil, fmt.Errorf("%w: %s: status %d", ErrImage, current, resp.StatusCode)
+			return nil, nil, 0, fmt.Errorf("%w: %s: status %d", ErrImage, current, resp.StatusCode)
 		}
 	}
-	return nil, fmt.Errorf("%w: %s: too many redirects", ErrImage, rawURL)
+	return nil, nil, 0, fmt.Errorf("%w: %s: too many redirects", ErrImage, rawURL)
 }
 
 // checkImageBytes accepts only a JPEG or PNG payload, and only one whose decoded

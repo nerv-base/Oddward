@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Package news reads the official public announcement feed of the game from
-// its public web site. It performs read-only GET requests against a fixed
-// allowlist of official HTTPS hosts, never sends credentials, and never
-// stores anything it fetches: the feed and the article text live in memory
-// only, for as long as the launcher shows them.
+// Package news reads the official public announcement feed and CN home
+// branding from the public web site. It performs read-only GET requests
+// against a fixed allowlist of official HTTPS hosts, never sends credentials,
+// and leaves persistence to the launcher's separate branding cache.
 package news
 
 import (
@@ -164,4 +163,8 @@ var (
 	ErrBannerScript = errors.New("news: the launcher carousel script holds no usable slide")
 	// ErrImage means an image URL was refused or its payload was unusable.
 	ErrImage = errors.New("news: the official image could not be read")
+	// ErrNoSloganLink means the official cover page advertised no slogan image.
+	ErrNoSloganLink = errors.New("news: the official cover page advertises no slogan image")
+	// ErrNoVersionName means the announcement data has no named version update.
+	ErrNoVersionName = errors.New("news: the announcement data has no named version update")
 )

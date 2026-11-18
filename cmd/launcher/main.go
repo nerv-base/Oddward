@@ -18,6 +18,7 @@ import (
 	"github.com/egoist/mygo/ui/video"
 
 	"github.com/nerv-base/Oddward/internal/branding"
+	"github.com/nerv-base/Oddward/internal/brandingcache"
 	"github.com/nerv-base/Oddward/internal/buildinfo"
 	"github.com/nerv-base/Oddward/internal/checkin"
 	"github.com/nerv-base/Oddward/internal/cnlogin/accounts"
@@ -114,6 +115,19 @@ func main() {
 		s.InitialManagedRoot = *gameRoot
 		s.Model.Network, s.NetworkBackend = netState, system.SystemNetwork{Network: network, Store: store}
 		selfUpdate(s, executable, network, store, saved)
+		if cache, err := brandingcache.Open(filepath.Join(filepath.Dir(cachePath), "branding")); err == nil {
+			adapter := brandingCacheAdapter{cache: cache}
+			s.BrandingCache = adapter
+			if record, err := adapter.Load(context.Background()); err == nil {
+				if art, decodeErr := ui.DecodeBitmap(record.Image); decodeErr == nil {
+					s.Slogan = art
+					s.BrandingSlogan = record.Slogan
+					s.BrandingVersion = record.VersionName
+				}
+			}
+		} else {
+			log.Printf("branding cache unavailable: %v", err)
+		}
 		if art, err := launcher.LoadPoster(*background, *poster); err == nil {
 			s.Poster = art
 			// The launch tone follows each version's key art.
@@ -129,7 +143,10 @@ func main() {
 			log.Printf("logo unavailable: %v", err)
 		}
 		if art, err := launcher.LoadArtwork(*slogan); err == nil {
-			s.Slogan = art
+			if art != nil {
+				s.Slogan = art
+				s.SloganLocal = true
+			}
 		} else {
 			log.Printf("slogan unavailable: %v", err)
 		}

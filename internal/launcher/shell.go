@@ -21,6 +21,27 @@ type Source interface {
 	Detail(ctx context.Context, url string) (news.Detail, error)
 }
 
+// BrandingSource reads the official CN slogan and named version without
+// coupling the announcement board to the home artwork refresh.
+type BrandingSource interface {
+	SloganAsset(context.Context, news.Slogan) ([]byte, news.Slogan, error)
+	VersionName(context.Context) (number, name, articleURL string, err error)
+}
+
+// BrandingRecord is the verified cache entry exchanged with the launcher.
+type BrandingRecord struct {
+	Image       []byte
+	Slogan      news.Slogan
+	VersionName news.VersionName
+}
+
+// BrandingCache persists one verified CN branding record independently of
+// settings, accounts, game resources, and announcement artwork.
+type BrandingCache interface {
+	Load(context.Context) (BrandingRecord, error)
+	Save(context.Context, BrandingRecord) error
+}
+
 // A finished background read, handed to the UI thread through a buffered
 // channel of capacity one so that no goroutine ever touches the Model.
 type newsResult struct {
@@ -34,6 +55,13 @@ type detailResult struct {
 	token uint64
 	body  string
 	err   error
+}
+
+type brandingResult struct {
+	image       []byte
+	slogan      news.Slogan
+	versionName news.VersionName
+	err         error
 }
 
 // Shell owns UI-thread state. No element or build context escapes a frame.
@@ -84,13 +112,20 @@ type Shell struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	Source          Source
+	BrandingCache   BrandingCache
+	BrandingSlogan  news.Slogan
+	BrandingVersion news.VersionName
+	SloganLocal     bool
 	// RequestFrame must be safe to call from a worker. Set it before Source
 	// begins work; production binds the native window's Invalidate method.
-	RequestFrame  func()
-	newsOut       chan newsResult
-	detailOut     chan detailResult
-	newsPending   bool
-	detailPending bool
+	RequestFrame    func()
+	newsOut         chan newsResult
+	detailOut       chan detailResult
+	brandingOut     chan brandingResult
+	newsPending     bool
+	detailPending   bool
+	brandingPending bool
+	brandingStarted bool
 	// GameDownloads performs native work through the injected system boundary.
 	GameDownloads        GameDownloads
 	download             downloadWork
@@ -137,7 +172,7 @@ func NewShell(m state.Model) *Shell {
 		Model: m, ctx: ctx, cancel: cancel, theme: launcherTheme(), clockPaused: m.DemoPaused, FixedWindow: m.NormalMode,
 		wishLink: wishLinkMedia{out: make(chan wishLinkResult, 4)},
 		wish:     wishArchives{out: make(chan wishArchiveResult, 4)},
-		newsOut:  make(chan newsResult, 1), detailOut: make(chan detailResult, 1),
+		newsOut:  make(chan newsResult, 1), detailOut: make(chan detailResult, 1), brandingOut: make(chan brandingResult, 1),
 		managedOut: make(chan managedResult, 8), managedProgress: make(chan state.Event, 1),
 		managedSave: make(chan ManagedPreferences, 1),
 		workOut:     make(chan state.Event, 8), updateProgress: make(chan state.Event, 1),
@@ -192,7 +227,7 @@ func (s *Shell) Dispose() {
 	s.cancel()
 	s.cancelManagedWork()
 	s.pending = nil
-	s.newsPending, s.detailPending = false, false
+	s.newsPending, s.detailPending, s.brandingPending = false, false, false
 	if s.Player != nil {
 		s.Player.Close()
 		s.Player = nil
@@ -255,6 +290,78 @@ func (s *Shell) beginDetail(token uint64) {
 		case <-ctx.Done():
 		}
 	}()
+}
+
+func (s *Shell) beginBranding() {
+	src, ok := s.Source.(BrandingSource)
+	if !ok || s.brandingPending || s.brandingStarted {
+		return
+	}
+	s.brandingStarted, s.brandingPending = true, true
+	ctx, wake, prior, priorVersion, cache := s.ctx, s.RequestFrame, s.BrandingSlogan, s.BrandingVersion, s.BrandingCache
+	go func() {
+		image, slogan, sloganErr := src.SloganAsset(ctx, prior)
+		result := brandingResult{slogan: prior, versionName: priorVersion, image: image}
+		if sloganErr == nil {
+			result.slogan = slogan
+		}
+		number, name, articleURL, versionErr := src.VersionName(ctx)
+		if versionErr == nil {
+			result.versionName = news.VersionName{Number: number, Name: name, ArticleURL: articleURL}
+		}
+		if sloganErr != nil && versionErr != nil {
+			result.err = sloganErr
+			if cache != nil {
+				if cached, loadErr := cache.Load(ctx); loadErr == nil {
+					result.image = cached.Image
+					result.slogan = cached.Slogan
+					result.versionName = cached.VersionName
+					result.err = nil
+				}
+			}
+		}
+		if result.err == nil && cache != nil {
+			if len(result.image) == 0 {
+				if cached, loadErr := cache.Load(ctx); loadErr == nil {
+					result.image = cached.Image
+					if result.slogan == (news.Slogan{}) {
+						result.slogan = cached.Slogan
+					}
+					if result.versionName == (news.VersionName{}) {
+						result.versionName = cached.VersionName
+					}
+				}
+			}
+			if len(result.image) > 0 {
+				_ = cache.Save(ctx, BrandingRecord{Image: result.image, Slogan: result.slogan, VersionName: result.versionName})
+			}
+		}
+		select {
+		case s.brandingOut <- result:
+			if wake != nil && ctx.Err() == nil {
+				wake()
+			}
+		case <-ctx.Done():
+		}
+	}()
+}
+
+func (s *Shell) syncBranding() {
+	select {
+	case result := <-s.brandingOut:
+		s.brandingPending = false
+		if result.err != nil {
+			return
+		}
+		s.BrandingSlogan = result.slogan
+		s.BrandingVersion = result.versionName
+		if !s.SloganLocal && len(result.image) > 0 {
+			if bitmap, err := ui.DecodeBitmap(result.image); err == nil {
+				s.Slogan = bitmap
+			}
+		}
+	default:
+	}
 }
 
 // syncNews runs on the UI thread, from tick: it delivers whatever came back,
@@ -336,6 +443,10 @@ func (s *Shell) tick(c *ui.Context) {
 		} else if !play && s.Player.Playing() {
 			s.Player.Pause()
 		}
+	}
+	s.syncBranding()
+	if s.Source != nil {
+		s.beginBranding()
 	}
 	s.syncNews()
 	s.syncWish()
