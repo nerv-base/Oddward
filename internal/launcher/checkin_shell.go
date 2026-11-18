@@ -4,17 +4,11 @@ package launcher
 
 import (
 	"context"
-	"time"
 
 	"github.com/egoist/mygo/ui"
 
 	"github.com/nerv-base/Oddward/internal/launcher/state"
 )
-
-// checkInAutoInterval is how often the UI thread re-checks whether an armed
-// automatic check-in is due. It is a frame timer, not a goroutine: the state
-// layer owns the once-per-day rule, so a missed beat only delays the attempt.
-const checkInAutoInterval = 30 * time.Second
 
 // applyCheckInEffect starts the background work for one check-in effect. Every
 // result comes back through checkinOut, which only the UI thread drains.
@@ -27,7 +21,16 @@ func (s *Shell) applyCheckInEffect(f state.Effect) bool {
 	case state.TajiduoCheckInStatus:
 		s.beginCheckInStatus(f)
 	case state.TajiduoCheckInAuto:
-		s.beginCheckInAuto(f)
+		// The switch is written by one serialized worker in syncCheckIn, not
+		// by a goroutine per click: a late "on" must never overwrite a newer
+		// "off" on disk.
+		s.RequestFrame()
+	case state.TajiduoCheckInLaunch:
+		// The user asked to start the game: this is the only trigger of an
+		// automatic attempt. The snapshot is refreshed first, so the attempt
+		// sees the day the server is actually on.
+		s.checkinLaunch = true
+		s.Dispatch(state.Event{Kind: state.CheckInStateRequested, Check: state.CheckInPayload{Enabled: true}})
 	default:
 		return false
 	}
@@ -58,8 +61,9 @@ func (s *Shell) beginCheckInSign(f state.Effect) {
 	}
 	backend, ctx, wake := s.CheckInBackend, s.ctx, s.RequestFrame
 	accountID := s.Model.CheckIn.AccountID
+	confirmed := f.Confirmed
 	go func() {
-		outcome, err := backend.Sign(ctx, accountID, kind)
+		outcome, err := backend.Sign(ctx, accountID, kind, confirmed)
 		if err != nil {
 			outcome = CheckInOutcome{Kind: kind, Result: state.CheckResultFailed, Failure: checkInErrorKind(err)}
 		}
@@ -83,22 +87,39 @@ func (s *Shell) beginCheckInStatus(f state.Effect) {
 	}()
 }
 
-func (s *Shell) beginCheckInAuto(f state.Effect) {
-	kind := f.CheckInKind
-	payload := state.CheckInPayload{Kind: kind, Enabled: f.Enabled}
-	if s.CheckInBackend == nil {
-		payload.Fail = state.CheckInFailureStorage
-		s.Dispatch(state.Event{Kind: state.CheckInAutoSaved, Token: f.Token, Check: payload})
+// pumpCheckInAuto writes at most one automatic switch at a time. The worker
+// compares the requested value with the persisted one, so two fast clicks
+// become two ordered writes instead of two racing ones; the last intent is what
+// a restart reads.
+func (s *Shell) pumpCheckInAuto() {
+	if s.CheckInBackend == nil || s.checkinAutoBusy {
 		return
 	}
-	backend, ctx, wake := s.CheckInBackend, s.ctx, s.RequestFrame
-	accountID := s.Model.CheckIn.AccountID
-	go func() {
-		if err := backend.SetAuto(ctx, accountID, kind, f.Enabled); err != nil {
-			payload.Fail = checkInErrorKind(err)
+	c := s.Model.CheckIn
+	if !c.Loaded || !c.Linked {
+		return
+	}
+	for k := 0; k < state.CheckInKinds; k++ {
+		if c.Auto[k] == c.AutoSaved[k] {
+			continue
 		}
-		s.postCheckIn(ctx, wake, state.Event{Kind: state.CheckInAutoSaved, Token: f.Token, Check: payload})
-	}()
+		kind, want, token := state.CheckInKind(k), c.Auto[k], c.AutoToken[k]
+		saved := c.AutoSaved[k]
+		accountID := c.AccountID
+		backend, ctx, wake := s.CheckInBackend, s.ctx, s.RequestFrame
+		s.checkinAutoBusy = true
+		go func() {
+			payload := state.CheckInPayload{Kind: kind, Enabled: want}
+			if err := backend.SetAuto(ctx, accountID, kind, want); err != nil {
+				// Nothing was written: report the value still on disk so the
+				// reducer can put the switch back.
+				payload.Enabled = saved
+				payload.Fail = checkInErrorKind(err)
+			}
+			s.postCheckIn(ctx, wake, state.Event{Kind: state.CheckInAutoSaved, Token: token, Check: payload})
+		}()
+		return
+	}
 }
 
 // postCheckIn hands one finished event to the UI thread. It never blocks: the
@@ -145,13 +166,16 @@ func checkInPayloadOfOutcome(o CheckInOutcome) state.CheckInPayload {
 	return p
 }
 
-// syncCheckIn runs on the UI thread, from tick. It delivers finished work,
-// then asks for the state once, then keeps the automatic beat alive while a
-// switch is armed.
+// syncCheckIn runs on the UI thread, from tick. It delivers finished work, then
+// asks for the state once, then reacts to the two triggers the product has: the
+// user opening the page, and the user starting the game.
 func (s *Shell) syncCheckIn(c *ui.Context) {
 	for {
 		select {
 		case event := <-s.checkinOut:
+			if event.Kind == state.CheckInAutoSaved {
+				s.checkinAutoBusy = false
+			}
 			s.Dispatch(event)
 			continue
 		default:
@@ -174,23 +198,18 @@ func (s *Shell) syncCheckIn(c *ui.Context) {
 		s.checkinVisit = false
 	}
 	checkIn := s.Model.CheckIn
-	if !checkIn.Loaded || !checkIn.Linked {
-		s.checkinWakeAt = time.Time{}
-		return
+	if checkIn.Loaded && checkIn.Linked && checkIn.StatusPhase == state.CheckStatusIdle && s.Model.Page == state.CheckIn {
+		// Opening the page reads the game summary once; the panel's own 刷新
+		// button asks again later.
+		s.Dispatch(state.Event{Kind: state.CheckInStatusRequested})
 	}
-	if !s.checkinWakeAt.IsZero() && s.now.Before(s.checkinWakeAt) {
-		return
+	if s.checkinLaunch && checkIn.Loaded {
+		// The launch snapshot is in: one automatic attempt for the day. The
+		// state layer skips it when the switch is off or the task is settled.
+		s.checkinLaunch = false
+		s.Dispatch(state.Event{Kind: state.CheckInAutoTick, Now: s.now})
 	}
-	s.checkinWakeAt = s.now.Add(checkInAutoInterval)
-	// Keep one frame timer alive so an idle window still reaches the rule and
-	// notices the day ending.
-	c.After(checkInAutoInterval)
-	day := checkIn.Day
-	s.Dispatch(state.Event{Kind: state.CheckInAutoTick, Now: s.now})
-	if next := s.Model.CheckIn.Day; next != day && next != "" {
-		// Midnight passed while the launcher stayed open: read the new day.
-		s.Dispatch(state.Event{Kind: state.CheckInStateRequested, Check: state.CheckInPayload{}})
-	}
+	s.pumpCheckInAuto()
 }
 
 // checkInProjection is the pure view data the page draws. Callbacks dispatch
@@ -212,12 +231,16 @@ func (s *Shell) checkInProjection() checkInPageData {
 		Detail:        m.Detail,
 		Failure:       m.Failure,
 		At:            m.At,
+		Confirm:       m.Confirm,
 		StatusPhase:   m.StatusPhase,
 		StatusFailure: m.StatusFailure,
 		Role:          m.Role,
 		Now:           s.now,
 		OnSign: func(kind state.CheckInKind) {
 			s.Dispatch(state.Event{Kind: state.CheckInBegin, Check: state.CheckInPayload{Kind: kind}})
+		},
+		OnConfirm: func(kind state.CheckInKind, armed bool) {
+			s.Dispatch(state.Event{Kind: state.CheckInConfirm, Check: state.CheckInPayload{Kind: kind, Enabled: armed}})
 		},
 		OnRefresh: func() {
 			s.Dispatch(state.Event{Kind: state.CheckInStateRequested, Check: state.CheckInPayload{Enabled: true}})

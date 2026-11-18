@@ -116,7 +116,9 @@ func (c *Client) GameRewards(ctx context.Context, a Access) ([]SignReward, error
 		name, okName := text(m["name"])
 		count, okCount := integer(m["num"])
 		if name == "" {
-			// An unsent reward slot is an empty entry, not a broken table.
+			// A day the server has not filled in yet. Keep the slot: callers
+			// index this table by the day of the month.
+			out = append(out, SignReward{})
 			continue
 		}
 		if !okName || !okCount || count < 0 || count > 1000000 {

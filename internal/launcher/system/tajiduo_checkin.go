@@ -108,14 +108,17 @@ func (b *TajiduoBackend) CheckInState(ctx context.Context, refresh bool) (launch
 	}
 	out.Auto = auto
 	today := checkin.Day(time.Now())
+	var haveRec [state.CheckInKinds]bool
+	var recs [state.CheckInKinds]checkin.Record
 	for k := 0; k < state.CheckInKinds; k++ {
-		rec, ok, err := b.checkin.Lookup(ctx, checkin.Key{AccountID: id, RoleID: grant.RoleID, Kind: checkin.Kind(k), Date: today})
+		rec, ok, err := b.checkin.Lookup(ctx, b.signKey(id, grant.RoleID, state.CheckInKind(k), today))
 		if err != nil {
 			return out, checkInFailure(err)
 		}
 		if !ok {
 			continue
 		}
+		haveRec[k], recs[k] = true, rec
 		out.At[k] = rec.At
 		switch rec.Result {
 		case checkin.Pending, checkin.Unverified:
@@ -149,15 +152,22 @@ func (b *TajiduoBackend) CheckInState(ctx context.Context, refresh bool) (launch
 		return out, nil
 	}
 	for k := 0; k < state.CheckInKinds; k++ {
-		signed, err := b.signedToday(ctx, a, state.CheckInKind(k))
+		kind := state.CheckInKind(k)
+		key := b.signKey(id, grant.RoleID, kind, today)
+		if kind == state.CheckGame {
+			// The server's game state is keyed by gameId only, so it describes
+			// the account, not this role. It can neither confirm nor retire a
+			// result recorded for this role: only that role's own write can.
+			continue
+		}
+		signed, err := b.client.CommunitySignState(ctx, a)
 		if err != nil {
-			if kind := checkInFailureKind(err); kind == state.CheckInFailureAuth || kind == state.CheckInFailureMismatch {
+			if failure := checkInFailureKind(err); failure == state.CheckInFailureAuth || failure == state.CheckInFailureMismatch {
 				return out, checkInFailure(err)
 			}
 			out.Fail = checkInFailureKind(err)
 			return out, nil
 		}
-		key := checkin.Key{AccountID: id, RoleID: grant.RoleID, Kind: checkin.Kind(k), Date: today}
 		if signed {
 			out.Signed[k], out.Known[k] = true, true
 			if out.Result[k] == state.CheckResultNone || out.Result[k] == state.CheckResultUnverified || out.Result[k] == state.CheckResultFailed {
@@ -168,8 +178,19 @@ func (b *TajiduoBackend) CheckInState(ctx context.Context, refresh bool) (launch
 			}
 			continue
 		}
-		if out.Result[k] == state.CheckResultUnverified {
-			// The server is the authority for today: the earlier intent did not
+		if !haveRec[k] {
+			continue
+		}
+		switch recs[k].Result {
+		case checkin.Success, checkin.Already:
+			// The ledger and the server disagree about the same account and
+			// community. Neither is trusted over the other: the user decides.
+			out.Result[k], out.Signed[k] = state.CheckResultUnverified, false
+			out.Detail[k] = "服务器显示今日未签到，但本地记录显示已完成；请核对后手动重新签到"
+			out.Failure[k] = state.CheckInFailureNone
+			b.finish(ctx, key, checkin.Unverified, out.Detail[k], atOrNow(out.At[k]))
+		case checkin.Pending, checkin.Unverified:
+			// The server is the authority for today: the earlier attempt did not
 			// complete the task, so it is retired instead of retried blindly.
 			out.Result[k] = state.CheckResultFailed
 			out.Detail[k] = "上次签到没有收到结果；服务器确认今日仍未签到，可以重新签到"
@@ -181,23 +202,23 @@ func (b *TajiduoBackend) CheckInState(ctx context.Context, refresh bool) (launch
 	return out, nil
 }
 
-// signedToday asks the server whether today is already complete for one task.
-// The game answer is account-scoped, so it can only ever suppress a write.
-func (b *TajiduoBackend) signedToday(ctx context.Context, a tajiduo.Access, kind state.CheckInKind) (bool, error) {
-	if kind == state.CheckCommunity {
-		return b.client.CommunitySignState(ctx, a)
+// signKey is the ledger key of one daily task. Community sign-in is scoped to
+// the account and the community, so its record must not carry a role: after a
+// rebind the account is still signed in.
+func (b *TajiduoBackend) signKey(accountID, roleID string, kind state.CheckInKind, day string) checkin.Key {
+	key := checkin.Key{AccountID: accountID, Kind: checkin.Kind(kind), Date: day}
+	if kind == state.CheckGame {
+		key.RoleID = roleID
 	}
-	signState, err := b.client.GameSignState(ctx, a)
-	if err != nil {
-		return false, err
-	}
-	return signState.TodaySign, nil
+	return key
 }
 
-// Sign runs one daily task for the saved account and the linked role. It
-// records an intent before the write, so a crash or a lost response leaves a
-// pending answer instead of a silent retry.
-func (b *TajiduoBackend) Sign(ctx context.Context, accountID string, kind state.CheckInKind) (launcher.CheckInOutcome, error) {
+// Sign runs one daily task for the saved account and the linked role. The ledger
+// is consulted before anything is sent: a recorded answer is never written
+// twice, and an earlier attempt whose answer never arrived is only repeated when
+// the caller confirms it. The intent is stored before the request leaves the
+// process, so a crash leaves a pending answer instead of a silent retry.
+func (b *TajiduoBackend) Sign(ctx context.Context, accountID string, kind state.CheckInKind, confirm bool) (launcher.CheckInOutcome, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var out launcher.CheckInOutcome
@@ -244,20 +265,48 @@ func (b *TajiduoBackend) Sign(ctx context.Context, accountID string, kind state.
 	}
 	defer release()
 	now := time.Now()
-	key := checkin.Key{AccountID: id, RoleID: a.RoleID, Kind: checkin.Kind(kind), Date: checkin.Day(now)}
+	key := b.signKey(id, a.RoleID, kind, checkin.Day(now))
 	out.At, out.Known = now, true
 
-	signed, err := b.signedToday(ctx, a, kind)
-	if err != nil {
-		// Nothing was written yet, so this is a clean failure.
+	// The ledger decides what a click may do. A clean answer already recorded
+	// for today is reported as it is; an earlier attempt that left the process
+	// without an answer is only repeated when the user confirms it.
+	if rec, ok, err := b.checkin.Lookup(ctx, key); err != nil {
 		out.Result, out.Failure = state.CheckResultFailed, checkInFailureKind(err)
 		return out, nil
+	} else if ok {
+		switch rec.Result {
+		case checkin.Success, checkin.Already:
+			// The day is spent: report it as already signed instead of
+			// pretending this click produced a new reward.
+			out.Result, out.Signed, out.Known = state.CheckResultAlready, true, true
+			out.Detail = rec.Detail
+			if out.Detail == "" {
+				out.Detail = "服务器显示今日已签到"
+			}
+			return out, nil
+		case checkin.Pending, checkin.Unverified:
+			if !confirm {
+				out.Result = state.CheckResultUnverified
+				out.Detail = "上次签到没有收到结果；请先刷新状态确认，再次提交需要你确认"
+				return out, nil
+			}
+		}
 	}
-	if signed {
-		out.Result, out.Signed = state.CheckResultAlready, true
-		out.Detail = "服务器显示今日已签到"
-		b.finish(ctx, key, checkin.Already, out.Detail, now)
-		return out, nil
+
+	if kind == state.CheckCommunity {
+		signed, err := b.client.CommunitySignState(ctx, a)
+		if err != nil {
+			// Nothing was written yet, so this is a clean failure.
+			out.Result, out.Failure = state.CheckResultFailed, checkInFailureKind(err)
+			return out, nil
+		}
+		if signed {
+			out.Result, out.Signed = state.CheckResultAlready, true
+			out.Detail = "服务器显示今日已签到"
+			b.finish(ctx, key, checkin.Already, out.Detail, now)
+			return out, nil
+		}
 	}
 
 	// The intent is durable before the request leaves the process: a crash or

@@ -184,15 +184,17 @@ func newCheckInWorld(t *testing.T, linked bool) *checkInWorld {
 	return world
 }
 
-func (w *checkInWorld) ledger(t *testing.T, kind state.CheckInKind) (checkin.Record, bool) {
+func (w *checkInWorld) ledger(t *testing.T, kind state.CheckInKind, roleScoped bool) (checkin.Record, bool) {
 	t.Helper()
 	records, err := checkin.Open(filepath.Join(w.dir, "checkin"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec, ok, err := records.Lookup(context.Background(), checkin.Key{
-		AccountID: w.accountID, RoleID: "123", Kind: checkin.Kind(kind), Date: checkin.Day(time.Now()),
-	})
+	key := checkin.Key{AccountID: w.accountID, Kind: checkin.Kind(kind), Date: checkin.Day(time.Now())}
+	if roleScoped {
+		key.RoleID = "123"
+	}
+	rec, ok, err := records.Lookup(context.Background(), key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +252,7 @@ func TestCheckInStateRefreshConfirmsNothingSigned(t *testing.T) {
 func TestCheckInGameSignWritesOnceAndRecordsTheReward(t *testing.T) {
 	world := newCheckInWorld(t, true)
 	ctx := context.Background()
-	out, err := world.backend.Sign(ctx, world.accountID, state.CheckGame)
+	out, err := world.backend.Sign(ctx, world.accountID, state.CheckGame, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +262,7 @@ func TestCheckInGameSignWritesOnceAndRecordsTheReward(t *testing.T) {
 	if got := world.count(func() int { return world.gamePosts }); got != 1 {
 		t.Fatalf("expected exactly one game write, got %d", got)
 	}
-	if rec, ok := world.ledger(t, state.CheckGame); !ok || rec.Result != checkin.Success || rec.Detail != "本性像素 ×60" {
+	if rec, ok := world.ledger(t, state.CheckGame, true); !ok || rec.Result != checkin.Success || rec.Detail != "本性像素 ×60" {
 		t.Fatalf("ledger = %+v ok=%v", rec, ok)
 	}
 	snap, err := world.backend.CheckInState(ctx, false)
@@ -273,7 +275,7 @@ func TestCheckInGameSignWritesOnceAndRecordsTheReward(t *testing.T) {
 	if snap.Result[state.CheckCommunity] != state.CheckResultNone {
 		t.Fatal("the game write must not touch the community task")
 	}
-	again, err := world.backend.Sign(ctx, world.accountID, state.CheckGame)
+	again, err := world.backend.Sign(ctx, world.accountID, state.CheckGame, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +297,7 @@ func TestCheckInSignRefusesWhenAnotherLauncherHoldsTheLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := world.backend.Sign(context.Background(), world.accountID, state.CheckGame)
+	out, err := world.backend.Sign(context.Background(), world.accountID, state.CheckGame, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +308,7 @@ func TestCheckInSignRefusesWhenAnotherLauncherHoldsTheLease(t *testing.T) {
 		t.Fatalf("a busy attempt must not post, got %d writes", got)
 	}
 	release()
-	out, err = world.backend.Sign(context.Background(), world.accountID, state.CheckGame)
+	out, err = world.backend.Sign(context.Background(), world.accountID, state.CheckGame, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +320,7 @@ func TestCheckInSignRefusesWhenAnotherLauncherHoldsTheLease(t *testing.T) {
 func TestCheckInCommunitySignIsIndependent(t *testing.T) {
 	world := newCheckInWorld(t, true)
 	ctx := context.Background()
-	out, err := world.backend.Sign(ctx, world.accountID, state.CheckCommunity)
+	out, err := world.backend.Sign(ctx, world.accountID, state.CheckCommunity, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +351,7 @@ func TestCheckInLostAnswerIsUnverifiedAndNeverRetriedBlindly(t *testing.T) {
 	world.mu.Lock()
 	world.dropCommunity = true
 	world.mu.Unlock()
-	out, err := world.backend.Sign(ctx, world.accountID, state.CheckCommunity)
+	out, err := world.backend.Sign(ctx, world.accountID, state.CheckCommunity, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +383,7 @@ func TestCheckInLostAnswerIsUnverifiedAndNeverRetriedBlindly(t *testing.T) {
 	world.mu.Lock()
 	world.dropCommunity = false
 	world.mu.Unlock()
-	retry, err := world.backend.Sign(ctx, world.accountID, state.CheckCommunity)
+	retry, err := world.backend.Sign(ctx, world.accountID, state.CheckCommunity, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +394,7 @@ func TestCheckInLostAnswerIsUnverifiedAndNeverRetriedBlindly(t *testing.T) {
 
 func TestCheckInRefusesAnotherAccount(t *testing.T) {
 	world := newCheckInWorld(t, true)
-	if _, err := world.backend.Sign(context.Background(), "another-account", state.CheckGame); err == nil {
+	if _, err := world.backend.Sign(context.Background(), "another-account", state.CheckGame, false); err == nil {
 		t.Fatal("a stale page must not sign for the current account")
 	} else if kind := checkInFailureKind(err); kind != state.CheckInFailureMismatch {
 		t.Fatalf("failure kind = %v", kind)
@@ -411,7 +413,7 @@ func TestCheckInAlreadySignedContradictionIsUnverified(t *testing.T) {
 	world.alreadyGame = true
 	world.todaySign = false
 	world.mu.Unlock()
-	out, err := world.backend.Sign(context.Background(), world.accountID, state.CheckGame)
+	out, err := world.backend.Sign(context.Background(), world.accountID, state.CheckGame, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,14 +431,14 @@ func TestCheckInAlreadySignedWithConfirmationIsDone(t *testing.T) {
 	world.alreadyGame = true
 	world.todaySign = true
 	world.mu.Unlock()
-	out, err := world.backend.Sign(context.Background(), world.accountID, state.CheckGame)
+	out, err := world.backend.Sign(context.Background(), world.accountID, state.CheckGame, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if out.Result != state.CheckResultAlready || !out.Signed {
 		t.Fatalf("confirmed already-signed = %+v", out)
 	}
-	if rec, ok := world.ledger(t, state.CheckGame); !ok || rec.Result != checkin.Already {
+	if rec, ok := world.ledger(t, state.CheckGame, true); !ok || rec.Result != checkin.Already {
 		t.Fatalf("ledger = %+v ok=%v", rec, ok)
 	}
 }
@@ -492,7 +494,7 @@ func TestCheckInUnlinkedAccountNeverWrites(t *testing.T) {
 	if snap.Linked || snap.AccountID != world.accountID {
 		t.Fatalf("unlinked snapshot = %+v", snap)
 	}
-	if _, err := world.backend.Sign(ctx, world.accountID, state.CheckGame); err == nil {
+	if _, err := world.backend.Sign(ctx, world.accountID, state.CheckGame, false); err == nil {
 		t.Fatal("an unlinked account must refuse the write")
 	} else if kind := checkInFailureKind(err); kind != state.CheckInFailureAuth {
 		t.Fatalf("failure kind = %v", kind)
@@ -517,5 +519,144 @@ func TestCheckInExpiredCredentialAsksForRelink(t *testing.T) {
 	var reported launcher.CheckInError
 	if !errors.As(err, &reported) || reported.Kind != state.CheckInFailureAuth {
 		t.Fatalf("failure = %v", err)
+	}
+}
+
+// recordStore opens the same ledger the backend uses.
+func (w *checkInWorld) recordStore(t *testing.T) *checkin.Store {
+	t.Helper()
+	records, err := checkin.Open(filepath.Join(w.dir, "checkin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return records
+}
+
+func TestCheckInGameSignIsRoleScoped(t *testing.T) {
+	world := newCheckInWorld(t, true)
+	ctx := context.Background()
+	// Another role on the same account already signed today. The sign-state read
+	// is keyed by gameId only, so it cannot prove that this role signed.
+	world.mu.Lock()
+	world.todaySign = true
+	world.mu.Unlock()
+	out, err := world.backend.Sign(ctx, world.accountID, state.CheckGame, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Result != state.CheckResultSuccess || !out.Signed {
+		t.Fatalf("this role still needs its own write, got %+v", out)
+	}
+	if got := world.count(func() int { return world.gamePosts }); got != 1 {
+		t.Fatalf("the role-scoped write must be sent once, got %d", got)
+	}
+	if rec, ok := world.ledger(t, state.CheckGame, true); !ok || rec.Result != checkin.Success {
+		t.Fatalf("ledger = %+v ok=%v", rec, ok)
+	}
+}
+
+func TestCheckInCommunityRecordIsAccountScoped(t *testing.T) {
+	world := newCheckInWorld(t, true)
+	ctx := context.Background()
+	out, err := world.backend.Sign(ctx, world.accountID, state.CheckCommunity, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Result != state.CheckResultSuccess {
+		t.Fatalf("community sign outcome = %+v", out)
+	}
+	records := world.recordStore(t)
+	rec, ok, err := records.Lookup(ctx, checkin.Key{
+		AccountID: world.accountID, Kind: checkin.Community, Date: checkin.Day(time.Now()),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || rec.Result != checkin.Success {
+		t.Fatalf("the community record must not be pinned to a role: %+v ok=%v", rec, ok)
+	}
+}
+
+func TestCheckInPendingRecordBlocksAnotherWrite(t *testing.T) {
+	world := newCheckInWorld(t, true)
+	ctx := context.Background()
+	records := world.recordStore(t)
+	rec := checkin.Record{
+		AccountID: world.accountID, RoleID: "123", Kind: checkin.Game,
+		Date: checkin.Day(time.Now()), Result: checkin.Pending, At: time.Now(),
+	}
+	if err := records.Put(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	out, err := world.backend.Sign(ctx, world.accountID, state.CheckGame, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Result != state.CheckResultUnverified || out.Detail == "" {
+		t.Fatalf("an earlier attempt without an answer must not be repeated blindly: %+v", out)
+	}
+	if got := world.count(func() int { return world.gamePosts }); got != 0 {
+		t.Fatalf("a pending attempt must not be posted again, got %d writes", got)
+	}
+	// The ledger keeps the open intent: it must not be overwritten by a fresh
+	// answer the caller never asked to confirm.
+	if rec, ok := world.ledger(t, state.CheckGame, true); !ok || rec.Result != checkin.Pending {
+		t.Fatalf("ledger = %+v ok=%v", rec, ok)
+	}
+}
+
+func TestCheckInCommunityConflictAsksTheUser(t *testing.T) {
+	world := newCheckInWorld(t, true)
+	ctx := context.Background()
+	records := world.recordStore(t)
+	rec := checkin.Record{
+		AccountID: world.accountID, Kind: checkin.Community,
+		Date: checkin.Day(time.Now()), Result: checkin.Success, Detail: "经验 +10 · 金币 +5", At: time.Now(),
+	}
+	if err := records.Put(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	// The server says the community has not been signed today.
+	snap, err := world.backend.CheckInState(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Result[state.CheckCommunity] != state.CheckResultUnverified {
+		t.Fatalf("a local success the server denies must become unverified: %+v", snap)
+	}
+	if !strings.Contains(snap.Detail[state.CheckCommunity], "服务器显示今日未签到") {
+		t.Fatalf("detail = %q", snap.Detail[state.CheckCommunity])
+	}
+	again, ok, err := world.recordStore(t).Lookup(ctx, checkin.Key{
+		AccountID: world.accountID, Kind: checkin.Community, Date: checkin.Day(time.Now()),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || again.Result != checkin.Unverified {
+		t.Fatalf("the ledger must record the conflict: %+v ok=%v", again, ok)
+	}
+}
+
+func TestCheckInRefreshNeverClaimsGameFromAccountState(t *testing.T) {
+	world := newCheckInWorld(t, true)
+	ctx := context.Background()
+	// The account-level game state says signed, but this role has no record of
+	// its own; a page refresh must not paint it as done.
+	world.mu.Lock()
+	world.todaySign = true
+	world.mu.Unlock()
+	snap, err := world.backend.CheckInState(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Signed[state.CheckGame] {
+		t.Fatalf("account-level state must not sign this role off: %+v", snap)
+	}
+	if snap.Result[state.CheckGame] == state.CheckResultAlready || snap.Result[state.CheckGame] == state.CheckResultSuccess {
+		t.Fatalf("a refresh must not claim a game result it has no role-level evidence for: %+v", snap)
+	}
+	if got := world.count(func() int { return world.gamePosts }); got != 0 {
+		t.Fatalf("a refresh must never write, got %d writes", got)
 	}
 }

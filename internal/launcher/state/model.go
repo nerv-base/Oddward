@@ -123,6 +123,7 @@ const (
 	CheckInStateFailed
 	CheckInBegin
 	CheckInSigned
+	CheckInConfirm
 	CheckInAutoToggle
 	CheckInAutoSaved
 	CheckInAutoTick
@@ -193,6 +194,7 @@ const (
 	TajiduoCheckInSign
 	TajiduoCheckInStatus
 	TajiduoCheckInAuto
+	TajiduoCheckInLaunch
 )
 
 type Effect struct {
@@ -202,7 +204,9 @@ type Effect struct {
 	Token      uint64
 	RoleID     string
 	WishFormat WishFormat
-	Confirmed  bool
+	// Confirmed marks a step the user explicitly approved: a lossy export or
+	// a retry of a check-in whose last answer never arrived.
+	Confirmed bool
 	// CheckInKind and Enabled address one daily task or one switch.
 	CheckInKind CheckInKind
 	Enabled     bool

@@ -29,6 +29,8 @@ type checkInPageData struct {
 	Detail  [state.CheckInKinds]string
 	Failure [state.CheckInKinds]state.CheckInFailure
 	At      [state.CheckInKinds]time.Time
+	// Confirm arms the one manual retry of a result whose answer never came.
+	Confirm [state.CheckInKinds]bool
 
 	StatusPhase   state.CheckInStatusPhase
 	StatusFailure state.CheckInFailure
@@ -36,6 +38,7 @@ type checkInPageData struct {
 
 	Now       time.Time
 	OnSign    func(state.CheckInKind)
+	OnConfirm func(state.CheckInKind, bool)
 	OnRefresh func()
 	OnStatus  func()
 	OnRelink  func()
@@ -255,6 +258,9 @@ func (s *Shell) checkInDetailLine(data checkInPageData, k state.CheckInKind) (st
 		}
 		return detail, warn, true
 	case state.CheckInUnknown:
+		if data.Confirm[k] {
+			return "上次结果未确认，再次提交可能重复记入；服务器确认前请先刷新状态。", warn, true
+		}
 		return "结果待核实：请求可能已经送达服务器。请稍后刷新状态确认，Oddward 不会自动重试。", warn, true
 	case state.CheckInUnlinked:
 		return "关联塔吉多后才能签到。", muted, false
@@ -276,8 +282,11 @@ func (s *Shell) checkInActionLabel(data checkInPageData, k state.CheckInKind) (s
 		return "签到中…", true
 	case data.Phase[k] == state.CheckInDone:
 		return "今日已签到", true
+	case data.Phase[k] == state.CheckInUnknown && data.Confirm[k]:
+		return "确认提交", false
 	case data.Phase[k] == state.CheckInUnknown:
-		return "待核实", true
+		// The first click only opens the confirmation; nothing is sent yet.
+		return "重新提交", false
 	}
 	return "签到", false
 }
@@ -305,7 +314,18 @@ func (s *Shell) checkInTaskCard(c *ui.Context, data checkInPageData, k state.Che
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(checkinSpaceSM).Children(func() {
 			label, disabled := s.checkInActionLabel(data, k)
 			button := s.checkInQuietButton(c, key+"-sign", label, disabled)
-			button.OnClick(func() { checkInInvokeSign(data.OnSign, k) })
+			switch {
+			case data.Phase[k] == state.CheckInUnknown && data.Confirm[k]:
+				// The retry is offered only after an explicit confirmation, and
+				// the user can still call it off without sending anything.
+				button.OnClick(func() { checkInInvokeSign(data.OnSign, k) })
+				cancel := s.checkInQuietButton(c, key+"-cancel", "取消", false)
+				cancel.OnClick(func() { checkInInvokeConfirm(data.OnConfirm, k, false) })
+			case data.Phase[k] == state.CheckInUnknown:
+				button.OnClick(func() { checkInInvokeConfirm(data.OnConfirm, k, true) })
+			default:
+				button.OnClick(func() { checkInInvokeSign(data.OnSign, k) })
+			}
 			ui.Box(c).Grow(1)
 			// The caption is the switch's accessible name, so it names the task
 			// instead of a bare "自动".
@@ -320,6 +340,12 @@ func (s *Shell) checkInTaskCard(c *ui.Context, data checkInPageData, k state.Che
 func checkInInvokeSign(fn func(state.CheckInKind), k state.CheckInKind) {
 	if fn != nil {
 		fn(k)
+	}
+}
+
+func checkInInvokeConfirm(fn func(state.CheckInKind, bool), k state.CheckInKind, armed bool) {
+	if fn != nil {
+		fn(k, armed)
 	}
 }
 
@@ -341,15 +367,25 @@ func (s *Shell) checkInStatusCard(c *ui.Context, data checkInPageData) {
 			ui.Text(c, s.checkInFetchedLine(data)).FontSize(checkinTextCaption).TextColor(muted).SingleLine()
 			s.quietButton(c, "checkin-status-refresh", "刷新", data.StatusPhase == state.CheckStatusLoading || !data.Linked).OnClick(func() { wishInvoke(data.OnStatus) })
 		})
+		haveRole := data.Role.RoleID != "" || data.Role.Name != ""
 		switch data.StatusPhase {
 		case state.CheckStatusFailed:
 			reason := checkInFailureText(data.StatusFailure)
 			if reason == "" {
 				reason = "请稍后再试"
 			}
-			ui.Text(c, "读取游戏信息失败 · "+reason).FontSize(checkinTextBody).TextColor(s.wishWarningColor()).LineHeight(wishBodyLineHeight)
-			return
+			line := "读取游戏信息失败 · " + reason
+			if haveRole {
+				line = "刷新失败 · " + reason + "；下面仍是上次获取的数值。"
+			}
+			ui.Text(c, line).FontSize(checkinTextBody).TextColor(s.wishWarningColor()).LineHeight(wishBodyLineHeight)
+			if !haveRole {
+				return
+			}
 		case state.CheckStatusReady:
+			if !haveRole {
+				return
+			}
 		default:
 			ui.Text(c, "尚未读取游戏信息。点「刷新」从塔吉多获取当前数值。").FontSize(checkinTextBody).TextColor(muted)
 			return
@@ -380,10 +416,20 @@ func (s *Shell) checkInStatusCard(c *ui.Context, data checkInPageData) {
 }
 
 func (s *Shell) checkInFetchedLine(data checkInPageData) string {
-	if data.StatusPhase != state.CheckStatusReady || data.Role.FetchedAt.IsZero() {
+	if data.Role.FetchedAt.IsZero() {
 		return "尚未获取"
 	}
-	return "获取于 " + data.Role.FetchedAt.In(time.Local).Format("01-02 15:04")
+	stamp := data.Role.FetchedAt.In(time.Local).Format("01-02 15:04")
+	switch data.StatusPhase {
+	case state.CheckStatusReady:
+		return "获取于 " + stamp
+	case state.CheckStatusFailed:
+		if data.Role.RoleID == "" && data.Role.Name == "" {
+			return "尚未获取"
+		}
+		return "显示上次获取 " + stamp
+	}
+	return "尚未获取"
 }
 
 // checkInStat draws one value with a proportion meter. The number is always

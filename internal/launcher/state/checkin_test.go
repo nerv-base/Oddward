@@ -276,7 +276,7 @@ func TestCheckInAutoToggleCommitsAndReverts(t *testing.T) {
 	if !m.CheckIn.Auto[CheckGame] {
 		t.Fatal("switch did not turn on optimistically")
 	}
-	m, _ = Reduce(m, Event{Kind: CheckInAutoSaved, Token: fx[0].Token, Check: CheckInPayload{Kind: CheckGame}})
+	m, _ = Reduce(m, Event{Kind: CheckInAutoSaved, Token: fx[0].Token, Check: CheckInPayload{Kind: CheckGame, Enabled: true}})
 	if !m.CheckIn.AutoSaved[CheckGame] {
 		t.Fatal("saved switch was not committed")
 	}
@@ -285,7 +285,8 @@ func TestCheckInAutoToggleCommitsAndReverts(t *testing.T) {
 	if len(fx) != 1 || off.CheckIn.Auto[CheckGame] {
 		t.Fatalf("second toggle = %v, state %+v", fx, off.CheckIn)
 	}
-	reverted, _ := Reduce(off, Event{Kind: CheckInAutoSaved, Token: fx[0].Token, Check: CheckInPayload{Kind: CheckGame, Fail: CheckInFailureStorage}})
+	// A failed write reports the value still on disk, so the switch goes back.
+	reverted, _ := Reduce(off, Event{Kind: CheckInAutoSaved, Token: fx[0].Token, Check: CheckInPayload{Kind: CheckGame, Enabled: true, Fail: CheckInFailureStorage}})
 	if !reverted.CheckIn.Auto[CheckGame] {
 		t.Fatal("failed switch write did not restore the saved value")
 	}
@@ -376,8 +377,10 @@ func TestCheckInStatusPanelIsFenced(t *testing.T) {
 	if next.CheckIn.StatusPhase != CheckStatusFailed || next.CheckIn.StatusFailure != CheckInFailureOffline {
 		t.Fatalf("status failure = %+v", next.CheckIn)
 	}
-	if next.CheckIn.Role.Name != "" {
-		t.Fatal("failed status read kept a role")
+	// A failed refresh keeps the last numbers on screen; only the phase and
+	// reason change, so the panel can still show what was last fetched.
+	if next.CheckIn.Role.Name != "漂泊者" || next.CheckIn.Role.Stamina != 240 {
+		t.Fatalf("failed status read dropped the last snapshot: %+v", next.CheckIn.Role)
 	}
 	home := m
 	home.Page = Home
@@ -442,5 +445,124 @@ func TestCheckInAutoWindowBounds(t *testing.T) {
 	}
 	if got := CheckInDay(checkInAfternoon()); got != "2026-11-17" {
 		t.Fatalf("CheckInDay = %q", got)
+	}
+}
+
+func TestCheckInRoleChangeClearsOldRoleState(t *testing.T) {
+	m := checkInFixture(t)
+	m, requested := Reduce(m, Event{Kind: CheckInStatusRequested})
+	if len(requested) != 1 {
+		t.Fatalf("status request produced %v", requested)
+	}
+	role := CheckInRole{Name: "旧角色", RoleID: "123", Level: 61, Stamina: 187, StaminaMax: 240}
+	m, _ = Reduce(m, Event{Kind: CheckInStatusLoaded, Token: requested[0].Token, Check: CheckInPayload{Role: role}})
+	if m.CheckIn.StatusPhase != CheckStatusReady {
+		t.Fatalf("status phase = %v", m.CheckIn.StatusPhase)
+	}
+	m, effect, ok := begin(t, m, CheckGame)
+	if !ok {
+		t.Fatal("the first role could not start its game write")
+	}
+	m, _ = Reduce(m, Event{Kind: CheckInSigned, Token: effect.Token, Check: signPayload(CheckGame, CheckResultSuccess, true, true)})
+
+	// The same account rebinds to another role.
+	p := linkedPayload("acc")
+	p.RoleID = "456"
+	next := checkInLoaded(t, m, p)
+	c := next.CheckIn
+	if c.Role.Name != "" || c.Role.Level != 0 || c.StatusPhase != CheckStatusIdle {
+		t.Fatalf("a role change must drop the previous role snapshot: %+v", c.Role)
+	}
+	if c.Signed[CheckGame] || c.Phase[CheckGame] == CheckInDone {
+		t.Fatalf("a role change must not keep the previous role's game result: %+v", c)
+	}
+	if c.Phase[CheckGame] != CheckInReady {
+		t.Fatalf("the new role starts unsigned, phase = %v", c.Phase[CheckGame])
+	}
+}
+
+func TestCheckInUnknownNeedsConfirmationToResubmit(t *testing.T) {
+	m := checkInFixture(t)
+	m, effect, ok := begin(t, m, CheckGame)
+	if !ok {
+		t.Fatal("the first write was refused")
+	}
+	m, _ = Reduce(m, Event{Kind: CheckInSigned, Token: effect.Token, Check: signPayload(CheckGame, CheckResultUnverified, true, false)})
+	if m.CheckIn.Phase[CheckGame] != CheckInUnknown {
+		t.Fatalf("phase = %v, want unknown", m.CheckIn.Phase[CheckGame])
+	}
+	// Without a confirmation the same button must not send a second request.
+	if _, _, ok := begin(t, m, CheckGame); ok {
+		t.Fatal("an unconfirmed retry was sent after a lost answer")
+	}
+	m, _ = Reduce(m, Event{Kind: CheckInConfirm, Check: CheckInPayload{Kind: CheckGame, Enabled: true}})
+	if !m.CheckIn.Confirm[CheckGame] {
+		t.Fatal("confirmation was not armed")
+	}
+	next, retry, ok := begin(t, m, CheckGame)
+	if !ok || retry.Kind != TajiduoCheckInSign || !retry.Confirmed {
+		t.Fatalf("a confirmed retry must be sent and marked, got %+v", retry)
+	}
+	if next.CheckIn.Confirm[CheckGame] {
+		t.Fatal("one confirmation must arm exactly one retry")
+	}
+	// An automatic attempt never claims the confirmation.
+	auto, effects := Reduce(m, Event{Kind: CheckInAutoTick, Now: checkInAfternoon()})
+	for _, f := range effects {
+		if f.Confirmed {
+			t.Fatal("an automatic attempt must never claim the confirmation")
+		}
+	}
+	if len(effects) != 0 {
+		t.Fatalf("a task whose result is already recorded must not be repeated: %v", effects)
+	}
+	if !auto.CheckIn.Confirm[CheckGame] {
+		t.Fatal("the confirmation must still be waiting for the user")
+	}
+}
+
+func TestCheckInLaunchIsTriggeredByStartingTheGame(t *testing.T) {
+	m := InitialNormal()
+	m.Managed.Phase, m.Managed.Root, m.Managed.RiskAccepted = ManagedReady, `D:\SyntheticGame`, true
+	next, fx := Reduce(m, Event{Kind: Primary})
+	if len(fx) != 2 || fx[0].Kind != PrepareManagedLogin || fx[1].Kind != TajiduoCheckInLaunch {
+		t.Fatalf("starting the game must ask for one check-in attempt, got %v", fx)
+	}
+	if next.Managed.Phase != ManagedPreparing || next.Page != Home {
+		t.Fatalf("the launch flow must keep its own transition: %+v", next.Managed.Phase)
+	}
+	// Opening the page or letting time pass is not a trigger.
+	page := m
+	page.Page = CheckIn
+	if _, fx := Reduce(page, Event{Kind: CheckInAutoTick, Now: checkInAfternoon()}); len(fx) != 0 {
+		t.Fatalf("a page visit must not sign anything: %v", fx)
+	}
+	// A blocked launch does not reach the trigger.
+	blocked := m
+	blocked.Managed.Phase = ManagedRunning
+	if _, fx := Reduce(blocked, Event{Kind: Primary}); len(fx) != 0 {
+		t.Fatalf("a blocked launch must not fire the trigger: %v", fx)
+	}
+}
+
+func TestCheckInStatusFailureKeepsTheLastSnapshot(t *testing.T) {
+	m := checkInFixture(t)
+	m, first := Reduce(m, Event{Kind: CheckInStatusRequested})
+	if len(first) != 1 {
+		t.Fatalf("status request produced %v", first)
+	}
+	role := CheckInRole{Name: "合成测试角色", Stamina: 187, StaminaMax: 240}
+	m, _ = Reduce(m, Event{Kind: CheckInStatusLoaded, Token: first[0].Token, Check: CheckInPayload{Role: role}})
+	m, second := Reduce(m, Event{Kind: CheckInStatusRequested})
+	if len(second) != 1 {
+		t.Fatalf("second status request produced %v", second)
+	}
+	next, _ := Reduce(m, Event{Kind: CheckInStatusFailed, Token: second[0].Token, Check: CheckInPayload{Fail: CheckInFailureOffline}})
+	c := next.CheckIn
+	if c.StatusPhase != CheckStatusFailed || c.StatusFailure != CheckInFailureOffline {
+		t.Fatalf("a failed read must be reported: %+v", c)
+	}
+	if c.Role.Name != "合成测试角色" || c.Role.Stamina != 187 || c.Role.StaminaMax != 240 {
+		t.Fatalf("a failed read must keep the last snapshot: %+v", c.Role)
 	}
 }

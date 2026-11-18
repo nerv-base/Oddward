@@ -104,7 +104,10 @@ type Shell struct {
 	checkinOut     chan state.Event
 	checkinStarted bool
 	checkinVisit   bool
-	checkinWakeAt  time.Time
+	// checkinAutoBusy serializes automatic-switch writes; checkinLaunch asks
+	// for one automatic attempt after the user starts the game.
+	checkinAutoBusy bool
+	checkinLaunch   bool
 	// Shown runs once, off the UI thread, after the first frame is built; the
 	// installed build marks its version healthy there.
 	Shown     func()

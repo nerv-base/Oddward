@@ -154,7 +154,7 @@ func TestCommunitySignAlreadySigned(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
-func TestGameRewardsToleratesShapeAndSkipsEmptySlots(t *testing.T) {
+func TestGameRewardsKeepTheirSlotPositions(t *testing.T) {
 	cases := map[string]any{
 		"list": []any{
 			map[string]any{"icon": "a.png", "name": "金币", "num": 30},
@@ -175,7 +175,16 @@ func TestGameRewardsToleratesShapeAndSkipsEmptySlots(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(got) == 0 || got[0].Item != "金币" || got[0].Count != 30 {
+			// The caller indexes this list by the day of the month, so an empty
+			// slot has to keep its position instead of being dropped.
+			if name == "list" {
+				if len(got) != 3 {
+					t.Fatalf("rewards = %+v, want one entry per server slot", got)
+				}
+				if got[0].Item != "金币" || got[0].Count != 30 || got[2].Item != "经验" || got[2].Count != 5 {
+					t.Fatalf("rewards = %+v", got)
+				}
+			} else if len(got) != 1 || got[0].Item != "金币" || got[0].Count != 30 {
 				t.Fatalf("rewards = %+v", got)
 			}
 		})

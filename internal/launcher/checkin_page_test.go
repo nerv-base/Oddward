@@ -184,6 +184,7 @@ type checkInFake struct {
 	mu       sync.Mutex
 	loads    []bool
 	signs    []state.CheckInKind
+	confirms []bool
 	accounts []string
 	autos    [][3]any
 	role     state.CheckInRole
@@ -200,9 +201,10 @@ func (f *checkInFake) CheckInState(_ context.Context, refresh bool) (CheckInSnap
 	return f.snapshot, f.err
 }
 
-func (f *checkInFake) Sign(_ context.Context, accountID string, kind state.CheckInKind) (CheckInOutcome, error) {
+func (f *checkInFake) Sign(_ context.Context, accountID string, kind state.CheckInKind, confirm bool) (CheckInOutcome, error) {
 	f.mu.Lock()
 	f.signs = append(f.signs, kind)
+	f.confirms = append(f.confirms, confirm)
 	f.accounts = append(f.accounts, accountID)
 	gate := f.gate
 	f.mu.Unlock()
@@ -294,5 +296,133 @@ func TestCheckInShellLoadsOnEntryAndSignsWithoutBlockingUI(t *testing.T) {
 	}
 	if phases := s.Model.CheckIn.Phase[state.CheckCommunity]; phases != state.CheckInReady {
 		t.Fatalf("the other task must stay untouched, got %v", phases)
+	}
+}
+
+func TestCheckInUnknownResultNeedsExplicitConfirmation(t *testing.T) {
+	s := NewShell(settled(state.Ready))
+	defer s.Dispose()
+	// The backend reports the community task as unverified: an answer never
+	// arrived, so the page must not offer a plain retry.
+	snapshot := CheckInSnapshot{
+		AccountID: "preview-account", RoleID: "10001", Linked: true,
+		Known: [state.CheckInKinds]bool{true, true},
+	}
+	snapshot.Result[state.CheckCommunity] = state.CheckResultUnverified
+	snapshot.Detail[state.CheckCommunity] = "服务器称已签到，但状态未确认"
+	fake := &checkInFake{
+		snapshot: snapshot,
+		outcome:  CheckInOutcome{Kind: state.CheckCommunity, Result: state.CheckResultSuccess, Detail: "经验 +10 · 金币 +5", Known: true, Signed: true},
+	}
+	s.CheckInBackend = fake
+	tt := ui.NewTester(s.View, 1280, 720)
+	if clickFailed(tt, "自动签到") {
+		t.Fatal("check-in page unreachable")
+	}
+	waitCheckIn(t, tt, func() bool {
+		return s.Model.CheckIn.Loaded && s.Model.CheckIn.Phase[state.CheckCommunity] == state.CheckInUnknown
+	})
+	tt.Frame()
+	if !tt.HasText("待核实") {
+		t.Fatal("an unverified answer must stay visible")
+	}
+	// The first click only arms the confirmation; nothing is sent.
+	if clickFailed(tt, "重新提交") {
+		t.Fatal("an unknown result must offer a resubmit")
+	}
+	tt.Frame()
+	if _, signs := fake.counts(); signs != 0 {
+		t.Fatalf("arming the confirmation must not send a write, got %d", signs)
+	}
+	if s.Model.CheckIn.Phase[state.CheckCommunity] == state.CheckInSigning {
+		t.Fatal("the task must not start before the confirmation")
+	}
+	if !tt.HasText("确认提交") || !tt.HasText("再次提交可能重复") {
+		t.Fatal("the confirmation must say what a resubmit can cost")
+	}
+	// Cancelling returns to the plain unknown state.
+	if clickFailed(tt, "取消") {
+		t.Fatal("the confirmation must be cancellable")
+	}
+	tt.Frame()
+	if s.Model.CheckIn.Confirm[state.CheckCommunity] {
+		t.Fatal("cancel must disarm the confirmation")
+	}
+	// Confirm, then send: the write carries the confirmation.
+	if clickFailed(tt, "重新提交") || clickFailed(tt, "确认提交") {
+		t.Fatal("the confirmed resubmit must be reachable")
+	}
+	waitCheckIn(t, tt, func() bool {
+		_, signs := fake.counts()
+		return signs == 1
+	})
+	fake.mu.Lock()
+	confirms := append([]bool(nil), fake.confirms...)
+	fake.mu.Unlock()
+	if len(confirms) != 1 || !confirms[0] {
+		t.Fatalf("the backend must be told the retry was confirmed, got %v", confirms)
+	}
+}
+
+func TestCheckInAutoWaitsForTheLaunch(t *testing.T) {
+	s := NewShell(settled(state.Ready))
+	defer s.Dispose()
+	fake := &checkInFake{
+		snapshot: CheckInSnapshot{
+			AccountID: "preview-account", RoleID: "10001", Linked: true,
+			Auto:  [state.CheckInKinds]bool{true, false},
+			Known: [state.CheckInKinds]bool{true, true},
+		},
+		outcome: CheckInOutcome{Kind: state.CheckGame, Result: state.CheckResultSuccess, Detail: "本性像素 ×60", Known: true, Signed: true},
+	}
+	s.CheckInBackend = fake
+	tt := ui.NewTester(s.View, 1280, 720)
+	if clickFailed(tt, "自动签到") {
+		t.Fatal("check-in page unreachable")
+	}
+	waitCheckIn(t, tt, func() bool {
+		loads, _ := fake.counts()
+		return loads >= 2 && s.Model.CheckIn.Loaded
+	})
+	// Time passing in an open launcher is not a trigger, even with the switch
+	// armed: nothing is written until the user starts the game.
+	for i := 0; i < 10; i++ {
+		tt.Advance(2 * time.Minute)
+		tt.Frame()
+	}
+	if _, signs := fake.counts(); signs != 0 {
+		t.Fatalf("an idle page must never sign, got %d writes", signs)
+	}
+	if !s.applyCheckInEffect(state.Effect{Kind: state.TajiduoCheckInLaunch}) {
+		t.Fatal("the launch effect must be handled by the shell")
+	}
+	waitCheckIn(t, tt, func() bool {
+		_, signs := fake.counts()
+		return signs == 1
+	})
+	if s.Model.CheckIn.Phase[state.CheckGame] != state.CheckInDone {
+		t.Fatalf("the armed task must be signed by the launch, got %v", s.Model.CheckIn.Phase[state.CheckGame])
+	}
+	if s.Model.CheckIn.Phase[state.CheckCommunity] != state.CheckInReady {
+		t.Fatalf("a disabled switch must stay untouched, got %v", s.Model.CheckIn.Phase[state.CheckCommunity])
+	}
+	fake.mu.Lock()
+	confirms := append([]bool(nil), fake.confirms...)
+	fake.mu.Unlock()
+	for i, confirmed := range confirms {
+		if confirmed {
+			t.Fatalf("automatic attempt %d must not claim a confirmation", i)
+		}
+	}
+	// A second launch on the same day must not spend the day twice.
+	if !s.applyCheckInEffect(state.Effect{Kind: state.TajiduoCheckInLaunch}) {
+		t.Fatal("the launch effect must stay handled")
+	}
+	for i := 0; i < 10; i++ {
+		tt.Advance(2 * time.Minute)
+		tt.Frame()
+	}
+	if _, signs := fake.counts(); signs != 1 {
+		t.Fatalf("a second launch must not resend the day, got %d writes", signs)
 	}
 }

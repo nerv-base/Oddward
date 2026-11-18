@@ -156,8 +156,10 @@ func (r Record) key() Key {
 	return Key{AccountID: r.AccountID, RoleID: r.RoleID, Kind: r.Kind, Date: r.Date}
 }
 
-// Day returns the local calendar day of t, the unit the ledger is keyed by.
-func Day(t time.Time) string { return t.In(time.Local).Format(dateLayout) }
+// Day returns the calendar day of t in t's own zone, the unit the ledger is
+// keyed by. Reading it from t rather than the machine zone keeps a record on the
+// day it was taken even when the two disagree.
+func Day(t time.Time) string { return t.Format(dateLayout) }
 
 // Store is a small, lock-protected JSON ledger. All exported methods are safe
 // for concurrent use and consult the file for every read, so two Oddward

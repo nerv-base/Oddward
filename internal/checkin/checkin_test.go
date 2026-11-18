@@ -295,3 +295,16 @@ func TestDayUsesLocalCalendar(t *testing.T) {
 		t.Fatalf("Day = %q", got)
 	}
 }
+
+func TestDayUsesTheMomentsOwnZone(t *testing.T) {
+	previous := time.Local
+	time.Local = time.UTC
+	t.Cleanup(func() { time.Local = previous })
+	// 00:30 in +08:00 is still the previous day in UTC; a record must follow the
+	// calendar day of the instant it was created in, not the machine zone.
+	east := time.FixedZone("UTC+8", 8*3600)
+	instant := time.Date(2026, 3, 2, 0, 30, 0, 0, east)
+	if got := Day(instant); got != "2026-03-02" {
+		t.Fatalf("Day = %q, want the instant's own calendar day", got)
+	}
+}

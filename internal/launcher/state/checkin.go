@@ -134,6 +134,10 @@ type CheckInState struct {
 	// It stops an automatic task from retrying after a failure or an unknown
 	// result on the same day.
 	AttemptDay [CheckInKinds]string
+	// Confirm arms a manual retry of a task whose last write left no answer.
+	// Without it the write is refused, so an unknown result is never repeated
+	// by a stray click.
+	Confirm [CheckInKinds]bool
 	// Token fences one task's write result.
 	Token [CheckInKinds]uint64
 
@@ -231,6 +235,8 @@ func startedReport(s CheckInState, k CheckInKind, now time.Time) (CheckInState, 
 	s.Detail[k] = ""
 	s.Failure[k] = CheckInFailureNone
 	s.AttemptDay[k] = CheckInDay(now)
+	// One confirmation arms one retry; a second click needs a second one.
+	s.Confirm[k] = false
 	return s, Effect{Kind: TajiduoCheckInSign, CheckInKind: k, Token: s.Token[k]}
 }
 
@@ -270,10 +276,18 @@ func ReduceCheckIn(m Model, e Event) (Model, []Effect, bool) {
 				return m, nil, true
 			}
 			k := e.Check.Kind
-			if !canSign(*c, k) {
+			if !c.Linked || c.NeedsRelink || c.Busy[k] {
 				return m, nil, true
 			}
+			if c.Phase[k] == CheckInUnknown && !c.Confirm[k] {
+				// The last write may already have reached the server. A click
+				// alone does not repeat it; the page asks for confirmation
+				// first, and that request arms this flag.
+				return m, nil, true
+			}
+			confirmed := c.Phase[k] == CheckInUnknown
 			next, fx := startedReport(*c, k, e.Now)
+			fx.Confirmed = confirmed
 			m.CheckIn = next
 			return m, []Effect{fx}, true
 		}
@@ -315,6 +329,13 @@ func ReduceCheckIn(m Model, e Event) (Model, []Effect, bool) {
 			return m, nil, true
 		}
 		return m, effects, true
+	case CheckInConfirm:
+		k := e.Check.Kind
+		if m.Page != CheckIn || m.Overlay != NoOverlay || !k.Valid() || !c.Linked {
+			return m, nil, true
+		}
+		c.Confirm[k] = e.Check.Enabled
+		return m, nil, true
 	case CheckInSigned:
 		if !e.Check.Kind.Valid() || e.Token == 0 {
 			return m, nil, true
@@ -358,17 +379,26 @@ func ReduceCheckIn(m Model, e Event) (Model, []Effect, bool) {
 		return m, []Effect{{Kind: TajiduoCheckInAuto, CheckInKind: k, Enabled: e.Check.Enabled, Token: c.AutoToken[k]}}, true
 	case CheckInAutoSaved:
 		k := e.Check.Kind
-		if !k.Valid() || e.Token == 0 || e.Token != c.AutoToken[k] {
+		if !k.Valid() || e.Token == 0 {
 			return m, nil, true
 		}
 		if e.Check.Fail != CheckInFailureNone {
-			// The switch never reached the ledger: put it back and say why.
-			c.Auto[k] = c.AutoSaved[k]
-			c.AutoFailure[k] = e.Check.Fail
+			// The write never reached the ledger: the switch goes back to what
+			// is on disk. A newer request wins; its own answer settles it.
+			c.AutoSaved[k] = e.Check.Enabled
+			if e.Token == c.AutoToken[k] {
+				c.Auto[k] = e.Check.Enabled
+				c.AutoFailure[k] = e.Check.Fail
+			}
 			return m, nil, true
 		}
-		c.AutoSaved[k] = c.Auto[k]
-		c.AutoFailure[k] = CheckInFailureNone
+		// Record the value that actually reached the ledger. If the user has
+		// already asked for another one, a later write settles the difference;
+		// a stale answer must not clear the newer request's error either.
+		c.AutoSaved[k] = e.Check.Enabled
+		if e.Token == c.AutoToken[k] {
+			c.AutoFailure[k] = CheckInFailureNone
+		}
 		return m, nil, true
 	case CheckInStatusRequested:
 		if m.Page != CheckIn || m.Overlay != NoOverlay || !c.Linked {
@@ -390,9 +420,10 @@ func ReduceCheckIn(m Model, e Event) (Model, []Effect, bool) {
 		if e.Token == 0 || e.Token != c.StatusToken {
 			return m, nil, true
 		}
+		// The last numbers stay on screen with their own timestamp; only the
+		// fact that this refresh failed is new.
 		c.StatusPhase = CheckStatusFailed
 		c.StatusFailure = e.Check.Fail
-		c.Role = CheckInRole{}
 		return m, nil, true
 	}
 	return m, nil, false
@@ -407,6 +438,26 @@ func loadCheckIn(m Model, e Event) Model {
 	}
 	if c.AccountID == "" {
 		c.AccountID = e.Check.AccountID
+	}
+	// A snapshot for another calendar day replaces yesterday's answers; the
+	// ledger for the new day is what the page must show.
+	if e.Check.Day != "" && c.Day != "" && c.Day != e.Check.Day {
+		*c = c.rollDay(e.Check.Day)
+	}
+	// A link that now points at another role invalidates everything the
+	// previous role's answers described, including the cached summary. The
+	// snapshot that follows is read from the new role's ledger.
+	if c.RoleID != "" && e.Check.RoleID != c.RoleID {
+		for k := 0; k < CheckInKinds; k++ {
+			c.Token[k]++
+			c.Busy[k] = false
+			c.AttemptDay[k] = ""
+			c.Confirm[k] = false
+		}
+		c.StatusToken++
+		c.StatusPhase = CheckStatusIdle
+		c.StatusFailure = CheckInFailureNone
+		c.Role = CheckInRole{}
 	}
 	c.Loading = false
 	c.Loaded = true
@@ -465,6 +516,7 @@ func loadCheckIn(m Model, e Event) Model {
 			c.Detail[k] = ""
 			c.Failure[k] = CheckInFailureNone
 			c.Signed[k] = false
+			c.Confirm[k] = false
 		}
 		c.StatusPhase = CheckStatusIdle
 		c.Role = CheckInRole{}

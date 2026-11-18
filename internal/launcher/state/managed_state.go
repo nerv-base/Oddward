@@ -104,7 +104,10 @@ func reduceManaged(m Model, e Event) (Model, []Effect, bool) {
 		p.Downloaded, p.Total = 0, 0
 		m.Progress = 0
 		m.Overlay = NoOverlay
-		return m, []Effect{{Kind: PrepareManagedLogin, Token: p.Request}}, true
+		// The user asked to start the game, so the daily check-in may run now
+		// (when its switch is on). It is one more effect: the launch path never
+		// waits on it and a failed launch does not cancel it.
+		return m, []Effect{{Kind: PrepareManagedLogin, Token: p.Request}, {Kind: TajiduoCheckInLaunch}}, true
 	}
 	if e.Kind == Primary {
 		if m.Page != Home || m.Overlay != NoOverlay || activeHost || ManagedBusy(p.Phase) {

@@ -18,11 +18,12 @@ type CheckInBackend interface {
 	// switches and the ledger's answer for today. refresh asks the server to
 	// confirm today's state instead of trusting the ledger alone.
 	CheckInState(ctx context.Context, refresh bool) (CheckInSnapshot, error)
-	// Sign runs one daily task for the account the page last showed. It reads
-	// the server state first and never posts when the server already reports
-	// the day as complete. A different current account is refused, so a stale
-	// page cannot sign for someone else.
-	Sign(ctx context.Context, accountID string, kind state.CheckInKind) (CheckInOutcome, error)
+	// Sign runs one daily task for the account the page last showed. The
+	// ledger is read first: a recorded answer for today is reported as it is,
+	// and an earlier attempt whose answer never arrived is only repeated when
+	// confirm is set. A different current account is refused, so a stale page
+	// cannot sign for someone else.
+	Sign(ctx context.Context, accountID string, kind state.CheckInKind, confirm bool) (CheckInOutcome, error)
 	// RoleStatus reads the role summary shown by the status panel.
 	RoleStatus(ctx context.Context) (state.CheckInRole, error)
 	// SetAuto persists one automatic switch for the account the page showed.
