@@ -11,7 +11,5 @@ var Version = ""
 // Repository is the GitHub repository whose releases carry updates.
 const Repository = "nerv-base/Oddward"
 
-// UpdatePublicKey is the base64 Ed25519 public key that signs update
-// manifests. Empty means no key has been configured yet: every update is
-// refused and the release workflow fails before publishing.
-const UpdatePublicKey = ""
+// UpdatePublicKey is the base64 Ed25519 public key used to verify update manifests.
+const UpdatePublicKey = "tjdSyezA+LYoG1N8xCngMi4AQw8ROLdWl585zpJfBM8="
