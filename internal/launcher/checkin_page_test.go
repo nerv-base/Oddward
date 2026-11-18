@@ -192,12 +192,21 @@ type checkInFake struct {
 	outcome  CheckInOutcome
 	err      error
 	gate     chan struct{}
+	loadGate chan struct{}
 }
 
-func (f *checkInFake) CheckInState(_ context.Context, refresh bool) (CheckInSnapshot, error) {
+func (f *checkInFake) CheckInState(ctx context.Context, refresh bool) (CheckInSnapshot, error) {
 	f.mu.Lock()
 	f.loads = append(f.loads, refresh)
+	gate := f.loadGate
 	f.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return CheckInSnapshot{}, ctx.Err()
+		}
+	}
 	return f.snapshot, f.err
 }
 
@@ -377,12 +386,21 @@ func TestCheckInAutoWaitsForTheLaunch(t *testing.T) {
 	}
 	s.CheckInBackend = fake
 	tt := ui.NewTester(s.View, 1280, 720)
+	// Keep both simulated launches on one day, outside the midnight grace period.
+	local := tt.Now().In(time.Local)
+	if local.Hour() == 23 || local.Hour() == 0 {
+		next := time.Date(local.Year(), local.Month(), local.Day(), 1, 0, 0, 0, time.Local)
+		if local.Hour() == 23 {
+			next = next.AddDate(0, 0, 1)
+		}
+		tt.Advance(next.Sub(local))
+	}
 	if clickFailed(tt, "自动签到") {
 		t.Fatal("check-in page unreachable")
 	}
 	waitCheckIn(t, tt, func() bool {
 		loads, _ := fake.counts()
-		return loads >= 2 && s.Model.CheckIn.Loaded
+		return loads >= 2 && s.Model.CheckIn.Loaded && !s.Model.CheckIn.Loading
 	})
 	// Time passing in an open launcher is not a trigger, even with the switch
 	// armed: nothing is written until the user starts the game.
@@ -393,9 +411,21 @@ func TestCheckInAutoWaitsForTheLaunch(t *testing.T) {
 	if _, signs := fake.counts(); signs != 0 {
 		t.Fatalf("an idle page must never sign, got %d writes", signs)
 	}
+	refreshGate := make(chan struct{})
+	fake.mu.Lock()
+	fake.loadGate = refreshGate
+	fake.mu.Unlock()
 	if !s.applyCheckInEffect(state.Effect{Kind: state.TajiduoCheckInLaunch}) {
 		t.Fatal("the launch effect must be handled by the shell")
 	}
+	waitCheckIn(t, tt, func() bool {
+		loads, _ := fake.counts()
+		return loads == 3
+	})
+	if phase := s.Model.CheckIn.Phase[state.CheckGame]; phase != state.CheckInReady {
+		t.Fatalf("automatic sign-in must wait for the launch refresh, got phase %v", phase)
+	}
+	close(refreshGate)
 	waitCheckIn(t, tt, func() bool {
 		_, signs := fake.counts()
 		return signs == 1 && s.Model.CheckIn.Phase[state.CheckGame] == state.CheckInDone

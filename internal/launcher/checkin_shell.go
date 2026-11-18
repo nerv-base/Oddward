@@ -203,11 +203,13 @@ func (s *Shell) syncCheckIn(c *ui.Context) {
 		// button asks again later.
 		s.Dispatch(state.Event{Kind: state.CheckInStatusRequested})
 	}
-	if s.checkinLaunch && checkIn.Loaded {
-		// The launch snapshot is in: one automatic attempt for the day. The
-		// state layer skips it when the switch is off or the task is settled.
+	if s.checkinLaunch && !checkIn.Loading {
+		// A previous snapshot can stay visible while the launch refresh runs.
+		// Use only a successful refresh for this launch's automatic attempt.
 		s.checkinLaunch = false
-		s.Dispatch(state.Event{Kind: state.CheckInAutoTick, Now: s.now})
+		if checkIn.Loaded && checkIn.LoadFailure == state.CheckInFailureNone {
+			s.Dispatch(state.Event{Kind: state.CheckInAutoTick, Now: s.now})
+		}
 	}
 	s.pumpCheckInAuto()
 }
