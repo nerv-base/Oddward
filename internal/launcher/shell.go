@@ -91,13 +91,17 @@ type Shell struct {
 	detailOut     chan detailResult
 	newsPending   bool
 	detailPending bool
-	// UpdateBackend is nil in development and portable builds.
-	UpdateBackend     UpdateBackend
-	NetworkBackend    NetworkBackend
-	NetworkForm       NetworkForm
-	workOut           chan state.Event
-	updateProgress    chan state.Event
-	updateAutoChecked bool
+	// GameDownloads performs native work through the injected system boundary.
+	GameDownloads        GameDownloads
+	download             downloadWork
+	DownloadForm         DownloadForm
+	DownloadSettingsOpen bool
+	UpdateBackend        UpdateBackend
+	NetworkBackend       NetworkBackend
+	NetworkForm          NetworkForm
+	workOut              chan state.Event
+	updateProgress       chan state.Event
+	updateAutoChecked    bool
 	// CheckInBackend signs and reads the saved Tajiduo link. A nil backend
 	// leaves the page in its unlinked state and touches no network.
 	CheckInBackend CheckInBackend
@@ -155,7 +159,7 @@ func (s *Shell) Dispatch(e state.Event) {
 
 func (s *Shell) apply(fx []state.Effect) {
 	for _, f := range fx {
-		if s.applyWishLinkEffect(f) || s.applyWishEffect(f) || s.applyCheckInEffect(f) || s.applyManagedEffect(f) || s.applyUpdateEffect(f) || s.applyLoginEffect(f) {
+		if s.applyDownloadEffect(f) || s.applyWishLinkEffect(f) || s.applyWishEffect(f) || s.applyCheckInEffect(f) || s.applyManagedEffect(f) || s.applyUpdateEffect(f) || s.applyLoginEffect(f) {
 			continue
 		}
 		switch f.Kind {
@@ -175,10 +179,7 @@ func (s *Shell) apply(fx []state.Effect) {
 			}
 			s.pending = &demoOperation{effect: f, start: s.now, base: s.Model.Progress, duration: d}
 		case state.CloseWindow:
-			s.cancel()
-			if s.CloseWindow != nil {
-				s.CloseWindow()
-			}
+			s.closeAfterDownloads()
 		case state.FetchNews:
 			s.beginNews(f.Token)
 		case state.FetchDetail:
@@ -341,6 +342,9 @@ func (s *Shell) tick(c *ui.Context) {
 	s.syncWishImages()
 	s.syncBannerMedia()
 	s.syncManaged()
+	s.syncDownloads()
+	s.syncDownloadProcesses(c)
+	s.syncDownloadOffers(c)
 	s.syncUpdate()
 	s.syncCheckIn(c)
 }

@@ -69,7 +69,7 @@ func UpdateOffered(p UpdatePhase) bool {
 // UpdateBlocked reports whether restarting into a new version now would cut
 // off a running game, login or task the launcher is watching.
 func UpdateBlocked(m Model) bool {
-	return Active(m.Flow) || m.Flow == Paused || m.Flow == Running ||
+	return downloadLaunchBlocked(m) || m.Download.GameRunning || Active(m.Flow) || m.Flow == Paused || m.Flow == Running ||
 		m.NormalMode && (ManagedBusy(m.Managed.Phase) || ManagedActive(m.Managed.Phase))
 }
 

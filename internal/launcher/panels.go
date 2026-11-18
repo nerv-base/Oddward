@@ -31,6 +31,8 @@ func (s *Shell) overlay(c *ui.Context) {
 		title, kicker = "首次启动确认", "SYS / NOTICE"
 	case state.UpdateDetails:
 		title, kicker = "Oddward 更新", "SYS / UPDATE"
+	case state.DownloadDetails:
+		title, kicker = "游戏下载与更新", "GAME / DOWNLOAD"
 	case state.NetworkSettings:
 		title, kicker = "网络", "SYS / NETWORK"
 	}
@@ -85,10 +87,12 @@ func (s *Shell) overlay(c *ui.Context) {
 					s.managedNoticePanel(c)
 				case state.UpdateDetails:
 					s.updatePanel(c)
+				case state.DownloadDetails:
+					s.downloadPanel(c)
 				case state.NetworkSettings:
 					s.networkPanel(c)
 				}
-				if s.Model.Overlay != state.NewsDetails && s.Model.Overlay != state.LocateGame && s.Model.Overlay != state.UpdateDetails {
+				if s.Model.Overlay != state.NewsDetails && s.Model.Overlay != state.LocateGame && s.Model.Overlay != state.UpdateDetails && s.Model.Overlay != state.DownloadDetails {
 					ui.Box(c).Grow(1)
 				}
 				ui.Row(c).Gap(8).Children(func() {
@@ -120,6 +124,9 @@ func (s *Shell) setting(c *ui.Context, key, label, description string, on, disab
 
 func (s *Shell) settingsPanel(c *ui.Context) {
 	s.versionSetting(c)
+	if s.Model.NormalMode {
+		s.quietButton(c, "download-settings-entry", "下载设置", false).FillWidth().Height(downloadButtonHeight).OnClick(s.openDownloadSettings)
+	}
 	ui.Box(c).FillWidth().Height(1).Background(hairline)
 	s.setting(c, "motion-setting", "动态背景", "静音循环播放本地视频。暂停后显示静态背景。", s.Model.Motion, s.Model.Media == state.MediaUnavailable, state.ToggleMotion)
 	s.setting(c, "reduced-motion", "减少动态效果", "暂停背景与界面动画，同时遵循系统动态效果偏好。", s.Model.ReducedMotion, false, state.ToggleReducedMotion)

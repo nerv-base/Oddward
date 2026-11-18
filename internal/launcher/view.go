@@ -37,6 +37,15 @@ var (
 )
 
 const (
+	downloadInputHeight      float32 = 34
+	downloadGap              float32 = 10
+	downloadTitleSize        float32 = 20
+	downloadBodySize         float32 = 14
+	downloadCaptionSize      float32 = 12
+	downloadButtonHeight     float32 = 36
+	downloadMeterHeight      float32 = 4
+	downloadStatusHeight     float32 = 26
+	downloadStatusBottom     float32 = homeBottom - downloadStatusHeight - 8
 	brandMarkSize            float32 = 40
 	bezelWidth               float32 = 8
 	canvasRadius             float32 = 16
@@ -328,6 +337,7 @@ func (s *Shell) action(c *ui.Context) {
 	if s.Model.NormalMode {
 		s.managedActionNote(c)
 	}
+	s.downloadStatus(c)
 	s.footer(c)
 }
 

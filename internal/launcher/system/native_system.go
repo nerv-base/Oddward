@@ -39,6 +39,7 @@ type NativeManagedBackend struct {
 	HTTPClient *http.Client
 	// LauncherVersion is reported to the login service.
 	LauncherVersion string
+	Downloads       *GameDownloadBackend
 }
 
 func (b NativeManagedBackend) Locate(ctx context.Context, path string) (string, error) {
@@ -63,6 +64,11 @@ func (b NativeManagedBackend) Prepare(ctx context.Context, root string, progress
 	if err != nil {
 		return nil, err
 	}
+	if b.Downloads != nil {
+		if err := b.Downloads.checkLaunch(ctx, found.Root); err != nil {
+			return nil, errors.New(downloadMessage(err))
+		}
+	}
 	plan, err := session.Prepare(ctx, session.Config{
 		Root:            found.Root,
 		ElevatedHost:    true,
@@ -74,7 +80,7 @@ func (b NativeManagedBackend) Prepare(ctx context.Context, root string, progress
 	if err != nil {
 		return nil, nativePrepareError(err)
 	}
-	return nativePlan{plan: plan}, nil
+	return nativePlan{plan: plan, downloads: b.Downloads, root: found.Root}, nil
 }
 
 // nativePrepareError turns launch preconditions into the short sentences the
@@ -94,13 +100,27 @@ func nativePrepareError(err error) error {
 	}
 }
 
-type nativePlan struct{ plan *session.Plan }
+type nativePlan struct {
+	plan      *session.Plan
+	downloads *GameDownloadBackend
+	root      string
+}
 
 func (p nativePlan) Summary() string { return p.plan.Summary() }
 
 func (p nativePlan) Close() error { return p.plan.Close() }
 
 func (p nativePlan) Start(ctx context.Context) (launcher.GameSession, error) {
+	if p.downloads != nil {
+		lock, err := acquireDownloadMutation(p.root)
+		if err != nil {
+			return nil, err
+		}
+		defer lock.Close()
+		if err := p.downloads.checkLaunch(ctx, p.root); err != nil {
+			return nil, errors.New(downloadMessage(err))
+		}
+	}
 	started, err := p.plan.Start(ctx)
 	if err != nil {
 		return nil, nativePrepareError(err)

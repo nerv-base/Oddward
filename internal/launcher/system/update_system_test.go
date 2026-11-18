@@ -25,6 +25,11 @@ func tempStore(t *testing.T) *launchsettings.Store {
 func TestEachAdapterSavesOnlyItsOwnFields(t *testing.T) {
 	ctx := context.Background()
 	store := tempStore(t)
+	downloads := state.DownloadPreferences{FilesInFlight: 3, ConnectionsPerFile: 2, RateLimitKiB: 512, CacheLimitGiB: 10}
+	backend := &GameDownloadBackend{Settings: store}
+	if got := backend.HandleDownload(ctx, launcher.DownloadRequest{Effect: state.Effect{Kind: state.EffectSaveDownloads}, Settings: downloads}, nil); got.Kind != state.DownloadSettingsSaved {
+		t.Fatalf("download settings save = %d %s", got.Kind, got.Message)
+	}
 	network := netcfg.New(netcfg.Default(), func() netcfg.SystemProxy { return netcfg.SystemProxy{} })
 	if err := (SystemNetwork{Network: network, Store: store}).Apply(ctx, state.NetworkState{Proxy: state.ProxyDirect, Mirror: true}); err != nil {
 		t.Fatal(err)
@@ -40,7 +45,8 @@ func TestEachAdapterSavesOnlyItsOwnFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := launchsettings.Settings{GameRoot: `C:\Games\NTE`, RiskVersion: "1", SkippedVersion: "0.2.0",
-		Network: launchsettings.Network{Proxy: "direct", Mirror: true, MirrorPrefix: netcfg.DefaultMirrorPrefix}}
+		Network:   launchsettings.Network{Proxy: "direct", Mirror: true, MirrorPrefix: netcfg.DefaultMirrorPrefix},
+		Downloads: launchsettings.Downloads{FilesInFlight: 3, ConnectionsPerFile: 2, RateLimitKiB: 512, CacheLimitGiB: 10}}
 	if got != want {
 		t.Fatalf("saving one panel must keep the others:\n got %+v\nwant %+v", got, want)
 	}
