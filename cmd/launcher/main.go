@@ -93,7 +93,18 @@ func main() {
 		s.WishLinkBackend = tajiduoBackend
 		s.CheckInBackend = tajiduoBackend
 		s.WishBackend, s.WishLocation = wishArchives, time.Local
+		downloads := &system.GameDownloadBackend{StateRoot: filepath.Dir(cachePath), Settings: store, Client: &http.Client{Transport: network}, Version: buildinfo.Version}
+		s.GameDownloads = downloads
+		prefs := saved.Downloads
+		if prefs == (launchsettings.Downloads{}) {
+			prefs = launchsettings.DefaultDownloads()
+		}
+		s.Model, _ = state.Reduce(s.Model, state.Event{Kind: state.DownloadSettingsLoaded, DownloadSettings: state.DownloadPreferences{
+			FilesInFlight: prefs.FilesInFlight, ConnectionsPerFile: prefs.ConnectionsPerFile, RateLimitKiB: prefs.RateLimitKiB,
+			CacheLimitGiB: prefs.CacheLimitGiB, AutoResume: prefs.AutoResume, PatchApply: prefs.PatchApply,
+		}})
 		s.ManagedBackend = system.NativeManagedBackend{
+			Downloads:       downloads,
 			LoginUI:         resolveLoginUI(executable, *loginUI),
 			Accounts:        accountStore,
 			HTTPClient:      &http.Client{Transport: network},
