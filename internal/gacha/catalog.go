@@ -16,10 +16,13 @@ const (
 	Unknown   ItemKind = "unknown"
 )
 
-// Item is a name verified against an official source.
+// Item is a display name with an optional rarity hint. Names are verified
+// against an official source; rarity may come from the community wiki and is
+// never required to show a record.
 type Item struct {
-	Kind ItemKind
-	Name string
+	Kind   ItemKind
+	Name   string
+	Rarity string
 }
 
 // Names are included only after official-source verification; none are verified yet.

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nerv-base/Oddward/internal/bwiki"
 	"github.com/nerv-base/Oddward/internal/gacha"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
 )
@@ -86,6 +87,60 @@ func containsID(ids []string, want string) bool {
 		}
 	}
 	return false
+}
+
+type fakeArcWiki struct {
+	catalog bwiki.Catalog
+	err     error
+}
+
+func (f fakeArcWiki) Catalog(context.Context) (bwiki.Catalog, error) {
+	return f.catalog, f.err
+}
+
+func TestWishArchivesCatalogMergesWikiSupplement(t *testing.T) {
+	ctx := context.Background()
+	w, _ := newTestWishArchives(t)
+	if err := w.SaveCatalog(ctx, gacha.Catalog{FetchedAt: time.UnixMilli(1700000000000), Items: map[string]gacha.Item{
+		"fork_known": {Kind: gacha.Arc, Name: "官方弧"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	w.wiki = fakeArcWiki{catalog: bwiki.Catalog{Items: map[string]bwiki.Entry{
+		"wushoutieyu": {Name: "焰魂狂飙", Rarity: "S"},
+		"known":       {Name: "不应采用的别名", Rarity: "A"},
+	}}}
+	c, err := w.Catalog(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := c.Items["fork_wushoutieyu"]; !ok || got.Name != "焰魂狂飙" || got.Rarity != "S" {
+		t.Fatalf("wiki arc = %+v, present %v", got, ok)
+	}
+	if got := c.Items["fork_known"]; got.Name != "官方弧" || got.Rarity != "A" {
+		t.Fatalf("official name was not preserved while filling rarity: %+v", got)
+	}
+	if _, ok := c.Items["fork_missing"]; ok {
+		t.Fatal("unrelated wiki entry leaked into the catalog")
+	}
+}
+
+func TestWishArchivesCatalogIgnoresWikiFailure(t *testing.T) {
+	ctx := context.Background()
+	w, _ := newTestWishArchives(t)
+	if err := w.SaveCatalog(ctx, gacha.Catalog{FetchedAt: time.UnixMilli(1700000000000), Items: map[string]gacha.Item{
+		"11001": {Kind: gacha.Character, Name: "官方角色"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	w.wiki = fakeArcWiki{err: errors.New("wiki down")}
+	c, err := w.Catalog(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Items["11001"].Name; got != "官方角色" {
+		t.Fatalf("official catalog changed after wiki failure: %q", got)
+	}
 }
 
 func TestNewWishArchivesRejectsRelativePath(t *testing.T) {

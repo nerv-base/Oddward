@@ -44,6 +44,28 @@ func TestWishWarningBarsRemainDistinctFromArbitraryTone(t *testing.T) {
 	}
 }
 
+func TestWishRecordShowsWikiRarity(t *testing.T) {
+	at := time.Date(2026, 11, 15, 4, 0, 0, 0, time.UTC)
+	archive := gacha.Archive{RoleID: "100012345", Records: []gacha.Record{
+		{Pool: gacha.Weapon, ItemID: "fork_wushoutieyu", At: at, Pity: 60},
+	}}
+	catalog := gacha.Catalog{Items: map[string]gacha.Item{
+		"fork_wushoutieyu": {Kind: gacha.Arc, Name: "焰魂狂飙", Rarity: "S"},
+	}}
+	s := NewShell(settled(state.Ready))
+	defer s.Dispose()
+	tt := ui.NewTester(func(c *ui.Context) {
+		c.SetTheme(s.theme)
+		s.wishPage(c, wishPageData{Archive: archive, Catalog: catalog, Stats: gacha.Statistics(archive)})
+	}, 1280, 720)
+	if !tt.HasText("焰魂狂飙") || !tt.HasText("S") {
+		t.Fatal("wiki name or rarity missing from the record row")
+	}
+	if _, ok := tt.AccessByRole(ui.RoleButton, "焰魂狂飙（S），60 抽，2026-11-15 04:00"); !ok {
+		t.Fatal("rarity missing from the accessible record label")
+	}
+}
+
 func TestWishRecordBarsFollowStarwardPityColors(t *testing.T) {
 	at := time.Date(2026, 11, 15, 4, 0, 0, 0, time.UTC)
 	archive := gacha.Archive{RoleID: "100012345", Records: []gacha.Record{

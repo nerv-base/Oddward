@@ -20,6 +20,7 @@ import (
 	"github.com/nerv-base/Oddward/internal/branding"
 	"github.com/nerv-base/Oddward/internal/brandingcache"
 	"github.com/nerv-base/Oddward/internal/buildinfo"
+	"github.com/nerv-base/Oddward/internal/bwiki"
 	"github.com/nerv-base/Oddward/internal/checkin"
 	"github.com/nerv-base/Oddward/internal/cnlogin/accounts"
 	"github.com/nerv-base/Oddward/internal/launcher"
@@ -79,6 +80,12 @@ func main() {
 	wishArchives, err := system.NewWishArchives(filepath.Dir(cachePath))
 	if err != nil {
 		log.Fatal(err)
+	}
+	bwikiStore, err := bwiki.Open(filepath.Join(filepath.Dir(cachePath), "bwiki"), &http.Client{Transport: network})
+	if err != nil {
+		log.Printf("community wiki cache unavailable: %v", err)
+	} else {
+		wishArchives.SetBWiki(bwikiStore)
 	}
 	checkInRecords, err := checkin.Open(filepath.Join(filepath.Dir(cachePath), "checkin"))
 	if err != nil {
@@ -268,6 +275,9 @@ func main() {
 		if err != nil {
 			log.Printf("wish item images unavailable: %v", err)
 		} else {
+			if bwikiStore != nil {
+				images.SetBWiki(bwikiStore)
+			}
 			s.WishImages = images
 		}
 		s.Minimize = w.Minimize

@@ -181,6 +181,15 @@
       "upstreamPath": "LICENSE",
       "sha256": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172",
       "sha256Lf": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172"
+    },
+    {
+      "file": "unicode/LICENSE.txt",
+      "component": "Unicode Unihan kMandarin data used by internal/pinyin",
+      "version": "Unicode License V3",
+      "source": "https://www.unicode.org/license.txt",
+      "upstreamPath": "license.txt",
+      "sha256": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96",
+      "sha256Lf": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96"
     }
   ]
 }

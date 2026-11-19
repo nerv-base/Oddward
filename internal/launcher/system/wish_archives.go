@@ -11,10 +11,17 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/nerv-base/Oddward/internal/bwiki"
 	"github.com/nerv-base/Oddward/internal/gacha"
 	"github.com/nerv-base/Oddward/internal/launcher"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
 )
+
+// arcWiki is the small read surface WishArchives needs from the community
+// supplement; *bwiki.Store implements it.
+type arcWiki interface {
+	Catalog(context.Context) (bwiki.Catalog, error)
+}
 
 // WishArchives implements launcher.WishArchiveBackend over a local, launcher-
 // owned gacha store. Mutating operations (Import, Delete, Export) are serialized
@@ -22,6 +29,7 @@ import (
 // a delete. List and Load delegate to the store.
 type WishArchives struct {
 	store *gacha.Store
+	wiki  arcWiki
 	now   func() time.Time
 	ops   chan struct{}
 }
@@ -81,13 +89,43 @@ func (w *WishArchives) Load(ctx context.Context, roleID string) (gacha.Archive, 
 	return archive, err
 }
 
-// Catalog reads the official name supplement. A missing file is an empty
-// catalog: names never block the page.
+// SetBWiki adds the optional community-wiki supplement. It only fills missing
+// arc names and rarity; official names always win.
+func (w *WishArchives) SetBWiki(store *bwiki.Store) { w.wiki = store }
+
+// Catalog reads the official name supplement and fills arcs the official
+// source lacks from the optional community cache. A missing file is an empty
+// catalog: names never block the page. The community supplement is best-effort
+// and capped so a slow wiki cannot hold the page open.
 func (w *WishArchives) Catalog(ctx context.Context) (gacha.Catalog, error) {
 	if err := ctx.Err(); err != nil {
 		return gacha.Catalog{}, err
 	}
-	return w.store.LoadCatalog(ctx)
+	c, err := w.store.LoadCatalog(ctx)
+	if err != nil || w.wiki == nil {
+		return c, err
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	wiki, wikiErr := w.wiki.Catalog(fetchCtx)
+	if wikiErr != nil {
+		return c, nil
+	}
+	if c.Items == nil {
+		c.Items = make(map[string]gacha.Item)
+	}
+	for key, entry := range wiki.Items {
+		id := "fork_" + key
+		if item, ok := c.Items[id]; ok {
+			if item.Rarity == "" {
+				item.Rarity = entry.Rarity
+				c.Items[id] = item
+			}
+			continue
+		}
+		c.Items[id] = gacha.Item{Kind: gacha.Arc, Name: entry.Name, Rarity: entry.Rarity}
+	}
+	return c, nil
 }
 
 // SaveCatalog replaces the name supplement. It uses its own file and store

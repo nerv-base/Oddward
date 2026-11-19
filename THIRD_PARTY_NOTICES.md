@@ -55,6 +55,20 @@ for 本性像素 and 都市活力. They remain the property of their rights hold
 and are included only to label those game resources; they are not covered by
 Oddward's GPL-3.0-or-later license.
 
+## Community wiki metadata and pinyin index
+
+`internal/bwiki` reads public arc name, rarity and icon fields from the
+Bilibili 异环 BWIKI at runtime. The wiki's prose is not bundled or cached; the
+cache stores only those three display fields and their icons. BWIKI content is
+contributed by its editors and remains subject to the wiki's terms at
+<https://wiki.biligame.com/yh/首页>; the icons remain game artwork under the
+notice above.
+
+`internal/pinyin/pinyin.bin` is the Unihan `kMandarin` table used by MyGo,
+licensed under the Unicode License V3. The complete text is in
+`licenses/unicode/LICENSE.txt`; the upstream notice is at
+<https://www.unicode.org/license.txt>.
+
 ## Self-contained login window
 
 The original Oddward login helper uses .NET SDK `10.0.303` to publish the
