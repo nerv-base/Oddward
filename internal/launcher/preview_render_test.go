@@ -69,6 +69,13 @@ func TestRenderPreviewFrames(t *testing.T) {
 				tt.Move(r.X+r.W/2, r.Y+r.H/2)
 			}
 		}},
+		{"home-stamina", 1280, 720, func(s *Shell, tt *ui.Tester) {
+			loaded(s)
+			s.Model.CheckIn.Linked = true
+			s.Model.CheckIn.Loaded = true
+			s.Model.CheckIn.StatusPhase = state.CheckStatusReady
+			s.Model.CheckIn.Role = state.CheckInRole{RoleID: "218020980063", Name: "小小绫波丽", Stamina: 187, StaminaMax: 240, FetchedAt: time.Now().Add(-2 * time.Minute)}
+		}},
 		{"media-bar", 1280, 720, func(s *Shell, tt *ui.Tester) {
 			loaded(s)
 			tt.Key(0, ui.KeyF6)
@@ -95,6 +102,31 @@ func TestRenderPreviewFrames(t *testing.T) {
 			}
 		}},
 		{"analysis", 1280, 720, func(s *Shell, tt *ui.Tester) { _ = tt.Click("抽卡分析") }},
+		{"game-data", 1280, 720, func(s *Shell, tt *ui.Tester) {
+			s.Model.CheckIn = state.CheckInState{
+				AccountID: "acct", RoleID: "218020980063", Loaded: true, Linked: true,
+				StatusPhase: state.CheckStatusReady,
+				Role: state.CheckInRole{
+					RoleID: "218020980063", Name: "小小绫波丽", Server: "天空之城",
+					Level: 61, WorldLevel: 12, Stamina: 187, StaminaMax: 240,
+					CityStamina: 92, CityStaminaMax: 120, DayValue: 100, WeekRemain: 2,
+					LoginDays: 128, CharCount: 24, Achievement: 512, AchievementTotal: 900,
+					FetchedAt: time.Now(),
+					Details: &state.CheckInDetails{
+						Areas: []state.CheckInArea{{ID: "area-1", Name: "新港", Progress: 12, Total: 30}},
+						Characters: []state.CheckInCharacter{{
+							ID: "1019", Name: "合成角色", ElementType: "CHARACTER_ELEMENT_TYPE_PSYCHE",
+							Quality: "ITEM_QUALITY_ORANGE", Level: 40, MixLevel: 3, Likeability: 7, Awaken: 2,
+						}},
+						RealEstate: state.CheckInCollection{Own: 3, Total: 9, ShowName: "小屋"},
+						Vehicle:    state.CheckInCollection{Own: 2, Total: 5, ShowName: "载具"},
+					},
+				},
+			}
+			if err := tt.Click("游戏数据"); err != nil {
+				t.Fatal(err)
+			}
+		}},
 		{"no-art", 1280, 720, func(s *Shell, tt *ui.Tester) {
 			s.Poster, s.Logo, s.Slogan, s.News, s.Accent = nil, nil, nil, nil, ui.Color{}
 			loaded(s)

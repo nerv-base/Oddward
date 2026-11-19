@@ -40,6 +40,7 @@ const (
 	Home Page = iota
 	WishAnalysis
 	CheckIn
+	GameData
 	LauncherSettings
 )
 

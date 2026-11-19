@@ -384,8 +384,13 @@ func TestCheckInStatusPanelIsFenced(t *testing.T) {
 	}
 	home := m
 	home.Page = Home
-	if _, fx := Reduce(home, Event{Kind: CheckInStatusRequested}); len(fx) != 0 {
-		t.Fatalf("status read started off the page: %v", fx)
+	if _, fx := Reduce(home, Event{Kind: CheckInStatusRequested}); len(fx) != 1 || fx[0].Kind != TajiduoCheckInStatus {
+		t.Fatalf("status read must start on the home page: %v", fx)
+	}
+	away := m
+	away.Page = WishAnalysis
+	if _, fx := Reduce(away, Event{Kind: CheckInStatusRequested}); len(fx) != 0 {
+		t.Fatalf("status read started off the data pages: %v", fx)
 	}
 }
 

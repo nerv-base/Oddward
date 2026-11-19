@@ -229,6 +229,19 @@ func TestRoleHomeParsesStatus(t *testing.T) {
 		t.Errorf("fetched = %v", home.FetchedAt)
 	}
 }
+func TestRoleHomeTreatsAbsentWeekCopiesAsZero(t *testing.T) {
+	payload := homePayload()
+	delete(payload, "weekcopiesremainCnt")
+	c := fakeClient(t, func(w http.ResponseWriter, r *http.Request) { reply(w, payload) })
+	home, err := c.RoleHome(context.Background(), testAccess())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if home.WeekCopiesRemain != 0 {
+		t.Fatalf("week copies = %d", home.WeekCopiesRemain)
+	}
+}
+
 func TestRoleHomeAllowsOverflowButRejectsIdentity(t *testing.T) {
 	overflow := homePayload()
 	overflow["staminaValue"] = 300 // Beyond the cap: real overflow, keep it.

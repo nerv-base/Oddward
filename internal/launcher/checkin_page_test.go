@@ -89,7 +89,7 @@ func TestCheckInPageShowsOnlyServerNumbers(t *testing.T) {
 			t.Fatalf("status panel must show %q from the server payload", want)
 		}
 	}
-	if !tt.HasText("未提供的体力恢复") {
+	if !tt.HasText("备用体力与溢出数据未提供") {
 		t.Fatal("the panel must say which data the server does not provide")
 	}
 	if tt.HasText("MOCK · 仅内存演示") {

@@ -31,6 +31,26 @@ type CommunityReward struct {
 	Known     bool
 }
 
+// RoleArea is one exploration area reported by the role-home endpoint.
+type RoleArea struct {
+	ID, Name        string
+	Progress, Total int
+}
+
+// RoleCharacter is the role-home summary for one owned character. Element and
+// quality stay as the server's enum codes; display names belong to the UI.
+type RoleCharacter struct {
+	ID, Name, ElementType, Quality string
+	Level, MixLevel, Likeability   int
+	Awaken                         int
+}
+
+// RoleCollection is one ownership summary (real estate or vehicles).
+type RoleCollection struct {
+	Own, Total int
+	ShowName   string
+}
+
 // RoleHome is the role status the official role-home page shows.
 type RoleHome struct {
 	UserID, RoleID, RoleName       string
@@ -42,6 +62,9 @@ type RoleHome struct {
 	DayValue, WeekCopiesRemain     int
 	Achievement, AchievementTotal  int
 	FetchedAt                      time.Time
+	Areas                          []RoleArea
+	Characters                     []RoleCharacter
+	RealEstate, Vehicle            RoleCollection
 }
 
 func (c *Client) GameSignState(ctx context.Context, a Access) (GameSignState, error) {
@@ -201,7 +224,14 @@ func (c *Client) RoleHome(ctx context.Context, a Access) (RoleHome, error) {
 	cityMax, okCityMax := integer(m["citystaminaMaxValue"])
 	dayValue, okDay := integer(m["dayvalue"])
 	week, okWeek := integer(m["weekcopiesremainCnt"])
-	if !okLevel || !okWorld || !okStamina || !okStaminaMax || !okCity || !okCityMax || !okDay || !okWeek {
+	if !okWeek {
+		if _, exists := m["weekcopiesremainCnt"]; exists {
+			return RoleHome{}, ErrProtocolChanged
+		}
+		// The endpoint omits the remaining-copy counter once it reaches zero.
+		week = 0
+	}
+	if !okLevel || !okWorld || !okStamina || !okStaminaMax || !okCity || !okCityMax || !okDay {
 		return RoleHome{}, ErrProtocolChanged
 	}
 	if level < 0 || level > 1000 || world < 0 || world > 100 || dayValue < 0 || dayValue > 100 {
@@ -251,7 +281,101 @@ func (c *Client) RoleHome(ctx context.Context, a Access) (RoleHome, error) {
 			out.Achievement, out.AchievementTotal = got, total
 		}
 	}
+	out.Areas = roleAreas(m["areaProgress"])
+	out.Characters = roleCharacters(m["characters"])
+	out.RealEstate = roleCollection(m["realestate"])
+	out.Vehicle = roleCollection(m["vehicle"])
 	return out, nil
+}
+
+// roleAreas keeps only entries that carry a usable name and a progress range.
+// A malformed entry is dropped; the rest of the page still has server data.
+func roleAreas(v any) []RoleArea {
+	items, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]RoleArea, 0, len(items))
+	for _, item := range items {
+		m, ok := object(item)
+		if !ok {
+			continue
+		}
+		id, okID := text(m["id"])
+		name, okName := text(m["name"])
+		progress, okProgress := integer(m["progress"])
+		total, okTotal := integer(m["total"])
+		name = strings.TrimSpace(name)
+		if !okID || !okName || !okProgress || !okTotal || id == "" ||
+			name == "" || progress < 0 || total <= 0 || progress > total {
+			continue
+		}
+		out = append(out, RoleArea{ID: id, Name: name, Progress: progress, Total: total})
+	}
+	return out
+}
+
+// roleCharacters keeps only entries with an identity and a display name. The
+// optional progression fields stay zero when the server omits them.
+func roleCharacters(v any) []RoleCharacter {
+	items, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]RoleCharacter, 0, len(items))
+	for _, item := range items {
+		m, ok := object(item)
+		if !ok {
+			continue
+		}
+		id, okID := identifier(m["id"])
+		name, okName := text(m["name"])
+		name = strings.TrimSpace(name)
+		if !okID || !okName || name == "" {
+			continue
+		}
+		c := RoleCharacter{ID: id, Name: name}
+		if element, ok := text(m["elementType"]); ok {
+			c.ElementType = element
+		}
+		if quality, ok := text(m["quality"]); ok {
+			c.Quality = quality
+		}
+		for _, pair := range []struct {
+			key   string
+			field *int
+		}{
+			{"alev", &c.Level},
+			{"slev", &c.MixLevel},
+			{"likeabilitylev", &c.Likeability},
+			{"awakenLev", &c.Awaken},
+		} {
+			if n, ok := integer(m[pair.key]); ok && n >= 0 && n <= 10000 {
+				*pair.field = n
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// roleCollection reads one ownership summary. A missing or malformed summary
+// stays zero and the page omits it.
+func roleCollection(v any) RoleCollection {
+	m, ok := object(v)
+	if !ok {
+		return RoleCollection{}
+	}
+	own, okOwn := integer(m["ownCnt"])
+	total, okTotal := integer(m["total"])
+	if !okOwn || !okTotal || own < 0 || total < 0 || own > total {
+		return RoleCollection{}
+	}
+	out := RoleCollection{Own: own, Total: total}
+	if name, ok := text(m["showName"]); ok {
+		out.ShowName = strings.TrimSpace(name)
+	}
+	return out
 }
 
 func (c *Client) checkRole(a Access) error {

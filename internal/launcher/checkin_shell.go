@@ -191,14 +191,15 @@ func (s *Shell) syncCheckIn(c *ui.Context) {
 		s.checkinStarted = true
 		s.Dispatch(state.Event{Kind: state.CheckInStateRequested, Check: state.CheckInPayload{}})
 	}
-	if s.Model.Page == state.CheckIn && !s.checkinVisit {
+	dataPage := s.Model.Page == state.CheckIn || s.Model.Page == state.GameData || s.Model.Page == state.Home
+	if dataPage && !s.checkinVisit {
 		s.checkinVisit = true
 		s.Dispatch(state.Event{Kind: state.CheckInStateRequested, Check: state.CheckInPayload{Enabled: true}})
-	} else if s.Model.Page != state.CheckIn {
+	} else if !dataPage {
 		s.checkinVisit = false
 	}
 	checkIn := s.Model.CheckIn
-	if checkIn.Loaded && checkIn.Linked && checkIn.StatusPhase == state.CheckStatusIdle && s.Model.Page == state.CheckIn {
+	if checkIn.Loaded && checkIn.Linked && !checkIn.NeedsRelink && checkIn.StatusPhase == state.CheckStatusIdle && dataPage {
 		// Opening the page reads the game summary once; the panel's own 刷新
 		// button asks again later.
 		s.Dispatch(state.Event{Kind: state.CheckInStatusRequested})
@@ -252,6 +253,37 @@ func (s *Shell) checkInProjection() checkInPageData {
 		},
 		OnRelink: func() {
 			s.Dispatch(state.Event{Kind: state.Navigate, Page: state.WishAnalysis})
+		},
+	}
+}
+
+// gameDataProjection reuses the check-in role summary. The game-data page adds
+// no request of its own; opening it asks the same status effect once.
+func (s *Shell) gameDataProjection() gameDataPageData {
+	m := s.Model.CheckIn
+	return gameDataPageData{
+		AccountID:     m.AccountID,
+		RoleID:        m.RoleID,
+		Linked:        m.Linked,
+		NeedsRelink:   m.NeedsRelink,
+		Loaded:        m.Loaded,
+		LoadFailure:   m.LoadFailure,
+		StatusPhase:   m.StatusPhase,
+		StatusFailure: m.StatusFailure,
+		Role:          m.Role,
+		CanLaunch:     s.Model.NormalMode,
+		OnLoad: func() {
+			s.Dispatch(state.Event{Kind: state.CheckInStateRequested, Check: state.CheckInPayload{Enabled: true}})
+		},
+		OnStatus: func() {
+			s.Dispatch(state.Event{Kind: state.CheckInStatusRequested})
+		},
+		OnRelink: func() {
+			s.Dispatch(state.Event{Kind: state.Navigate, Page: state.WishAnalysis})
+		},
+		OnStartGame: func() {
+			s.Dispatch(state.Event{Kind: state.Navigate, Page: state.Home})
+			s.Dispatch(state.Event{Kind: state.Primary})
 		},
 	}
 }

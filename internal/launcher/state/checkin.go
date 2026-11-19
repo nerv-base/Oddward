@@ -80,6 +80,37 @@ const (
 	CheckStatusFailed
 )
 
+// CheckInArea is one exploration area the role-home endpoint reports.
+type CheckInArea struct {
+	ID, Name        string
+	Progress, Total int
+}
+
+// CheckInCharacter is the summary the role-home endpoint reports for one
+// owned character. The raw quality and element codes stay as the server sent
+// them; the page translates them for display.
+type CheckInCharacter struct {
+	ID, Name, ElementType, Quality string
+	Level, MixLevel, Likeability   int
+	Awaken                         int
+}
+
+// CheckInCollection is one ownership summary (real estate or vehicles).
+type CheckInCollection struct {
+	Own, Total int
+	ShowName   string
+}
+
+// CheckInDetails is the optional game-data payload. It lives behind a pointer
+// so Model stays comparable, and it is replaced whole on every read: the page
+// never sees a half-updated list.
+type CheckInDetails struct {
+	Areas      []CheckInArea
+	Characters []CheckInCharacter
+	RealEstate CheckInCollection
+	Vehicle    CheckInCollection
+}
+
 // CheckInRole is the role summary the status panel shows. Values come from
 // the server; a zero cap means the server did not report that figure.
 type CheckInRole struct {
@@ -91,6 +122,8 @@ type CheckInRole struct {
 	LoginDays, CharCount          int
 	Achievement, AchievementTotal int
 	FetchedAt                     time.Time
+	// Details carries the richer role-home payload used by the game-data page.
+	Details *CheckInDetails
 }
 
 // CheckInState is everything the check-in page and the auto scheduler need.
@@ -401,7 +434,7 @@ func ReduceCheckIn(m Model, e Event) (Model, []Effect, bool) {
 		}
 		return m, nil, true
 	case CheckInStatusRequested:
-		if m.Page != CheckIn || m.Overlay != NoOverlay || !c.Linked {
+		if (m.Page != CheckIn && m.Page != GameData && m.Page != Home) || m.Overlay != NoOverlay || !c.Linked {
 			return m, nil, true
 		}
 		c.StatusToken++

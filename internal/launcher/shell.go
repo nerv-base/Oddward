@@ -591,6 +591,9 @@ func (s *Shell) View(c *ui.Context) {
 		case state.CheckIn:
 			s.checkInPage(c, s.checkInProjection())
 			s.footer(c)
+		case state.GameData:
+			s.gameDataPage(c, s.gameDataProjection())
+			s.footer(c)
 		case state.LauncherSettings:
 			s.launcherSettingsPage(c)
 		}

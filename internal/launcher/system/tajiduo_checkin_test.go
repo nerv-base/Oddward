@@ -4,7 +4,6 @@ package system
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/nerv-base/Oddward/internal/checkin"
 	"github.com/nerv-base/Oddward/internal/cnlogin/accounts"
-	"github.com/nerv-base/Oddward/internal/launcher"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
 	"github.com/nerv-base/Oddward/internal/tajiduo"
 )
@@ -133,6 +131,13 @@ func newCheckInWorld(t *testing.T, linked bool) *checkInWorld {
 				"dayvalue": 100, "weekcopiesremainCnt": 2,
 				"roleloginDays": 128, "charidCnt": 24,
 				"achieveProgress": map[string]any{"achievementCnt": 512, "total": 900},
+				"areaProgress":    []any{map[string]any{"id": "area-1", "name": "新港", "progress": 12, "total": 30}},
+				"characters": []any{map[string]any{
+					"id": "1019", "name": "合成角色", "alev": 40, "slev": 3, "likeabilitylev": 7,
+					"awakenLev": 2, "elementType": "CHARACTER_ELEMENT_TYPE_PSYCHE", "quality": "ITEM_QUALITY_ORANGE",
+				}},
+				"realestate": map[string]any{"ownCnt": 3, "showId": "house-1", "showName": "小屋", "total": 9},
+				"vehicle":    map[string]any{"ownCnt": 2, "showId": "car-1", "showName": "载具", "total": 5},
 			})
 		default:
 			t.Errorf("unexpected synthetic endpoint %s", r.URL.Path)
@@ -467,6 +472,23 @@ func TestCheckInRoleStatusMapsEveryServerField(t *testing.T) {
 	if role.FetchedAt.IsZero() {
 		t.Fatal("the panel must know when the numbers were read")
 	}
+	details := role.Details
+	if details == nil || len(details.Areas) != 1 || details.Areas[0].Name != "新港" || details.Areas[0].Progress != 12 || details.Areas[0].Total != 30 {
+		t.Fatalf("area details = %+v", details)
+	}
+	if len(details.Characters) != 1 || details.Characters[0].Name != "合成角色" ||
+		details.Characters[0].Level != 40 || details.Characters[0].MixLevel != 3 ||
+		details.Characters[0].Likeability != 7 || details.Characters[0].Awaken != 2 ||
+		details.Characters[0].ElementType != "CHARACTER_ELEMENT_TYPE_PSYCHE" ||
+		details.Characters[0].Quality != "ITEM_QUALITY_ORANGE" {
+		t.Fatalf("character details = %+v", details.Characters)
+	}
+	if details.RealEstate != (state.CheckInCollection{Own: 3, Total: 9, ShowName: "小屋"}) {
+		t.Fatalf("real estate = %+v", details.RealEstate)
+	}
+	if details.Vehicle != (state.CheckInCollection{Own: 2, Total: 5, ShowName: "载具"}) {
+		t.Fatalf("vehicle = %+v", details.Vehicle)
+	}
 }
 
 func TestCheckInAutoSwitchesPersistPerAccount(t *testing.T) {
@@ -512,13 +534,15 @@ func TestCheckInExpiredCredentialAsksForRelink(t *testing.T) {
 	world.mu.Lock()
 	world.refreshStatus = http.StatusUnauthorized
 	world.mu.Unlock()
-	_, err := world.backend.CheckInState(context.Background(), true)
-	if err == nil {
-		t.Fatal("an expired credential must not be reported as a clean snapshot")
+	snap, err := world.backend.CheckInState(context.Background(), true)
+	if err != nil {
+		t.Fatalf("an expired credential should keep the readable link: %v", err)
 	}
-	var reported launcher.CheckInError
-	if !errors.As(err, &reported) || reported.Kind != state.CheckInFailureAuth {
-		t.Fatalf("failure = %v", err)
+	if !snap.Linked || snap.AccountID != world.accountID {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+	if !snap.NeedsRelink || snap.Fail != state.CheckInFailureAuth {
+		t.Fatalf("relink state = linked:%v needs:%v fail:%v", snap.Linked, snap.NeedsRelink, snap.Fail)
 	}
 }
 

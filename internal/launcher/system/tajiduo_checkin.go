@@ -145,8 +145,11 @@ func (b *TajiduoBackend) CheckInState(ctx context.Context, refresh bool) (launch
 	a, err := link.session.Access(ctx)
 	if err != nil {
 		if kind := checkInFailureKind(err); kind == state.CheckInFailureAuth || kind == state.CheckInFailureMismatch {
-			// The credential itself is unusable; the page must offer a relink.
-			return out, checkInFailure(err)
+			// The local link is still readable; only its credential is unusable.
+			// Keep the snapshot so the page can offer a relink instead of
+			// dropping back to "not linked" and losing the account context.
+			out.NeedsRelink, out.Fail = true, kind
+			return out, nil
 		}
 		out.Fail = checkInFailureKind(err)
 		return out, nil
@@ -163,7 +166,8 @@ func (b *TajiduoBackend) CheckInState(ctx context.Context, refresh bool) (launch
 		signed, err := b.client.CommunitySignState(ctx, a)
 		if err != nil {
 			if failure := checkInFailureKind(err); failure == state.CheckInFailureAuth || failure == state.CheckInFailureMismatch {
-				return out, checkInFailure(err)
+				out.NeedsRelink, out.Fail = true, failure
+				return out, nil
 			}
 			out.Fail = checkInFailureKind(err)
 			return out, nil
@@ -437,7 +441,38 @@ func (b *TajiduoBackend) RoleStatus(ctx context.Context) (state.CheckInRole, err
 		LoginDays: home.LoginDays, CharCount: home.CharCount,
 		Achievement: home.Achievement, AchievementTotal: home.AchievementTotal,
 		FetchedAt: home.FetchedAt,
+		Details:   checkInDetails(home),
 	}, nil
+}
+
+// checkInDetails copies the optional decorations the role-home response
+// carries. It returns nil when the server sent none, so the page can omit the
+// whole section instead of drawing empty cards.
+func checkInDetails(home tajiduo.RoleHome) *state.CheckInDetails {
+	details := &state.CheckInDetails{
+		RealEstate: state.CheckInCollection{
+			Own: home.RealEstate.Own, Total: home.RealEstate.Total, ShowName: home.RealEstate.ShowName,
+		},
+		Vehicle: state.CheckInCollection{
+			Own: home.Vehicle.Own, Total: home.Vehicle.Total, ShowName: home.Vehicle.ShowName,
+		},
+	}
+	for _, a := range home.Areas {
+		details.Areas = append(details.Areas, state.CheckInArea{
+			ID: a.ID, Name: a.Name, Progress: a.Progress, Total: a.Total,
+		})
+	}
+	for _, c := range home.Characters {
+		details.Characters = append(details.Characters, state.CheckInCharacter{
+			ID: c.ID, Name: c.Name, ElementType: c.ElementType, Quality: c.Quality,
+			Level: c.Level, MixLevel: c.MixLevel, Likeability: c.Likeability, Awaken: c.Awaken,
+		})
+	}
+	if len(details.Areas) == 0 && len(details.Characters) == 0 &&
+		details.RealEstate.Total == 0 && details.Vehicle.Total == 0 {
+		return nil
+	}
+	return details
 }
 
 // SetAuto persists one automatic switch for the saved account.

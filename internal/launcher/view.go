@@ -361,6 +361,7 @@ func (s *Shell) hero(c *ui.Context) {
 
 func (s *Shell) action(c *ui.Context) {
 	p := state.Present(s.Model)
+	s.homeStamina(c)
 	s.newsCard(c)
 	if s.Model.NormalMode {
 		s.managedActionNote(c, p)
