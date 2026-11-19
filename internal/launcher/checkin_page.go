@@ -204,7 +204,7 @@ func (s *Shell) checkInAccountCard(c *ui.Context, data checkInPageData) {
 			}
 		default:
 			ui.Text(c, "关联塔吉多后即可签到").FontSize(checkinTextHelp).FontWeight(600)
-			ui.Text(c, "关联会复用已保存的游戏账号，走塔吉多官方短信登录，不需要再登录游戏；手机号未注册过时会自动注册。").FontSize(checkinTextBody).TextColor(muted).LineHeight(wishBodyLineHeight)
+			ui.Text(c, "关联会复用已保存的游戏账号直接完成，无需短信；也可以改用短信登录。关联会顶掉手机上已登录的塔吉多。").FontSize(checkinTextBody).TextColor(muted).LineHeight(wishBodyLineHeight)
 			s.accentButton(c, "checkin-relink", "去关联塔吉多").AlignSelf(ui.Start).OnClick(func() { wishInvoke(data.OnRelink) })
 		}
 		if data.Linked && data.NeedsRelink {

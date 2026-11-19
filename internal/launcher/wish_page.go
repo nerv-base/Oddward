@@ -304,7 +304,7 @@ func wishLinkHint(t wishTajiduo) string {
 	case t.Linked || t.Fetching:
 		return ""
 	}
-	return "关联塔吉多会顶掉手机上已登录的塔吉多，手机号未注册过时会自动注册"
+	return "关联塔吉多会顶掉手机上已登录的塔吉多；使用已保存的游戏账号无需短信，短信登录时手机号未注册会自动创建账号"
 }
 
 // wishLinkNote is the one line under the header: the last link result when

@@ -48,14 +48,17 @@ func (s *Shell) wishLinkOverlay(c *ui.Context) {
 				switch l.Step {
 				case state.WishLinkNotice:
 					ui.Text(c, "关联须知").FontSize(17).FontWeight(600)
-					ui.Text(c, "通过短信登录塔吉多会顶掉手机上原有的登录。手机号尚未注册时，平台会自动创建账号。").FontSize(14).LineHeight(1.6)
+					ui.Text(c, "使用已保存的游戏账号可以直接关联塔吉多，无需短信；这会顶掉手机上已登录的塔吉多。也可以改用短信登录，手机号尚未注册时平台会自动创建账号。").FontSize(14).LineHeight(1.6)
 					ui.Text(c, "Oddward 是非官方工具。仅保存加密的续期凭据，不保存短信验证码；使用前请在官方客户端阅读《用户协议》和《隐私政策》。").FontSize(13).TextColor(muted).LineHeight(1.6)
 					ui.Text(c, "记录仅在你点击更新时获取；解除关联后，本地档案仍会保留。").FontSize(13).TextColor(muted).LineHeight(1.6)
 					ui.Row(c).FillWidth().Gap(12).AlignItems(ui.Center).Children(func() {
 						caption := ui.Text(c, "我已阅读并同意").FontSize(14).Grow(1)
 						s.preferenceSwitch(c, "wish-link-agree", caption, l.Agreed, false, state.WishLinkAgree)
 					})
-					s.accentButton(c, "wish-link-continue", "继续").Role(ui.RoleButton).Disabled(!l.Agreed).OnClick(func() { s.Dispatch(state.Event{Kind: state.WishLinkContinue}) })
+					ui.Row(c).FillWidth().Gap(12).Justify(ui.End).Children(func() {
+						s.quietButton(c, "wish-link-sms-mode", "用短信登录", !l.Agreed || l.Busy).Role(ui.RoleButton).OnClick(func() { s.Dispatch(state.Event{Kind: state.WishLinkContinue}) })
+						s.accentButton(c, "wish-link-saved", "用已保存的游戏账号").Role(ui.RoleButton).Disabled(!l.Agreed || l.Busy).OnClick(func() { s.Dispatch(state.Event{Kind: state.WishLinkUseSaved}) })
+					})
 				case state.WishLinkPhone:
 					ui.Text(c, "使用已保存游戏账号对应的手机号").FontSize(14).TextColor(muted)
 					ui.TextInput(c.Key("wish-link-phone"), &s.wishLink.phone).Label("塔吉多手机号").Role(ui.RoleTextField).Placeholder("手机号").FillWidth().Height(44).FontSize(15).Background(ink).TextColor(paper).Disabled(l.Busy)

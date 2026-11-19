@@ -17,12 +17,15 @@ func TestWishLinkNoticeConsentAndEscape(t *testing.T) {
 	if _, ok := tt.AccessByRole(ui.RoleDialog, "关联塔吉多"); !ok {
 		t.Fatal("notice dialog missing")
 	}
-	tt.Click("继续")
+	if _, ok := tt.AccessByRole(ui.RoleButton, "用已保存的游戏账号"); !ok {
+		t.Fatal("saved-credential action missing")
+	}
+	tt.Click("用短信登录")
 	if s.Model.Wish.Link.Step != state.WishLinkNotice {
 		t.Fatal("unchecked consent continued")
 	}
 	tt.Click("我已阅读并同意")
-	tt.Click("继续")
+	tt.Click("用短信登录")
 	if s.Model.Wish.Link.Step != state.WishLinkPhone {
 		t.Fatal("consent did not advance")
 	}

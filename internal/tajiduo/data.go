@@ -173,7 +173,7 @@ func snapshot(v any, a Access, now time.Time) (Snapshot, error) {
 			pity, okPity := integer(d["rareCount"])
 			luck, okLuck := integer(d["luckyType"])
 			stamp, okStamp := d["timeStamp"].(interface{ Int64() (int64, error) })
-			if !okID || !okPity || !okLuck || !okStamp || len(id) == 0 || len(id) > 64 || luck < 0 || luck > 3 {
+			if !okID || !okPity || !okLuck || !okStamp || len(id) == 0 || len(id) > 64 || luck < 0 || luck > gacha.LuckMax {
 				return Snapshot{}, ErrProtocolChanged
 			}
 			for _, b := range id {

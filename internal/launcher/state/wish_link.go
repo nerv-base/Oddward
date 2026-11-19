@@ -33,6 +33,7 @@ const (
 	WishLinkNoRole
 	WishLinkInvalid
 	WishLinkRoleMismatch
+	WishLinkGameCredential
 )
 
 type WishFetchPhase uint8
@@ -61,6 +62,7 @@ const (
 	WishLinkStart EventKind = 70 + iota
 	WishLinkAgree
 	WishLinkContinue
+	WishLinkUseSaved
 	WishLinkCancel
 	WishLinkSendSMS
 	WishLinkSMSDone
@@ -81,6 +83,7 @@ const (
 const (
 	TajiduoSendSMS EffectKind = 70 + iota
 	TajiduoLogin
+	TajiduoLoginSaved
 	TajiduoRoles
 	TajiduoBindRole
 	TajiduoComplete
@@ -143,7 +146,11 @@ func reduceWishLink(m Model, e Event) (Model, []Effect, bool) {
 		}
 	case WishLinkContinue:
 		if l.Phase == WishLinking && l.Step == WishLinkNotice && l.Agreed {
-			l.Step = WishLinkPhone
+			l.Step, l.Failure = WishLinkPhone, WishLinkFailureNone
+		}
+	case WishLinkUseSaved:
+		if l.Phase == WishLinking && l.Step == WishLinkNotice && !l.Busy && l.Agreed {
+			return start(TajiduoLoginSaved, "")
 		}
 	case WishLinkCancel:
 		if l.Phase == WishLinking {
@@ -189,7 +196,7 @@ func reduceWishLink(m Model, e Event) (Model, []Effect, bool) {
 			if l.Fetch == WishFetching {
 				l.Fetch = WishFetchFailed
 			}
-			if e.WishLinkFailure == WishLinkAuth {
+			if e.WishLinkFailure == WishLinkAuth && l.Phase != WishLinking {
 				l.Phase = WishNeedsRelink
 			}
 		}
@@ -202,9 +209,13 @@ func reduceWishLink(m Model, e Event) (Model, []Effect, bool) {
 		}
 	case WishFetchRequest:
 		if m.Page == WishAnalysis && m.Overlay == NoOverlay && l.Phase == WishLinked && !l.Busy && l.Fetch != WishFetching && !m.Wish.Busy && m.Wish.Confirm.Kind == WishConfirmNone && WishLinkCooldown(l.CooldownUntil, e.Now) == 0 {
+			role := m.Wish.RoleID
+			if role == "" {
+				role = l.RoleID
+			}
 			l.Fetch = WishFetching
 			l.CooldownUntil = e.Now.Add(time.Minute)
-			return start(WishFetch, m.Wish.RoleID)
+			return start(WishFetch, role)
 		}
 	case WishLinkUnlink:
 		if l.Phase != WishLinkNone && !l.Busy && m.Wish.Confirm.Kind == WishConfirmNone {

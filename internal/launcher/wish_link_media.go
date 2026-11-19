@@ -57,6 +57,8 @@ func (s *Shell) applyWishLinkEffect(f state.Effect) bool {
 				r.err = backend.SendSMS(ctx, f.Path, phone)
 			case state.TajiduoLogin:
 				r.err = backend.Login(ctx, f.Path, phone, code)
+			case state.TajiduoLoginSaved:
+				r.err = backend.LoginSaved(ctx, f.Path)
 			case state.TajiduoRoles:
 				r.roles, r.err = backend.Roles(ctx, f.Path)
 			case state.TajiduoBindRole:
@@ -133,7 +135,7 @@ func (s *Shell) syncWishLink() {
 				switch r.effect.Kind {
 				case state.TajiduoSendSMS:
 					e.Kind = state.WishLinkSMSDone
-				case state.TajiduoLogin:
+				case state.TajiduoLogin, state.TajiduoLoginSaved:
 					e.Kind = state.WishLinkLoginDone
 				case state.TajiduoRoles:
 					s.wishLink.roles = r.roles

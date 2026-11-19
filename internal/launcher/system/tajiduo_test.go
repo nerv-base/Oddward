@@ -115,6 +115,24 @@ func TestTajiduoCancelDoesNotSaveAndRoleReadDoesNotBind(t *testing.T) {
 		t.Fatal("cancel saved")
 	}
 }
+func TestTajiduoLoginSavedUsesStoredGameCredentialWithoutSaving(t *testing.T) {
+	b, s, id, binds := testTajiduoBackend(t, "42")
+	ctx := context.Background()
+	if err := b.LoginSaved(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	roles, err := b.Roles(ctx, id)
+	if err != nil || len(roles) != 1 || !roles[0].Bound {
+		t.Fatalf("roles after saved login: %+v err=%v", roles, err)
+	}
+	if *binds != 0 {
+		t.Fatal("role reading changed binding")
+	}
+	if _, err = s.UnlockTajiduo(id); !errors.Is(err, accounts.ErrNoTajiduo) {
+		t.Fatal("saved login persisted before completion")
+	}
+}
+
 func TestTajiduoCompleteThenFetchPreservesArchiveAfterUnlink(t *testing.T) {
 	b, s, id, _ := testTajiduoBackend(t, "42")
 	ctx := context.Background()

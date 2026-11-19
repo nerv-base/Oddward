@@ -13,6 +13,7 @@ type WishLinkBackend interface {
 	Status(context.Context) (WishLinkStatus, error)
 	SendSMS(context.Context, string, string) error
 	Login(context.Context, string, string, string) error
+	LoginSaved(context.Context, string) error
 	Roles(context.Context, string) ([]WishLinkRole, error)
 	Bind(context.Context, string, string) error
 	Complete(context.Context, string, string) error
@@ -60,6 +61,8 @@ func wishLinkFailureText(kind state.WishLinkFailure) string {
 		return "请检查手机号和验证码"
 	case state.WishLinkRoleMismatch:
 		return "当前档案与塔吉多绑定的角色不同，请先选择绑定的角色"
+	case state.WishLinkGameCredential:
+		return "无法使用已保存的游戏账号关联，请改用短信登录"
 	}
 	return ""
 }

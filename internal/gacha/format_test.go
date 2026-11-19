@@ -65,6 +65,22 @@ func TestFormatRoundTrips(t *testing.T) {
 	}
 }
 
+func TestLuckTierFourRoundTrips(t *testing.T) {
+	a := fixtureArchive()
+	a.Records[0].Luck = 4
+	b, err := ExportOddward(a, fixtureTime())
+	if err != nil {
+		t.Fatal(err)
+	}
+	imp, err := DecodeImport(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imp.Archive.Records[0].Luck != 4 {
+		t.Fatalf("luck=%d", imp.Archive.Records[0].Luck)
+	}
+}
+
 func TestUTCPrecisionAndValidation(t *testing.T) {
 	a := fixtureArchive()
 	a.Records[0].At = time.Date(2026, 11, 14, 20, 34, 56, 789999999, time.FixedZone("plus8", 8*3600))
@@ -93,7 +109,7 @@ func TestUTCPrecisionAndValidation(t *testing.T) {
 			t.Errorf("role accepted %q", bad)
 		}
 	}
-	for _, luck := range []int{-2, 4} {
+	for _, luck := range []int{-2, 5} {
 		a := fixtureArchive()
 		a.Records[0].Luck = luck
 		if _, err := ExportOddward(a, fixtureTime()); err == nil {
@@ -138,7 +154,7 @@ func TestStrictDecode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, data := range [][]byte{bytes.Replace(odd, []byte(`"luck":2`), []byte(`"luck":4`), 1), bytes.Replace(odd, []byte(`"pool":"limited"`), []byte(`"pool":"other"`), 1), bytes.Replace(odd, []byte(`"luck":2`), []byte(`"luck":2,"extra":0`), 1)} {
+	for _, data := range [][]byte{bytes.Replace(odd, []byte(`"luck":2`), []byte(`"luck":5`), 1), bytes.Replace(odd, []byte(`"pool":"limited"`), []byte(`"pool":"other"`), 1), bytes.Replace(odd, []byte(`"luck":2`), []byte(`"luck":2,"extra":0`), 1)} {
 		if _, err := DecodeImport(data); err == nil {
 			t.Fatal("invalid full document")
 		}

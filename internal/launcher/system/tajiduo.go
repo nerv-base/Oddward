@@ -10,6 +10,7 @@ import (
 	"github.com/nerv-base/Oddward/internal/launcher"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
 	"github.com/nerv-base/Oddward/internal/tajiduo"
+	"strings"
 	"sync"
 )
 
@@ -193,6 +194,33 @@ func (b *TajiduoBackend) Login(ctx context.Context, id, phone, code string) erro
 	b.sessions[id] = b.newLink(id, g, false)
 	return nil
 }
+func (b *TajiduoBackend) LoginSaved(ctx context.Context, id string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.current(ctx, id); err != nil {
+		return tajiduoFailure(err)
+	}
+	secret, err := b.accounts.Unlock(id)
+	if err != nil {
+		return tajiduoFailure(err)
+	}
+	defer secret.Wipe()
+	g, err := b.client.ExchangeGameCredential(ctx, secret.ChannelToken, secret.ChannelUID, strings.ToUpper(secret.DeviceID))
+	if err != nil {
+		switch {
+		case errors.Is(err, tajiduo.ErrNetwork), errors.Is(err, tajiduo.ErrChallengeRequired), errors.Is(err, tajiduo.ErrProtocolChanged):
+			return tajiduoFailure(err)
+		default:
+			return launcher.WishLinkError{Kind: state.WishLinkGameCredential}
+		}
+	}
+	if g.LaohuUserID != secret.ChannelUID {
+		return launcher.WishLinkError{Kind: state.WishLinkGameCredential}
+	}
+	b.sessions[id] = b.newLink(id, g, false)
+	return nil
+}
+
 func (b *TajiduoBackend) Roles(ctx context.Context, id string) ([]launcher.WishLinkRole, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

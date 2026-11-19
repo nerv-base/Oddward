@@ -25,6 +25,10 @@ const (
 // LuckUnknown identifies sources that do not provide a luck value.
 const LuckUnknown = -1
 
+// LuckMax is the highest luck tier the official gacha response has reported.
+// The upstream value is not documented; extend this only after observing it.
+const LuckMax = 4
+
 // MaxDocumentBytes bounds both stored and imported documents.
 const MaxDocumentBytes = 8 * 1024 * 1024
 
@@ -147,8 +151,8 @@ func validateRecord(r Record) error {
 			return errors.New("item ID must be printable ASCII")
 		}
 	}
-	if r.Luck < LuckUnknown || r.Luck > 3 {
-		return errors.New("luck must be unknown or between 0 and 3")
+	if r.Luck < LuckUnknown || r.Luck > LuckMax {
+		return fmt.Errorf("luck must be unknown or between 0 and %d", LuckMax)
 	}
 	if err := validateTime(r.At); err != nil {
 		return fmt.Errorf("record time: %w", err)

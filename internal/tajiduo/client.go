@@ -32,6 +32,9 @@ var (
 	ErrNeedsRelink       = errors.New("tajiduo: relink required")
 	ErrIdentityMismatch  = errors.New("tajiduo: identity mismatch")
 	ErrInvalidInput      = errors.New("tajiduo: invalid input")
+	// ErrCredentialRejected means the user center refused the saved game
+	// credential. It is safe to fall back to the official SMS login.
+	ErrCredentialRejected = errors.New("tajiduo: saved game credential rejected")
 	// ErrAlreadySigned is a business answer, not a transport failure: the
 	// server says this account or role already signed today. Callers must not
 	// treat it as a fresh reward and must not retry the write.
@@ -269,6 +272,49 @@ func (c *Client) LoginSMS(ctx context.Context, phone, code, deviceID string) (Gr
 	}
 	return Grant{DeviceID: deviceID, CenterUID: center, RefreshToken: refresh, LaohuUserID: uid}, nil
 }
+
+// ExchangeGameCredential mints a user-center session from the long-lived
+// credential already saved for the game login. It never sends SMS and never
+// persists the grant; the caller stages and commits it.
+func (c *Client) ExchangeGameCredential(ctx context.Context, channelToken, channelUID, deviceID string) (Grant, error) {
+	if channelToken == "" || !digits(channelUID) || !validDevice(deviceID) {
+		return Grant{}, ErrInvalidInput
+	}
+	root, status, e := c.exchange(ctx, false, http.MethodPost, "/usercenter/api/login", map[string]string{
+		"token":        channelToken,
+		"userIdentity": channelUID,
+		"appId":        centerAppID,
+	}, Access{DeviceID: deviceID})
+	if e != nil {
+		return Grant{}, e
+	}
+	code, ok := codeValue(root["code"])
+	if !ok || status < 200 || status >= 300 {
+		return Grant{}, ErrProtocolChanged
+	}
+	if expired(code) {
+		return Grant{}, ErrAuthExpired
+	}
+	if code != 0 {
+		return Grant{}, ErrCredentialRejected
+	}
+	data, ok := object(root["data"])
+	if !ok {
+		return Grant{}, ErrProtocolChanged
+	}
+	center, okCenter := identifier(data["uid"])
+	refresh, okRefresh := text(data["refreshToken"])
+	access, okAccess := text(data["accessToken"])
+	if !okCenter || !okRefresh || !okAccess || refresh == "" || access == "" {
+		return Grant{}, ErrProtocolChanged
+	}
+	g := Grant{DeviceID: deviceID, CenterUID: center, RefreshToken: refresh, LaohuUserID: channelUID}
+	if !validGrant(g) {
+		return Grant{}, ErrProtocolChanged
+	}
+	return g, nil
+}
+
 func (c *Client) Refresh(ctx context.Context, g Grant) (Grant, Access, error) {
 	if !validGrant(g) {
 		return Grant{}, Access{}, ErrInvalidInput

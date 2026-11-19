@@ -85,6 +85,39 @@ func TestLoginTwoSteps(t *testing.T) {
 		t.Fatalf("requests %v", paths)
 	}
 }
+func TestExchangeGameCredential(t *testing.T) {
+	c := fakeClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/usercenter/api/login" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		r.ParseForm()
+		if r.Form.Get("token") != "channel-token-secret" || r.Form.Get("userIdentity") != "42" || r.Form.Get("appId") != centerAppID {
+			t.Error("missing exchange fields")
+		}
+		if r.Header.Get("deviceid") != strings.Repeat("A", 32) || r.Header.Get("authorization") != "" {
+			t.Error("wrong device or pre-existing authorization")
+		}
+		reply(w, map[string]any{"accessToken": "access-secret", "refreshToken": "refresh-secret", "uid": 51})
+	})
+	g, err := c.ExchangeGameCredential(context.Background(), "channel-token-secret", "42", strings.Repeat("A", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.CenterUID != "51" || g.LaohuUserID != "42" || g.RefreshToken != "refresh-secret" || !validGrant(g) {
+		t.Fatalf("bad grant %+v", g)
+	}
+}
+
+func TestExchangeGameCredentialRejected(t *testing.T) {
+	c := fakeClient(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"code": 1001, "message": "token invalid"})
+	})
+	_, err := c.ExchangeGameCredential(context.Background(), "channel-token-secret", "42", strings.Repeat("A", 32))
+	if !errors.Is(err, ErrCredentialRejected) {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestRefreshPersistBeforeAccess(t *testing.T) {
 	c := fakeClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("authorization") != "refresh-old-secret" {
@@ -202,6 +235,21 @@ func TestGachaConversionDedupAndMetadata(t *testing.T) {
 		t.Fatal("missing rule mismatch")
 	}
 }
+func TestGachaAcceptsNewLuckTier(t *testing.T) {
+	p := gachaPayload()
+	for _, detail := range p["gachaDetails"].([]any)[0].(map[string]any)["details"].([]any) {
+		detail.(map[string]any)["luckyType"] = 4
+	}
+	c := fakeClient(t, func(w http.ResponseWriter, r *http.Request) { reply(w, p) })
+	s, err := c.Gacha(context.Background(), testAccess())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Pools) != 1 || len(s.Pools[0].Records) != 1 || s.Pools[0].Records[0].Luck != 4 {
+		t.Fatalf("bad snapshot %+v", s)
+	}
+}
+
 func TestGachaRejectsIdentityAndStructure(t *testing.T) {
 	for _, kind := range []string{"userid", "roleid", "tab", "structure", "details"} {
 		t.Run(kind, func(t *testing.T) {

@@ -20,6 +20,10 @@ func (f *fakeWishLinkBackend) Login(_ context.Context, id, phone, code string) e
 	f.calls <- "login"
 	return nil
 }
+func (f *fakeWishLinkBackend) LoginSaved(_ context.Context, id string) error {
+	f.calls <- "login-saved"
+	return nil
+}
 func (f *fakeWishLinkBackend) Roles(context.Context, string) ([]WishLinkRole, error) {
 	return []WishLinkRole{{ID: "123", Name: "合成角色", Bound: true}}, nil
 }
