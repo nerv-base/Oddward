@@ -419,7 +419,7 @@ func (s *Shell) checkInStatusCard(c *ui.Context, data checkInPageData) {
 			secondary += fmt.Sprintf(" · 成就 %d/%d", role.Achievement, role.AchievementTotal)
 		}
 		ui.Text(c, secondary).FontSize(checkinTextBody).TextColor(muted).SingleLine().Shrink(1).Tooltip(secondary)
-		ui.Text(c, "数值来自塔吉多；本性像素在首页按 6 分钟/点估算，备用体力与溢出数据未提供。").FontSize(checkinTextCaption).TextColor(muted).LineHeight(wishBodyLineHeight)
+		ui.Text(c, "数值来自塔吉多；本性像素在首页显示恢复倒计时，备用体力与溢出数据未提供。").FontSize(checkinTextCaption).TextColor(muted).LineHeight(wishBodyLineHeight)
 	})
 }
 

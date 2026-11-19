@@ -40,7 +40,7 @@ func (s *Shell) homeStamina(c *ui.Context) {
 	label := fmt.Sprintf("本性像素 %d/%d，%s", f.Current, f.Max, status)
 	card := ui.Box(c.Key("home-stamina")).Label(label).Absolute().Right(dockRight).Top(homeStaminaTop).
 		Size(homeStaminaWidth, homeStaminaHeight).Padding(homeStaminaInset).Radius(14).
-		Material(frostedSurface{Tint: glassInk}).Border(1, hairline).PassThrough()
+		Material(frostedSurface{Tint: glassInk}).Border(1, hairline)
 	card.Children(func() {
 		ui.Column(c).Fill().Gap(7).Children(func() {
 			s.homeStaminaHeader(c, m.Role)
@@ -58,7 +58,6 @@ func (s *Shell) homeStamina(c *ui.Context) {
 			ui.Box(c).FillWidth().Height(1).Background(hairline)
 			s.homeStaminaCity(c, m.Role)
 			s.homeStaminaStats(c, m.Role)
-			s.homeStaminaFootnote(c, m.Role)
 		})
 	})
 }
@@ -91,7 +90,21 @@ func (s *Shell) homeStaminaHeader(c *ui.Context, role state.CheckInRole) {
 			}
 			ui.Text(c, meta).FontSize(10).TextColor(muted).SingleLine().Shrink(1)
 		})
+		s.homeStaminaRefresh(c)
 	})
+}
+
+// homeStaminaRefresh is the card's manual read trigger. It only dispatches the
+// same status event the check-in page uses; the backend still runs off-thread.
+func (s *Shell) homeStaminaRefresh(c *ui.Context) {
+	loading := s.Model.CheckIn.StatusPhase == state.CheckStatusLoading
+	b := iconButton(c, "home-stamina-refresh", "刷新体力", "\uE72C", 24, func() {
+		s.Dispatch(state.Event{Kind: state.CheckInStatusRequested})
+	})
+	b.Disabled(loading)
+	if loading {
+		b.Tooltip("正在刷新体力")
+	}
 }
 
 // setRoleAvatar decodes the portrait bytes delivered with a status snapshot.
@@ -156,7 +169,6 @@ func (s *Shell) homeStaminaStats(c *ui.Context, role state.CheckInRole) {
 	}{
 		{"今日活跃度", fmt.Sprintf("%d / 100", role.DayValue), ""},
 		{"周本剩余", fmt.Sprintf("%d / 3", role.WeekRemain), ""},
-		{"轨外之境", "—", "塔吉多未提供轨外之境进度"},
 	}
 	ui.Row(c).FillWidth().Gap(8).Children(func() {
 		for _, stat := range stats {
@@ -169,15 +181,6 @@ func (s *Shell) homeStaminaStats(c *ui.Context, role state.CheckInRole) {
 			})
 		}
 	})
-}
-
-func (s *Shell) homeStaminaFootnote(c *ui.Context, role state.CheckInRole) {
-	text := "按 6 分钟/点估算"
-	if !role.FetchedAt.IsZero() {
-		text += " · 获取于 " + role.FetchedAt.Local().Format("15:04")
-	}
-	ui.Text(c, text).FontSize(9).TextColor(muted).SingleLine().
-		Tooltip("备用本性像素与溢出数据未提供；按 6 分钟/点估算")
 }
 
 // staminaWait renders a short countdown for the home card. Seconds are kept
