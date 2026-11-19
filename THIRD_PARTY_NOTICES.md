@@ -21,8 +21,8 @@ closure with the `mygo_noinspector` release tag.
 | Component and pinned version | License | Included text |
 | --- | --- | --- |
 | Go runtime and standard library, `go1.27.3` | BSD-3-Clause with additional patent grant | `go/LICENSE.txt`, `go/PATENTS.txt` |
-| `github.com/egoist/mygo` `v0.8.4-0.20261108050337-27b3abf58042` | MIT | `mygo/LICENSE.txt` |
-| MyGo `internal/shader` and `internal/shaderir`, same commit | Apache-2.0 | `mygo/shader-LICENSE.txt` |
+| `github.com/egoist/mygo` `v0.10.0` | MIT | `mygo/LICENSE.txt` |
+| MyGo `internal/shader` and `internal/shaderir`, same release | Apache-2.0 | `mygo/shader-LICENSE.txt` |
 | `github.com/ebitengine/purego` `v0.11.1` | Apache-2.0 | `purego/LICENSE.txt` |
 | `github.com/go-text/typesetting` `v0.3.5` | Unlicense OR BSD-3-Clause | `typesetting/LICENSE.txt` (both alternatives) |
 | `golang.org/x/image` `v0.46.0` | BSD-3-Clause with additional patent grant | `golang-x-image/LICENSE.txt`, `golang-x-image/PATENTS.txt` |

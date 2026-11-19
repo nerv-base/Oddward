@@ -7,7 +7,7 @@ go 1.27.3
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 require (
-	github.com/egoist/mygo v0.8.4-0.20261108050337-27b3abf58042
+	github.com/egoist/mygo v0.10.0
 	golang.org/x/image v0.46.0
 	golang.org/x/net v0.59.0
 	golang.org/x/sys v0.49.0
