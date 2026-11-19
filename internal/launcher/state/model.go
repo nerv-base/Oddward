@@ -88,6 +88,8 @@ const (
 	UIPreferencesLoaded
 	MediaReady
 	MediaFailed
+	// MediaRetry returns a failed video to loading when a newer file is opened.
+	MediaRetry
 	SystemMotionChanged
 	Navigate
 	OpenOfficial
@@ -719,6 +721,10 @@ func Reduce(m Model, e Event) (Model, []Effect) {
 	case MediaFailed:
 		if !m.MediaPreview {
 			m.Media = MediaUnavailable
+		}
+	case MediaRetry:
+		if !m.MediaPreview {
+			m.Media = MediaLoading
 		}
 	}
 	if m.Overlay != NoOverlay {

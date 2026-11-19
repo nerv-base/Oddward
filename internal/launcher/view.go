@@ -266,6 +266,11 @@ func (s *Shell) stage(c *ui.Context) {
 				v.Opacity(0)
 			}
 		}
+		// A replacement decodes behind the visible frame. It must be mounted to
+		// start, but stays invisible until tick swaps it in on Ready.
+		if s.nextPlayer != nil && !s.Model.MediaPreview {
+			ui.Video(c, s.nextPlayer).Label("背景视频（预载）").Absolute().Left(0).Top(0).Right(0).Bottom(0).Fit(ui.Cover).Opacity(0)
+		}
 		// Feathered legibility only, so any version's art keeps its colour:
 		// a soft left shade for the hero column and a floor for the dock.
 		ui.Box(c).Absolute().Left(0).Top(0).Bottom(0).Width(520).LinearGradient(ui.LinearGradient{Angle: 90, Stops: []ui.GradientStop{

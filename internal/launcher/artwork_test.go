@@ -88,16 +88,110 @@ func TestPosterDefaultsToSiblingImageWithoutChangingFiles(t *testing.T) {
 	}
 }
 
-type posterFixture struct{}
+type posterFixture struct {
+	cached BackgroundAssets
+	update BackgroundRefresh
+}
 
-func (posterFixture) Load(context.Context) (string, image.Image, error) {
-	return "", image.NewRGBA(image.Rect(0, 0, 16, 9)), nil
+func (f posterFixture) Cached() (BackgroundAssets, error) { return f.cached, nil }
+
+func (f posterFixture) Refresh(context.Context) (BackgroundRefresh, error) { return f.update, nil }
+
+type blockedBackground struct {
+	cached  BackgroundAssets
+	update  BackgroundRefresh
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b *blockedBackground) Cached() (BackgroundAssets, error) { return b.cached, nil }
+
+func (b *blockedBackground) Refresh(ctx context.Context) (BackgroundRefresh, error) {
+	close(b.started)
+	select {
+	case <-b.release:
+		return b.update, nil
+	case <-ctx.Done():
+		return BackgroundRefresh{}, ctx.Err()
+	}
+}
+
+func waitForBackground(t *testing.T, tt *ui.Tester, wake <-chan struct{}, done func() bool) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for !done() {
+		select {
+		case <-wake:
+			tt.Frame()
+		case <-deadline:
+			t.Fatal("background did not settle")
+		}
+	}
+}
+
+func TestCachedBackgroundAppearsWhileRefreshIsBlocked(t *testing.T) {
+	s := NewShell(state.InitialNormal())
+	defer s.Dispose()
+	cached := image.NewRGBA(image.Rect(0, 0, 16, 9))
+	for y := 0; y < 9; y++ {
+		for x := 0; x < 16; x++ {
+			cached.Set(x, y, color.RGBA{R: 20, G: 90, B: 230, A: 255})
+		}
+	}
+	refreshed := image.NewRGBA(image.Rect(0, 0, 32, 18))
+	for y := 0; y < 18; y++ {
+		for x := 0; x < 32; x++ {
+			refreshed.Set(x, y, color.RGBA{R: 220, G: 70, B: 30, A: 255})
+		}
+	}
+	source := &blockedBackground{
+		cached:  BackgroundAssets{Poster: cached},
+		update:  BackgroundRefresh{Assets: BackgroundAssets{Poster: refreshed}, PosterChanged: true},
+		started: make(chan struct{}), release: make(chan struct{}),
+	}
+	s.BackgroundSource = source
+	wake := make(chan struct{}, 1)
+	s.RequestFrame = func() {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+	tt := ui.NewTester(s.View, 1024, 631)
+	size := func() (int, int) {
+		if s.Poster == nil {
+			return 0, 0
+		}
+		return s.Poster.Size()
+	}
+	waitForBackground(t, tt, wake, func() bool { w, h := size(); return w == 16 && h == 9 })
+	if s.Accent.A == 0 {
+		t.Fatal("cached poster did not provide its accent")
+	}
+	select {
+	case <-source.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresh did not start after the cached artwork")
+	}
+	// The blocked refresh must not blank or replace what is already visible.
+	tt.Frame()
+	if w, h := size(); w != 16 || h != 9 {
+		t.Fatalf("cached poster lost while refresh was blocked: %dx%d", w, h)
+	}
+	close(source.release)
+	waitForBackground(t, tt, wake, func() bool {
+		w, h := size()
+		return w == 32 && h == 18 && s.backgroundOut == nil
+	})
+	if s.Model.Media != state.MediaUnavailable || s.Player != nil {
+		t.Fatalf("static fallback not settled: media=%v, player=%v", s.Model.Media, s.Player != nil)
+	}
 }
 
 func TestOfficialBackgroundWakesIdleWindowAndShowsStaticFallback(t *testing.T) {
 	s := NewShell(state.InitialNormal())
 	defer s.Dispose()
-	s.BackgroundSource = posterFixture{}
+	s.BackgroundSource = posterFixture{cached: BackgroundAssets{Poster: image.NewRGBA(image.Rect(0, 0, 16, 9))}}
 	wake := make(chan struct{}, 1)
 	s.RequestFrame = func() {
 		select {
@@ -107,7 +201,7 @@ func TestOfficialBackgroundWakesIdleWindowAndShowsStaticFallback(t *testing.T) {
 	}
 	tt := ui.NewTester(s.View, 1024, 631)
 	deadline := time.After(2 * time.Second)
-	for s.Poster == nil {
+	for s.Poster == nil || s.backgroundOut != nil {
 		select {
 		case <-wake:
 			tt.Frame()

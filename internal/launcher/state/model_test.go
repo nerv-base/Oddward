@@ -150,6 +150,22 @@ func TestMediaIsIndependentAndSettingsAreGuarded(t *testing.T) {
 		t.Fatal("media failure broke flow")
 	}
 }
+func TestMediaRetryRestoresLoadingAfterAVideoFailure(t *testing.T) {
+	m := send(settled(Ready), MediaReady)
+	m = send(m, MediaFailed)
+	if m.Media != MediaUnavailable {
+		t.Fatal("media failure did not disable the video")
+	}
+	m, _ = Reduce(m, Event{Kind: MediaRetry})
+	if m.Media != MediaLoading {
+		t.Fatal("media retry did not return to loading")
+	}
+	m, _ = Reduce(m, Event{Kind: MediaReady})
+	if m.Media != MediaPlaying {
+		t.Fatal("retried media never became ready")
+	}
+}
+
 func TestMediaPausedCanResumeFromUserAndSystemPreferences(t *testing.T) {
 	m := send(settled(Ready), MediaReady)
 	m = send(m, ToggleMotion)

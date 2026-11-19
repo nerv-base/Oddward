@@ -9,22 +9,42 @@ import (
 
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/video"
+
+	"github.com/nerv-base/Oddward/internal/launcher/state"
 )
 
-// BackgroundSource loads public artwork without touching the UI thread.
+// BackgroundAssets is the official artwork already available on disk.
+type BackgroundAssets struct {
+	Video  []byte
+	Poster image.Image
+}
+
+// BackgroundRefresh carries only the assets a refresh replaced.
+type BackgroundRefresh struct {
+	Assets        BackgroundAssets
+	VideoChanged  bool
+	PosterChanged bool
+}
+
+// BackgroundSource reads cached artwork without touching the UI thread and
+// checks the official manifest separately.
 type BackgroundSource interface {
-	Load(context.Context) (video string, poster image.Image, err error)
+	Cached() (BackgroundAssets, error)
+	Refresh(context.Context) (BackgroundRefresh, error)
 }
 
 type backgroundResult struct {
-	video  string
-	poster image.Image
-	tone   ui.Color
-	err    error
+	assets        BackgroundAssets
+	videoChanged  bool
+	posterChanged bool
+	tone          ui.Color
+	err           error
+	final         bool
 }
 
-// syncBackground starts one refresh and applies its result on the UI thread.
-// While the worker runs, the stage can render its normal asset-free fallback.
+// syncBackground starts one cache read followed by one refresh. The cached
+// result is applied as soon as it is available; the refresh result follows and
+// only replaces the assets it actually changed.
 func (s *Shell) syncBackground() {
 	if s.ctx.Err() != nil || s.Model.Closed {
 		return
@@ -32,40 +52,91 @@ func (s *Shell) syncBackground() {
 	if s.BackgroundSource != nil {
 		source, ctx, wake := s.BackgroundSource, s.ctx, s.RequestFrame
 		s.BackgroundSource = nil
-		out := make(chan backgroundResult, 1)
+		out := make(chan backgroundResult, 2)
 		s.backgroundOut = out
 		go func() {
-			path, poster, err := source.Load(ctx)
-			var tone ui.Color
-			if poster != nil {
-				tone, _ = ArtAccent(poster)
-			}
+			cached, err := source.Cached()
 			if ctx.Err() != nil {
 				return
 			}
-			out <- backgroundResult{video: path, poster: poster, tone: tone, err: err}
+			out <- backgroundResult{
+				assets:        cached,
+				videoChanged:  len(cached.Video) > 0,
+				posterChanged: cached.Poster != nil,
+				tone:          artworkAccent(cached.Poster),
+				err:           err,
+			}
+			if wake != nil {
+				wake()
+			}
+			update, err := source.Refresh(ctx)
+			if ctx.Err() != nil {
+				return
+			}
+			out <- backgroundResult{
+				assets:        update.Assets,
+				videoChanged:  update.VideoChanged,
+				posterChanged: update.PosterChanged,
+				tone:          artworkAccent(update.Assets.Poster),
+				err:           err,
+				final:         true,
+			}
 			if wake != nil {
 				wake()
 			}
 		}()
 	}
-	select {
-	case result := <-s.backgroundOut:
-		s.backgroundOut = nil
-		if result.err != nil {
-			log.Printf("official background refresh: %v", result.err)
-		}
-		if result.poster != nil {
-			s.Poster = ui.NewBitmap(result.poster)
-			s.Accent = result.tone
-		}
-		if result.video != "" {
-			if p, err := video.Open(result.video); err == nil {
-				s.Player = p.SetLoop(true).SetMuted(true)
-			} else {
-				log.Printf("official background video unavailable: %v", err)
+	for {
+		select {
+		case result := <-s.backgroundOut:
+			if result.final {
+				s.backgroundOut = nil
 			}
+			if result.err != nil {
+				log.Printf("official background: %v", result.err)
+			}
+			if result.posterChanged && result.assets.Poster != nil {
+				s.Poster = ui.NewBitmap(result.assets.Poster)
+				if result.tone.A != 0 {
+					s.Accent = result.tone
+				}
+			}
+			if result.videoChanged && len(result.assets.Video) > 0 {
+				s.openBackgroundVideo(result.assets.Video)
+			}
+		default:
+			return
 		}
-	default:
 	}
+}
+
+func artworkAccent(poster image.Image) ui.Color {
+	if poster == nil {
+		return ui.Color{}
+	}
+	tone, _ := ArtAccent(poster)
+	return tone
+}
+
+// openBackgroundVideo queues a replacement player. The new player must be
+// mounted before it can produce its first frame, so the old one stays visible
+// until tick observes Ready; only then is it closed.
+func (s *Shell) openBackgroundVideo(data []byte) {
+	player, err := video.OpenData(data)
+	if err != nil {
+		log.Printf("official background video unavailable: %v", err)
+		return
+	}
+	player.SetLoop(true).SetMuted(true)
+	if s.Player == nil {
+		s.Player = player
+		if !s.Model.MediaPreview && s.Model.Media == state.MediaUnavailable {
+			s.Dispatch(state.Event{Kind: state.MediaRetry})
+		}
+		return
+	}
+	if s.nextPlayer != nil {
+		s.nextPlayer.Close()
+	}
+	s.nextPlayer = player
 }

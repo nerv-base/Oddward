@@ -4,6 +4,7 @@ package launcher
 
 import (
 	"context"
+	"log"
 	"strings"
 	"time"
 
@@ -102,6 +103,7 @@ type Shell struct {
 	managedSave        chan ManagedPreferences
 	managedSaveStarted bool
 	Player             *ui.VideoPlayer
+	nextPlayer         *ui.VideoPlayer
 	BackgroundSource   BackgroundSource
 	backgroundOut      chan backgroundResult
 	Slogan             *ui.Bitmap
@@ -285,6 +287,10 @@ func (s *Shell) Dispose() {
 	if s.Player != nil {
 		s.Player.Close()
 		s.Player = nil
+	}
+	if s.nextPlayer != nil {
+		s.nextPlayer.Close()
+		s.nextPlayer = nil
 	}
 }
 
@@ -555,6 +561,23 @@ func (s *Shell) tick(c *ui.Context) {
 			s.Player.Play()
 		} else if !play && s.Player.Playing() {
 			s.Player.Pause()
+		}
+	}
+	if s.nextPlayer != nil {
+		if err := s.nextPlayer.Err(); err != nil {
+			log.Printf("official background video replacement: %v", err)
+			s.nextPlayer.Close()
+			s.nextPlayer = nil
+		} else if s.nextPlayer.Ready() {
+			old := s.Player
+			s.Player = s.nextPlayer
+			s.nextPlayer = nil
+			if old != nil {
+				old.Close()
+			}
+			if !s.Model.MediaPreview && s.Model.Media == state.MediaUnavailable {
+				s.Dispatch(state.Event{Kind: state.MediaRetry})
+			}
 		}
 	}
 	s.syncBranding()

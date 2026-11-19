@@ -14,6 +14,9 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/jpeg"
+	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,15 +26,26 @@ import (
 	"strings"
 	"time"
 
+	xdraw "golang.org/x/image/draw"
+
 	"github.com/nerv-base/Oddward/internal/imagecheck"
 )
 
 const (
-	cdnHost    = "yhcdn1.wmupd.com"
-	cdnRoot    = "/hd/publish_ob/launcher/"
-	versionURL = "https://" + cdnHost + cdnRoot + "Version.ini"
-	maxPoster  = 16 << 20
-	maxVideo   = 64 << 20
+	cdnHost     = "yhcdn1.wmupd.com"
+	cdnRoot     = "/hd/publish_ob/launcher/"
+	versionURL  = "https://" + cdnHost + cdnRoot + "Version.ini"
+	maxPoster   = 16 << 20
+	maxVideo    = 64 << 20
+	maxPreview  = 4 << 20
+	videoName   = "bg.mp4"
+	posterName  = "poster"
+	previewName = "poster-preview.jpg"
+
+	// A preview this size stays sharp on a 1440p window after the system scales
+	// it, and decodes in a fraction of the full poster's time.
+	previewWidth  = 1920
+	previewHeight = 1080
 )
 
 var (
@@ -64,56 +78,116 @@ type asset struct {
 	ZipDigest string `xml:"ZipChecksum,attr"`
 }
 
-// Load checks the active manifest once. A failed refresh leaves the last
-// verified files usable, including when only one of the two assets is available.
-func (c *Client) Load(ctx context.Context) (video string, poster image.Image, err error) {
+// CachedArtwork is the artwork already on disk. It is read without any
+// network request, so a window can show it before the manifest is checked.
+// Video stays in memory because Media Foundation would otherwise hold a file
+// handle that refuses to be replaced while the old frame is still playing.
+type CachedArtwork struct {
+	Video  []byte
+	Poster image.Image
+}
+
+// ArtworkUpdate is the artwork a refresh replaced. Unchanged fields stay zero:
+// the caller already has the cached copy and must not decode or reopen it.
+type ArtworkUpdate struct {
+	Video         []byte
+	Poster        image.Image
+	VideoChanged  bool
+	PosterChanged bool
+}
+
+// Cached reads the last verified files. A corrupted still is reported without
+// hiding a usable video; an unreadable video is treated as absent. The small
+// preview is preferred so a 4K poster does not decode on every launch.
+func (c *Client) Cached() (CachedArtwork, error) {
+	var cached CachedArtwork
+	videoPath := filepath.Join(c.dir, videoName)
+	if data := readCache(videoPath, maxVideo); data != nil && isMP4(data) {
+		cached.Video = data
+		removeLegacyVideos(c.dir)
+	} else {
+		cached.Video = promoteLegacyVideo(c.dir, videoPath)
+	}
+	if data := readCache(filepath.Join(c.dir, previewName), maxPreview); data != nil {
+		if poster, err := decodePreview(data); err == nil {
+			cached.Poster = poster
+		}
+	}
+	if cached.Poster == nil {
+		if data := readCache(filepath.Join(c.dir, posterName), maxPoster); data != nil {
+			poster, err := decodePoster(data)
+			if err != nil {
+				return cached, fmt.Errorf("launcher media: cached poster: %w", err)
+			}
+			cached.Poster = poster
+		}
+	}
+	return cached, nil
+}
+
+// Refresh checks the active manifest once and returns only the assets it
+// replaced. A failed refresh leaves the verified cache usable, including when
+// only one of the two assets changed.
+func (c *Client) Refresh(ctx context.Context) (ArtworkUpdate, error) {
 	ctx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
 	if err := os.MkdirAll(c.dir, 0700); err != nil {
-		return "", nil, err
+		return ArtworkUpdate{}, err
 	}
-	videoPath, posterPath := filepath.Join(c.dir, "bg.mp4"), filepath.Join(c.dir, "poster")
-	previousVideo := readCache(videoPath, maxVideo)
-	if !isMP4(previousVideo) {
-		previousVideo = nil
-	} else {
-		video = videoPath
-	}
-	previousPoster := readCache(posterPath, maxPoster)
-	if poster, err = decodePoster(previousPoster); err != nil {
-		previousPoster = nil
-	}
+	videoPath, posterPath := filepath.Join(c.dir, videoName), filepath.Join(c.dir, posterName)
+	previewPath := filepath.Join(c.dir, previewName)
 	manifest, still, motion, err := c.discover(ctx)
 	if err != nil {
-		return video, poster, err
+		return ArtworkUpdate{}, err
 	}
+	var update ArtworkUpdate
 	var stillErr, motionErr error
-	if still.Path != "" && !still.matches(previousPoster) {
+	if still.Path != "" && !still.matchesFile(posterPath) {
 		var data []byte
 		data, stillErr = c.download(ctx, manifest, still, maxPoster)
 		if stillErr == nil {
-			var decoded image.Image
-			decoded, stillErr = decodePoster(data)
+			var poster image.Image
+			poster, stillErr = decodePoster(data)
 			if stillErr == nil {
-				stillErr = store(ctx, posterPath, data)
-				if stillErr == nil {
-					poster = decoded
+				if stillErr = store(ctx, posterPath, data); stillErr == nil {
+					update.Poster, update.PosterChanged = poster, true
+					// A preview is an optimization, never a reason to fail the
+					// verified poster that is already stored.
+					if preview, previewData, err := previewPoster(poster); err == nil {
+						if store(ctx, previewPath, previewData) == nil {
+							update.Poster = preview
+						}
+					}
+				}
+			}
+		}
+	} else if still.Path != "" {
+		// Upgrade the existing full poster once, so the next launch does not
+		// pay for decoding it again.
+		if _, err := os.Lstat(previewPath); err != nil {
+			if data := readCache(posterPath, maxPoster); data != nil {
+				if poster, err := decodePoster(data); err == nil {
+					if preview, previewData, err := previewPoster(poster); err == nil {
+						if store(ctx, previewPath, previewData) == nil {
+							update.Poster, update.PosterChanged = preview, true
+						}
+					}
 				}
 			}
 		}
 	}
-	if motion.Path != "" && !motion.matches(previousVideo) {
+	if motion.Path != "" && !motion.matchesFile(videoPath) {
 		var data []byte
 		data, motionErr = c.download(ctx, manifest, motion, maxVideo)
 		if motionErr == nil {
 			if !isMP4(data) {
 				motionErr = errors.New("launcher media: invalid MP4 header")
 			} else if motionErr = store(ctx, videoPath, data); motionErr == nil {
-				video = videoPath
+				update.Video, update.VideoChanged = data, true
 			}
 		}
 	}
-	return video, poster, errors.Join(stillErr, motionErr)
+	return update, errors.Join(stillErr, motionErr)
 }
 
 func (c *Client) discover(ctx context.Context) (*url.URL, asset, asset, error) {
@@ -223,6 +297,25 @@ func (a asset) matches(data []byte) bool {
 	return len(data) != 0 && int64(len(data)) == a.Size && matchesDigest(data, a.Digest)
 }
 
+// matchesFile compares the manifest without loading a whole video into memory.
+func (a asset) matchesFile(name string) bool {
+	info, err := os.Lstat(name)
+	if err != nil || !info.Mode().IsRegular() || a.Size <= 0 || info.Size() != a.Size {
+		return false
+	}
+	file, err := os.Open(name)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	digest := md5.New()
+	n, err := io.Copy(digest, file)
+	if err != nil || n != a.Size {
+		return false
+	}
+	return strings.EqualFold(hex.EncodeToString(digest.Sum(nil)), a.Digest)
+}
+
 func validDigest(s string) bool {
 	if len(s) != md5.Size*2 {
 		return false
@@ -237,11 +330,15 @@ func matchesDigest(data []byte, s string) bool {
 }
 
 func isMP4(data []byte) bool {
-	if len(data) < 16 || string(data[4:8]) != "ftyp" {
+	return isMP4Header(data, int64(len(data)))
+}
+
+func isMP4Header(header []byte, size int64) bool {
+	if len(header) < 16 || size < 16 || string(header[4:8]) != "ftyp" {
 		return false
 	}
-	headerSize := uint64(binary.BigEndian.Uint32(data[:4]))
-	return headerSize >= 16 && headerSize <= uint64(len(data))
+	headerSize := uint64(binary.BigEndian.Uint32(header[:4]))
+	return headerSize >= 16 && headerSize <= uint64(size)
 }
 
 func decodePoster(data []byte) (image.Image, error) {
@@ -250,6 +347,47 @@ func decodePoster(data []byte) (image.Image, error) {
 	}
 	img, _, err := image.Decode(bytes.NewReader(data))
 	return img, err
+}
+
+// promoteLegacyVideo moves the newest verified versioned video to the fixed
+// name once, so upgrading does not lose an offline cache. It returns the bytes
+// it could read even if the rename fails.
+func promoteLegacyVideo(dir, target string) []byte {
+	legacy, _ := filepath.Glob(filepath.Join(dir, "bg-*.mp4"))
+	var newest string
+	var newestTime time.Time
+	for _, name := range legacy {
+		info, err := os.Lstat(name)
+		if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxVideo {
+			continue
+		}
+		if newest == "" || info.ModTime().After(newestTime) {
+			newest, newestTime = name, info.ModTime()
+		}
+	}
+	if newest == "" {
+		return nil
+	}
+	data := readCache(newest, maxVideo)
+	if data == nil || !isMP4(data) {
+		return nil
+	}
+	if store(context.Background(), target, data) == nil {
+		for _, name := range legacy {
+			_ = os.Remove(name)
+		}
+	}
+	return data
+}
+
+// removeLegacyVideos deletes the versioned names used before the switch to a
+// single fixed bg.mp4. It runs on the cache-read path, before any player can
+// hold one of those files.
+func removeLegacyVideos(dir string) {
+	legacy, _ := filepath.Glob(filepath.Join(dir, "bg-*.mp4"))
+	for _, name := range legacy {
+		_ = os.Remove(name)
+	}
 }
 
 func readCache(name string, limit int64) []byte {
@@ -267,6 +405,48 @@ func readCache(name string, limit int64) []byte {
 		return nil
 	}
 	return data
+}
+
+// previewPoster scales a verified poster down once, on the refresh path, so
+// startup only decodes a small JPEG. The full poster remains on disk as the
+// fallback if the preview is missing or damaged.
+func previewPoster(poster image.Image) (image.Image, []byte, error) {
+	bounds := poster.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	if width <= 0 || height <= 0 {
+		return nil, nil, errors.New("launcher media: empty poster")
+	}
+	scaledWidth, scaledHeight := width, height
+	if width > previewWidth || height > previewHeight {
+		scale := math.Min(float64(previewWidth)/float64(width), float64(previewHeight)/float64(height))
+		scaledWidth = max(1, int(math.Round(float64(width)*scale)))
+		scaledHeight = max(1, int(math.Round(float64(height)*scale)))
+	}
+	scaled := poster
+	if scaledWidth != width || scaledHeight != height {
+		dst := image.NewRGBA(image.Rect(0, 0, scaledWidth, scaledHeight))
+		xdraw.ApproxBiLinear.Scale(dst, dst.Bounds(), poster, bounds, xdraw.Src, nil)
+		scaled = dst
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, scaled, &jpeg.Options{Quality: 85}); err != nil {
+		return nil, nil, err
+	}
+	return scaled, buf.Bytes(), nil
+}
+
+func decodePreview(data []byte) (image.Image, error) {
+	if _, _, err := imagecheck.Check(data, imagecheck.Limits{MaxBytes: maxPreview, MaxSide: previewWidth, MaxPixels: previewWidth * previewHeight, Formats: []string{"jpeg"}}); err != nil {
+		return nil, err
+	}
+	poster, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	if poster.Bounds().Dx() > previewWidth || poster.Bounds().Dy() > previewHeight {
+		return nil, errors.New("launcher media: preview is larger than its limit")
+	}
+	return poster, nil
 }
 
 func store(ctx context.Context, target string, data []byte) error {
