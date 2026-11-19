@@ -12,52 +12,85 @@ import (
 )
 
 const (
-	homeStaminaWidth  float32 = 312
-	homeStaminaHeight float32 = 220
-	homeStaminaTop    float32 = 64
-	homeStaminaInset  float32 = 14
-	homeStaminaInner  float32 = homeStaminaWidth - 2*homeStaminaInset
+	homeStaminaWidth    float32 = 312
+	homeStaminaHeight   float32 = 220
+	homeStaminaTop      float32 = 64
+	homeStaminaInset    float32 = 14
+	homeStaminaInner    float32 = homeStaminaWidth - 2*homeStaminaInset
+	homeStaminaIconSize float32 = 44
 )
 
-// homeStamina is the Starward-style daily-note card on the home screen: role
-// identity, the main stamina reading with a recovery estimate, a progress
-// meter, the city-stamina snapshot and the day's activity figures. It only
-// draws when a linked role with a reported cap is available; it never invents
-// a value or a reserve pool.
+// homeStamina is the Starward-style daily-note entry on the home screen: a
+// compact resource icon whose popover carries the role identity, the main
+// stamina reading with a recovery estimate, a progress meter, the city-stamina
+// snapshot and the day's activity figures. It only draws when a linked role
+// with a reported cap is available; it never invents a value or a reserve pool.
 func (s *Shell) homeStamina(c *ui.Context) {
 	m := s.Model.CheckIn
 	if !m.Linked || m.NeedsRelink || m.Role.StaminaMax <= 0 {
+		s.staminaOpen = false
 		return
 	}
 	f, ok := state.ForecastStamina(m.Role, s.now)
 	if !ok {
+		s.staminaOpen = false
 		return
 	}
 	status := "已满"
 	if !f.Full {
 		status = "约 " + staminaWait(f.NextIn) + "后 +1"
 	}
-	label := fmt.Sprintf("本性像素 %d/%d，%s", f.Current, f.Max, status)
-	card := ui.Box(c.Key("home-stamina")).Label(label).Absolute().Right(dockRight).Top(homeStaminaTop).
-		Size(homeStaminaWidth, homeStaminaHeight).Padding(homeStaminaInset).Radius(14).
+	anchor := ui.ButtonBase(c.Key("home-stamina-toggle")).Label("查看体力与活跃度").Tooltip("查看体力与活跃度").
+		Absolute().Right(dockRight).Top(homeStaminaTop).Size(homeStaminaIconSize, homeStaminaIconSize).
+		Radius(homeStaminaIconSize/2).Justify(ui.Center).AlignItems(ui.Center).
 		Material(frostedSurface{Tint: glassInk}).Border(1, hairline)
-	card.Children(func() {
-		ui.Column(c).Fill().Gap(7).Children(func() {
-			s.homeStaminaHeader(c, m.Role)
-			s.homeStaminaMain(c, f, status)
-			ui.Box(c).FillWidth().Height(5).Radius(3).Background(hairline).Children(func() {
-				ratio := float32(f.Current) / float32(f.Max)
-				if ratio < 0 {
-					ratio = 0
-				}
-				if ratio > 1 {
-					ratio = 1
-				}
-				ui.Box(c).Width(ratio * homeStaminaInner).Height(5).Radius(3).Background(s.tone())
+	if s.staminaOpen {
+		anchor.Border(1, s.tone())
+	}
+	if anchor.Hovered() || anchor.FocusVisible() {
+		anchor.Background(hairline)
+	}
+	anchor.Children(func() {
+		if s.StaminaIcon != nil {
+			ui.Image(c, s.StaminaIcon).Size(28, 28).Fit(ui.Contain).PassThrough()
+		} else {
+			glyph(c, "\uE9D8", 26)
+		}
+	}).OnClick(func() {
+		s.staminaOpen = !s.staminaOpen
+	})
+	if !s.staminaOpen {
+		return
+	}
+	ui.PopoverBase(c, anchor, &s.staminaOpen, func(panel ui.Element) {
+		panel.AttachTo(anchor, ui.AnchorBottomEnd, ui.AnchorTopEnd).Margin(8, 0, 0, 0).
+			Size(homeStaminaWidth, homeStaminaHeight).Padding(homeStaminaInset).Radius(14).
+			Material(frostedSurface{Tint: glassInk}).Border(1, hairline).
+			Label(fmt.Sprintf("体力和活跃度，本性像素 %d/%d，%s", f.Current, f.Max, status)).
+			Transition(ui.ElementTransition{
+				Duration:     160 * time.Millisecond,
+				ExitDuration: 120 * time.Millisecond,
+				Enter:        &ui.Motion{X: 10, Opacity: 0},
+				Exit:         &ui.Motion{X: 10, Opacity: 0},
 			})
-			ui.Box(c).FillWidth().Height(1).Background(hairline)
-			s.homeStaminaCity(c, m.Role)
-			s.homeStaminaStats(c, m.Role)
+		panel.Children(func() {
+			ui.Column(c).Fill().Gap(7).Children(func() {
+				s.homeStaminaHeader(c, m.Role)
+				s.homeStaminaMain(c, f, status)
+				ui.Box(c).FillWidth().Height(5).Radius(3).Background(hairline).Children(func() {
+					ratio := float32(f.Current) / float32(f.Max)
+					if ratio < 0 {
+						ratio = 0
+					}
+					if ratio > 1 {
+						ratio = 1
+					}
+					ui.Box(c).Width(ratio * homeStaminaInner).Height(5).Radius(3).Background(s.tone())
+				})
+				ui.Box(c).FillWidth().Height(1).Background(hairline)
+				s.homeStaminaCity(c, m.Role)
+				s.homeStaminaStats(c, m.Role)
+			})
 		})
 	})
 }

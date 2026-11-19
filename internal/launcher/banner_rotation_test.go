@@ -40,6 +40,33 @@ func TestOfficialCoverRotatesAndWrapsWithoutChangingCategory(t *testing.T) {
 	}
 }
 
+func TestOfficialCoverWheelStepsAndDebounces(t *testing.T) {
+	s := rotationBoard()
+	defer s.Dispose()
+	tt := ui.NewTester(s.View, 1280, 720)
+	r, ok := tt.Find("查看官方公告")
+	if !ok {
+		t.Fatal("missing cover")
+	}
+	x, y := r.X+r.W/2, r.Y+r.H/2
+	tt.Scroll(x, y, 0, 1)
+	tt.Frame()
+	if s.Model.NewsIndex != 1 {
+		t.Fatalf("wheel down did not select the next cover: index=%d", s.Model.NewsIndex)
+	}
+	tt.Scroll(x, y, 0, 1)
+	tt.Frame()
+	if s.Model.NewsIndex != 1 {
+		t.Fatal("a second wheel event inside the debounce window switched twice")
+	}
+	tt.Advance(200 * time.Millisecond)
+	tt.Scroll(x, y, 0, -1)
+	tt.Frame()
+	if s.Model.NewsIndex != 0 {
+		t.Fatalf("wheel up did not select the previous cover: index=%d", s.Model.NewsIndex)
+	}
+}
+
 func TestOfficialCoverRotationPausesWhileInteractingOrReducingMotion(t *testing.T) {
 	s := rotationBoard()
 	defer s.Dispose()

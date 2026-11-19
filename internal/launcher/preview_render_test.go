@@ -81,6 +81,7 @@ func TestRenderPreviewFrames(t *testing.T) {
 				DayValue: 100, WeekRemain: 2, CharCount: 23,
 				FetchedAt: time.Now().Add(-2 * time.Minute),
 			}
+			s.staminaOpen = true
 		}},
 		{"media-bar", 1280, 720, func(s *Shell, tt *ui.Tester) {
 			loaded(s)

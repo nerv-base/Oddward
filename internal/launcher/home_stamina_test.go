@@ -32,11 +32,25 @@ func TestHomeStaminaCardOnlyWithLinkedRole(t *testing.T) {
 	s = NewShell(m)
 	defer s.Dispose()
 	tt = ui.NewTester(s.View, 1280, 720)
-	card, ok := tt.Find("本性像素 320/320，已满")
-	if !ok {
-		t.Fatal("home stamina card is missing")
+	if tt.HasText("体力和活跃度") {
+		t.Fatal("home stamina card is visible before its icon is opened")
 	}
-	if card.X < 800 || card.Y < 60 || card.Y+card.H > 320 ||
+	if err := tt.Click("查看体力与活跃度"); err != nil {
+		t.Fatalf("home stamina icon is not clickable: %v", err)
+	}
+	start, ok := tt.Find("体力和活跃度，本性像素 320/320，已满")
+	if !ok {
+		t.Fatal("home stamina card did not appear")
+	}
+	tt.Advance(200 * time.Millisecond)
+	card, ok := tt.Find("体力和活跃度，本性像素 320/320，已满")
+	if !ok {
+		t.Fatal("home stamina card is missing after opening its icon")
+	}
+	if start.X <= card.X {
+		t.Fatalf("home stamina card has no enter transition: start=%v settled=%v", start, card)
+	}
+	if card.X < 800 || card.Y < 60 || card.Y+card.H > 400 ||
 		card.X+card.W > 1280-dockRight {
 		t.Fatalf("home stamina card leaves its safe corner: %+v", card)
 	}
@@ -53,6 +67,11 @@ func TestHomeStaminaCardOnlyWithLinkedRole(t *testing.T) {
 	}
 	if s.Model.CheckIn.StatusPhase == state.CheckStatusIdle {
 		t.Fatal("home stamina refresh did not request a new status read")
+	}
+	tt.ClickAt(300, 200)
+	tt.Advance(200 * time.Millisecond)
+	if tt.HasText("体力和活跃度") {
+		t.Fatal("clicking away did not close the stamina card")
 	}
 
 	m.CheckIn.NeedsRelink = true

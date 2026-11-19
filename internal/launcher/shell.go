@@ -114,11 +114,14 @@ type Shell struct {
 	CityStaminaIcon *ui.Bitmap
 	// RoleAvatar is decoded from the role-home portrait once per status read.
 	RoleAvatar *ui.Bitmap
+	// staminaOpen keeps the home daily-note popover open across frames.
+	staminaOpen bool
 	// Accent is the launch tone derived from the poster (PosterAccent); the
 	// zero value keeps the default tone.
 	Accent          ui.Color
 	bannerMedia     bannerMedia
 	bannerRotation  bannerRotation
+	bannerSlide     bannerSlide
 	mediaFocus      ui.Handle
 	navigationFocus ui.Handle
 	Minimize        func()
@@ -595,6 +598,8 @@ func (s *Shell) View(c *ui.Context) {
 		s.stage(c)
 		if s.Model.Page != state.Home {
 			s.bannerRotation.deadline = time.Time{}
+			s.resetBannerSlide()
+			s.staminaOpen = false
 		}
 		switch s.Model.Page {
 		case state.Home:

@@ -180,9 +180,27 @@ func (s *Shell) bannerArtwork(c *ui.Context) {
 	if s.bannerMedia.generation == s.Model.NewsRequest && s.Model.News == state.NewsPresent {
 		// A modal hides actions and prevents new reads, not an already loaded
 		// cover. Its image remains behind the modal without a fallback flash.
-		_, _, url, ok := s.Model.NewsBanners.At(s.Model.NewsIndex)
-		if selected := s.bannerMedia.cache[url]; ok && selected != nil {
-			bitmap = selected
+		previous, current, progress, sliding := s.bannerSlideFrame(c)
+		if sliding {
+			ui.Box(c.Key("banner-base")).Fill().Background(ui.Hex("#11151A")).PassThrough()
+			width := float32(coverWidth)
+			if s.bannerSlide.dir < 0 {
+				ui.Image(c.Key("banner-artwork-from"), previous).Absolute().Left(0).Right(0).Top(0).Bottom(0).Fit(ui.Cover).PassThrough()
+				reveal := max(progress*width, 0.5)
+				ui.Box(c.Key("banner-artwork-to-clip")).Absolute().Left(0).Top(0).Bottom(0).Width(reveal).Clip().PassThrough().Children(func() {
+					ui.Image(c.Key("banner-artwork-to"), current).Absolute().Left(0).Right(0).Top(0).Bottom(0).Fit(ui.Cover).PassThrough()
+				})
+			} else {
+				ui.Image(c.Key("banner-artwork-to"), current).Absolute().Left(0).Right(0).Top(0).Bottom(0).Fit(ui.Cover).PassThrough()
+				reveal := max((1-progress)*width, 0.5)
+				ui.Box(c.Key("banner-artwork-from-clip")).Absolute().Left(0).Top(0).Bottom(0).Width(reveal).Clip().PassThrough().Children(func() {
+					ui.Image(c.Key("banner-artwork-from"), previous).Absolute().Left(0).Right(0).Top(0).Bottom(0).Fit(ui.Cover).PassThrough()
+				})
+			}
+			return
+		}
+		if current != nil {
+			bitmap = current
 		}
 	}
 	ui.Box(c.Key("banner-base")).Fill().Background(ui.Hex("#11151A")).PassThrough()

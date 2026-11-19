@@ -441,6 +441,11 @@ func (s *Shell) newsCard(c *ui.Context) {
 					ui.Text(c, meta).FontSize(11).TextColor(muted).SingleLine()
 				}
 			})
+		}).HandleInput(func(ev ui.InputEvent) bool {
+			if ev.Kind != ui.InputScroll {
+				return false
+			}
+			return s.stepNewsBanner(ev.DY)
 		}).OnClick(func() {
 			if s.Model.News == state.NewsPresent && s.Model.NewsBanners.Count > 0 {
 				s.Dispatch(state.Event{Kind: state.OpenNewsBanner})

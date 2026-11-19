@@ -206,11 +206,26 @@ func TestBannerMediaLoadsOnlySelectionAndCachesIt(t *testing.T) {
 	second.reply <- bannerTestReply{data: bannerTestImage(t, 24, 12, false, blue)}
 	awaitBannerWake(t, wake)
 	tt.Frame()
+	if !s.bannerSlide.active {
+		t.Fatalf("slide did not start: %+v", s.bannerSlide)
+	}
+	if s.bannerSlide.fromBitmap == nil || s.bannerSlide.toBitmap == nil {
+		t.Fatalf("slide bitmaps missing: %+v", s.bannerSlide)
+	}
+	tt.Advance(bannerSlideDuration / 2)
+	picture := tt.Image()
+	left := color.RGBAModel.Convert(picture.At(2, 2)).(color.RGBA)
+	right := color.RGBAModel.Convert(picture.At(370, 2)).(color.RGBA)
+	if left != red || right != blue {
+		t.Fatalf("mid-slide should show both covers: left=%v right=%v", left, right)
+	}
+	tt.Advance(bannerSlideDuration/2 + time.Millisecond)
 	assertBannerPixel(t, tt, blue)
 	if err := tt.Click("官方轮播封面 1"); err != nil {
 		t.Fatal(err)
 	}
 	tt.Frame()
+	tt.Advance(bannerSlideDuration + time.Millisecond)
 	assertBannerPixel(t, tt, red)
 	select {
 	case extra := <-src.calls:
