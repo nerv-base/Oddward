@@ -12,6 +12,8 @@ func lineIcon(paths string) *ui.SVG {
 
 var launcherIcons = map[string]*ui.SVG{
 	"\uE80F": lineIcon(`<path d="M3.5 10.5 12 3l8.5 7.5M5.5 9v11h5v-6h3v6h5V9"/>`),
+	"\uE9D8": lineIcon(`<path d="M12 3.2c.8 4.3 2.4 5.9 6.7 6.7-4.3.8-5.9 2.4-6.7 6.7-.8-4.3-2.4-5.9-6.7-6.7 4.3-.8 5.9-2.4 6.7-6.7Z"/><path d="M18.4 17.2c.3 1.7 1 2.4 2.7 2.7-1.7.3-2.4 1-2.7 2.7-.3-1.7-1-2.4-2.7-2.7 1.7-.3 2.4-1 2.7-2.7Z"/>`),
+	"\uE9D7": lineIcon(`<path d="M3 21h18M6 21V9h4v12M10 21V5h4v16M14 21v-8h4v8"/>`),
 	"\uE9D9": lineIcon(`<path d="M4 20V13m5 7v-5m5 5v-8m5 8v-4M14 3l1.8 3.8L20 8.5l-4.2 1.7L14 14l-1.8-3.8L8 8.5l4.2-1.7Z"/>`),
 	"\uE787": lineIcon(`<rect x="4" y="5" width="16" height="16" rx="3"/><path d="M8 3v4m8-4v4M4 10h16m-12 5 2.5 2.5L16 13"/>`),
 	"\uE8A5": lineIcon(`<rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><path d="M13 16.5h7M16.5 13v7"/>`),

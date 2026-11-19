@@ -74,7 +74,13 @@ func TestRenderPreviewFrames(t *testing.T) {
 			s.Model.CheckIn.Linked = true
 			s.Model.CheckIn.Loaded = true
 			s.Model.CheckIn.StatusPhase = state.CheckStatusReady
-			s.Model.CheckIn.Role = state.CheckInRole{RoleID: "218020980063", Name: "小小绫波丽", Stamina: 187, StaminaMax: 240, FetchedAt: time.Now().Add(-2 * time.Minute)}
+			s.Model.CheckIn.Role = state.CheckInRole{
+				RoleID: "218020980063", Name: "小小绫波丽", Level: 57, WorldLevel: 6,
+				Stamina: 187, StaminaMax: 240,
+				CityStamina: 92, CityStaminaMax: 120,
+				DayValue: 100, WeekRemain: 2, CharCount: 23,
+				FetchedAt: time.Now().Add(-2 * time.Minute),
+			}
 		}},
 		{"media-bar", 1280, 720, func(s *Shell, tt *ui.Tester) {
 			loaded(s)

@@ -560,6 +560,13 @@ func (s *Shell) tick(c *ui.Context) {
 	s.syncDownloadOffers(c)
 	s.syncUpdate()
 	s.syncCheckIn(c)
+	// The home stamina card shows a live "next point" countdown; without a
+	// scheduled frame it would freeze until another state change.
+	if s.Model.Page == state.Home && s.Model.CheckIn.Linked && !s.Model.CheckIn.NeedsRelink {
+		if f, ok := state.ForecastStamina(s.Model.CheckIn.Role, s.now); ok && !f.Full {
+			c.After(time.Second)
+		}
+	}
 }
 
 func (s *Shell) View(c *ui.Context) {

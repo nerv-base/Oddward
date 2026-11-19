@@ -22,7 +22,13 @@ func TestHomeStaminaCardOnlyWithLinkedRole(t *testing.T) {
 	m := normalFixture(state.ManagedReady)
 	m.CheckIn.Linked = true
 	m.CheckIn.Loaded = true
-	m.CheckIn.Role = state.CheckInRole{Stamina: 320, StaminaMax: 320, FetchedAt: time.Now()}
+	m.CheckIn.Role = state.CheckInRole{
+		RoleID: "218020980063", Name: "小小绫波丽", Level: 57, WorldLevel: 6,
+		Stamina: 320, StaminaMax: 320,
+		CityStamina: 92, CityStaminaMax: 120,
+		DayValue: 100, WeekRemain: 2, CharCount: 23,
+		FetchedAt: time.Now(),
+	}
 	s = NewShell(m)
 	defer s.Dispose()
 	tt = ui.NewTester(s.View, 1280, 720)
@@ -30,8 +36,21 @@ func TestHomeStaminaCardOnlyWithLinkedRole(t *testing.T) {
 	if !ok {
 		t.Fatal("home stamina card is missing")
 	}
-	if card.X < 800 || card.Y < 70 || card.Y+card.H > 160 ||
+	if card.X < 800 || card.Y < 60 || card.Y+card.H > 320 ||
 		card.X+card.W > 1280-dockRight {
 		t.Fatalf("home stamina card leaves its safe corner: %+v", card)
+	}
+	for _, text := range []string{"都市活力", "今日活跃度", "周本剩余", "角色数量"} {
+		if !tt.HasText(text) {
+			t.Fatalf("home stamina card is missing %q", text)
+		}
+	}
+
+	m.CheckIn.NeedsRelink = true
+	s = NewShell(m)
+	defer s.Dispose()
+	tt = ui.NewTester(s.View, 1280, 720)
+	if tt.HasText("本性像素") {
+		t.Fatal("home shows a stale stamina card while the grant needs relinking")
 	}
 }
