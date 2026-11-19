@@ -131,6 +131,11 @@ func (b *GameDownloadBackend) commitDownload(ctx context.Context, req launcher.D
 		return event, gameinstall.ErrRecoveryRequired
 	}
 	event.Kind, event.Message = state.DownloadCommitted, candidate.Version
+	if p.kind == state.DownloadInstall {
+		if err := publishRuntimeComponents(p.root); err != nil {
+			return event, err
+		}
+	}
 	if p.kind == state.DownloadPreload {
 		event.Kind = state.PreloadApplied
 		if err = b.preloadCommitted(ctx, p); err != nil {

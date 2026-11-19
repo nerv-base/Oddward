@@ -97,12 +97,8 @@ func (b *GameDownloadBackend) preloadDiscovery(ctx context.Context, root string)
 	if err != nil {
 		return gameinstall.PreloadInput{}, gameDelivery{}, base, err
 	}
-	prefs, err := b.preferences(ctx)
-	if err != nil {
-		return gameinstall.PreloadInput{}, gameDelivery{}, base, err
-	}
 	rates, _ := b.downloadPerfRates(ctx, root)
-	input := gameinstall.PreloadInput{Advertisement: ad, CurrentBranch: base.Branch, CurrentVersion: base.Version, BaselineTrusted: true, OfficialRunning: processes.official, Local: local, Capabilities: gameres.Capabilities{PatchApply: patchApplyAdmitted && prefs.PatchApply}, Budget: gameres.BudgetInput{VolumeFreeBytes: free, CacheFreeBytes: free, ReserveBytes: max(2<<30, ad.ResSize/50), NetBytesPerSecond: rates.NetBytesPerSecond, VerifyBytesPerSecond: rates.HashBytesPerSecond, IOBytesPerSecond: rates.IOBytesPerSecond}, Now: time.Now().UTC()}
+	input := gameinstall.PreloadInput{Advertisement: ad, CurrentBranch: base.Branch, CurrentVersion: base.Version, BaselineTrusted: true, OfficialRunning: processes.official, Local: local, Capabilities: gameres.Capabilities{PatchApply: patchApplyAdmitted}, Budget: gameres.BudgetInput{VolumeFreeBytes: free, CacheFreeBytes: free, ReserveBytes: max(2<<30, ad.ResSize/50), NetBytesPerSecond: rates.NetBytesPerSecond, VerifyBytesPerSecond: rates.HashBytesPerSecond, IOBytesPerSecond: rates.IOBytesPerSecond}, Now: time.Now().UTC()}
 	if ad.PreReleaseStatus != "start" || b.preloadQuery == nil {
 		return input, gameDelivery{}, base, nil
 	}

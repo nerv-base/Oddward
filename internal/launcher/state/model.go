@@ -53,6 +53,7 @@ const (
 	LocateGame
 	LaunchNotice
 	GameSettings
+	ConfirmDownloadCancel
 )
 
 type Media uint8
@@ -78,6 +79,12 @@ const (
 	ConfirmExit
 	ToggleMotion
 	ToggleReducedMotion
+	ToggleCloseToTray
+	ToggleAccentFollow
+	// ToggleCheckUpdates turns the startup update check on or off.
+	ToggleCheckUpdates
+	// UIPreferencesLoaded restores the saved launcher UI choices at startup.
+	UIPreferencesLoaded
 	MediaReady
 	MediaFailed
 	SystemMotionChanged
@@ -132,7 +139,6 @@ const (
 	CheckInStatusFailed
 	SettingsBack
 	SelectLauncherSettingsSection
-	SelectGameSettingsSection
 )
 
 type Event struct {
@@ -155,9 +161,11 @@ type Event struct {
 	ETASecs                 int32
 	Needed, Free, Suggested int64
 	// Rate is the measured transfer rate in bytes per second; 0 is unknown.
-	Rate      int64
-	Enabled   bool
-	Focused   bool
+	Rate    int64
+	Enabled bool
+	Focused bool
+	// Since is when the backend first observed the game running.
+	Since     time.Time
 	FromMedia bool
 	Now       time.Time
 	// Rows carries a loaded official feed; Body carries the text of one
@@ -177,6 +185,10 @@ type Event struct {
 	WishFormat                               WishFormat
 	// Check carries the check-in facts a shell response reports.
 	Check CheckInPayload
+	// CloseToTray, AccentFollow and CheckUpdates carry the saved launcher UI choices.
+	CloseToTray, AccentFollow, CheckUpdates bool
+	// Accounts carries the home account row's loaded list.
+	Accounts []SavedAccount
 }
 
 type EffectKind uint16
@@ -205,6 +217,11 @@ const (
 	TajiduoCheckInStatus
 	TajiduoCheckInAuto
 	TajiduoCheckInLaunch
+	// PersistUIPreferences saves the launcher window and theming choices.
+	PersistUIPreferences
+	// LoadHomeAccounts and RememberHomeAccount bridge the compact account row.
+	LoadHomeAccounts
+	RememberHomeAccount
 )
 
 type Effect struct {
@@ -220,6 +237,9 @@ type Effect struct {
 	// CheckInKind and Enabled address one daily task or one switch.
 	CheckInKind CheckInKind
 	Enabled     bool
+	// CloseToTray, AccentFollow and CheckUpdates carry the persisted launcher
+	// UI choices for PersistUIPreferences.
+	CloseToTray, AccentFollow, CheckUpdates bool
 }
 
 // NewsStatus is the state of the official announcement feed. There is no
@@ -277,7 +297,6 @@ type Model struct {
 	Flow                Flow
 	Overlay             Overlay
 	SettingsSection     LauncherSettingsSection
-	GameSettingsSection GameSettingsSection
 	settingsReturnPage  Page
 	settingsFromMedia   bool
 	locateFromSettings  bool
@@ -290,12 +309,19 @@ type Model struct {
 	Motion              bool
 	ReducedMotion       bool
 	SystemReducedMotion bool
-	Closed              bool
-	Download            DownloadState
-	HomeDownloadsOpen   bool
-	Update              UpdateState
-	Network             NetworkState
-	Login               LoginState
+	// CloseToTray hides the window instead of asking to quit when the user
+	// closes it. AccentFollow keeps the launch tone from the current key art.
+	CloseToTray  bool
+	AccentFollow bool
+	// CheckUpdates asks the update service once at startup.
+	CheckUpdates      bool
+	Closed            bool
+	Download          DownloadState
+	HomeDownloadsOpen bool
+	Update            UpdateState
+	Network           NetworkState
+	Login             LoginState
+	HomeAccounts      HomeAccountsState
 
 	// The official announcement board.
 	News           NewsStatus
@@ -318,7 +344,7 @@ type Model struct {
 }
 
 func Initial() Model {
-	return Model{Flow: Checking, Media: MediaLoading, Motion: true, Token: 1, News: NewsPending}
+	return Model{Flow: Checking, Media: MediaLoading, Motion: true, CloseToTray: true, AccentFollow: true, CheckUpdates: true, Token: 1, News: NewsPending}
 }
 
 // Reduce is the only authority for transitions. It never performs I/O.
@@ -333,6 +359,9 @@ func Reduce(m Model, e Event) (Model, []Effect) {
 		return next, effects
 	}
 	if next, effects, handled := reduceLogin(m, e); handled {
+		return next, effects
+	}
+	if next, effects, handled := reduceHomeAccounts(m, e); handled {
 		return next, effects
 	}
 	if next, effects, handled := reduceNetwork(m, e); handled {
@@ -524,17 +553,8 @@ func Reduce(m Model, e Event) (Model, []Effect) {
 	case OpenOverlay:
 		gameSettings := e.Overlay == GameSettings && m.NormalMode && m.Page == Home && m.Overlay == NoOverlay
 		if (e.Overlay == Scenarios || e.Overlay == LocateGame || gameSettings) && m.Overlay != ConfirmQuit {
-			if gameSettings {
-				m.GameSettingsSection = GameSettingsBasic
-			}
 			m.locateFromSettings = e.Overlay == LocateGame && m.Overlay == GameSettings
 			m.Overlay = e.Overlay
-		}
-	case SelectGameSettingsSection:
-		if section := GameSettingsSection(e.Index); m.GameSettingsVisible() && section <= GameSettingsDownloads {
-			m.Overlay = GameSettings
-			m.GameSettingsSection = section
-			m.locateFromSettings = false
 		}
 	case Dismiss, SettingsBack:
 		if e.Kind == SettingsBack {
@@ -670,6 +690,23 @@ func Reduce(m Model, e Event) (Model, []Effect) {
 			m.ReducedMotion = !m.ReducedMotion
 			syncMedia()
 		}
+	case ToggleCloseToTray:
+		if m.Page == LauncherSettings && m.Overlay == NoOverlay {
+			m.CloseToTray = !m.CloseToTray
+			return m, []Effect{{Kind: PersistUIPreferences, CloseToTray: m.CloseToTray, AccentFollow: m.AccentFollow, CheckUpdates: m.CheckUpdates}}
+		}
+	case ToggleAccentFollow:
+		if m.Page == LauncherSettings && m.Overlay == NoOverlay {
+			m.AccentFollow = !m.AccentFollow
+			return m, []Effect{{Kind: PersistUIPreferences, CloseToTray: m.CloseToTray, AccentFollow: m.AccentFollow, CheckUpdates: m.CheckUpdates}}
+		}
+	case ToggleCheckUpdates:
+		if m.Page == LauncherSettings && m.Overlay == NoOverlay {
+			m.CheckUpdates = !m.CheckUpdates
+			return m, []Effect{{Kind: PersistUIPreferences, CloseToTray: m.CloseToTray, AccentFollow: m.AccentFollow, CheckUpdates: m.CheckUpdates}}
+		}
+	case UIPreferencesLoaded:
+		m.CloseToTray, m.AccentFollow, m.CheckUpdates = e.CloseToTray, e.AccentFollow, e.CheckUpdates
 	case SystemMotionChanged:
 		m.SystemReducedMotion = e.Enabled
 		syncMedia()
@@ -714,6 +751,7 @@ type Presentation struct {
 	Detail         string
 	Enabled        bool
 	Progress       bool
+	Task           bool
 	LocateExisting bool
 }
 
@@ -733,6 +771,9 @@ func Present(m Model) Presentation {
 	}
 	if m.Download.OfficialRunning {
 		return Presentation{Primary: "等待官方启动器退出", Status: "安装目录正在使用", Detail: DownloadNoteText("official-running")}
+	}
+	if p, _, ok := homeDownloadPrimary(m); ok {
+		return p
 	}
 	if p, ok := managedPresentation(m); ok {
 		return p

@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nerv-base/Oddward/internal/launchsettings"
@@ -18,10 +19,11 @@ func TestVersionOneDocumentsStillLoad(t *testing.T) {
 	}
 	store, _ := launchsettings.NewStore(file)
 	got, err := store.Load(context.Background())
-	if err != nil || got.Downloads != (launchsettings.Downloads{FilesInFlight: 4, ConnectionsPerFile: 4, AutoResume: true, PatchApply: true}) {
+	if err != nil || got.Downloads != launchsettings.DefaultDownloads() {
 		t.Fatalf("v1 = %+v, %v", got, err)
 	}
 	got.Downloads = launchsettings.Downloads{}
+	got.UI = launchsettings.UI{}
 	if got != (launchsettings.Settings{}) {
 		t.Fatalf("v1 changed unrelated settings: %+v", got)
 	}
@@ -31,7 +33,7 @@ func TestDownloadsMigrationAndValidation(t *testing.T) {
 	ctx := context.Background()
 	file := filepath.Join(t.TempDir(), "launch.json")
 	store, _ := launchsettings.NewStore(file)
-	if got, err := store.Load(ctx); err != nil || got != (launchsettings.Settings{}) {
+	if got, err := store.Load(ctx); err != nil || got != (launchsettings.Settings{Downloads: launchsettings.DefaultDownloads(), UI: launchsettings.DefaultUI()}) {
 		t.Fatalf("missing settings = %+v, %v", got, err)
 	}
 	prefix := `,"gameRoot":"","riskVersion":"","skippedVersion":"v2.0.0","network":{}`
@@ -45,28 +47,40 @@ func TestDownloadsMigrationAndValidation(t *testing.T) {
 	if got, err := store.Load(ctx); err != nil || got.Downloads != launchsettings.DefaultDownloads() {
 		t.Fatalf("v2 = %+v, %v", got, err)
 	}
-	want := launchsettings.Downloads{FilesInFlight: 8, ConnectionsPerFile: 16, RateLimitKiB: 128}
+	// A v3 document still loads: the removed transfer knobs are dropped and the
+	// user's rate limit survives the migration.
+	write(`{"version":3` + prefix + `,"downloads":{"filesInFlight":2,"connectionsPerFile":3,"rateLimitKiB":10,"cacheLimitGiB":40,"autoResume":false,"patchApply":false}}`)
+	if got, err := store.Load(ctx); err != nil || got.Downloads.RateLimitKiB != 10 {
+		t.Fatalf("v3 = %+v, %v", got, err)
+	}
+	want := launchsettings.Downloads{RateLimitKiB: 128}
 	if err := store.Update(ctx, func(s *launchsettings.Settings) { s.Downloads = want }); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := store.Load(ctx); err != nil || got.Downloads != want || got.SkippedVersion != "v2.0.0" {
-		t.Fatalf("v3 = %+v, %v", got, err)
+		t.Fatalf("v4 = %+v, %v", got, err)
 	}
-	write(`{"version":3` + prefix + `,"downloads":{"filesInFlight":2,"connectionsPerFile":3,"rateLimitKiB":10}}`)
-	if got, err := store.Load(ctx); err != nil || !got.Downloads.AutoResume {
-		t.Fatalf("omitted autoResume: %+v, %v", got, err)
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"version":6`) || strings.Contains(string(raw), "filesInFlight") {
+		t.Fatalf("saved document still carries removed transfer settings: %s", raw)
 	}
 	for _, suffix := range []string{
 		`}`, `,"downloads":null}`, `,"downloads":{}}`,
-		`,"downloads":{"filesInFlight":9,"connectionsPerFile":1,"rateLimitKiB":0}}`,
-		`,"downloads":{"filesInFlight":1,"connectionsPerFile":1,"rateLimitKiB":0,"autoResume":null}}`,
-		`,"downloads":{"filesInFlight":1,"connectionsPerFile":1,"rateLimitKiB":0,"unknown":true}}`,
-		`,"downloads":{"filesInFlight":1,"filesInFlight":2,"connectionsPerFile":1,"rateLimitKiB":0}}`,
+		`,"downloads":{"rateLimitKiB":1048577}}`,
+		`,"downloads":{"rateLimitKiB":0,"unknown":true}}`,
+		`,"downloads":{"rateLimitKiB":0,"rateLimitKiB":1}}`,
 	} {
-		write(`{"version":3` + prefix + suffix)
+		write(`{"version":4` + prefix + suffix)
 		if _, err := store.Load(ctx); err == nil {
 			t.Errorf("accepted %s", suffix)
 		}
+	}
+	write(`{"version":3` + prefix + `,"downloads":{"filesInFlight":9,"connectionsPerFile":1,"rateLimitKiB":0}}`)
+	if _, err := store.Load(ctx); err == nil {
+		t.Error("accepted a v3 document with an out-of-range transfer count")
 	}
 }
 

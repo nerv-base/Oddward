@@ -140,7 +140,7 @@ func (s *Shell) syncUpdate() {
 		}
 		break
 	}
-	if s.UpdateBackend != nil && !s.updateAutoChecked && s.Model.Update.Phase == state.SelfUpdateIdle {
+	if s.UpdateBackend != nil && s.Model.CheckUpdates && !s.updateAutoChecked && s.Model.Update.Phase == state.SelfUpdateIdle {
 		s.updateAutoChecked = true
 		s.Dispatch(state.Event{Kind: state.UpdateCheck})
 	}
@@ -161,7 +161,7 @@ func (s *Shell) updatePill(c *ui.Context) {
 	if !state.UpdateOffered(u.Phase) {
 		return
 	}
-	label, icon := "新版本 v"+u.Version, "\uE896"
+	label, icon := "Oddward 新版本 v"+u.Version, "\uE896"
 	switch u.Phase {
 	case state.SelfUpdateDownloading:
 		label = fmt.Sprintf("正在下载 %d%%", updatePercent(u))

@@ -23,7 +23,8 @@ func (s *Shell) overlay(c *ui.Context) {
 	width := sheetWidth
 	align, leftInset, enter := ui.End, float32(sheetInset), ui.Pose{X: sheetEnterDistance}
 	gameSettings := s.Model.GameSettingsVisible()
-	centered := gameSettings || s.Model.Overlay == state.LocateGame
+	cancelDownload := s.Model.Overlay == state.ConfirmDownloadCancel
+	centered := gameSettings || s.Model.Overlay == state.LocateGame || cancelDownload
 	switch s.Model.Overlay {
 	case state.Scenarios, state.UpdateDetails:
 		align, leftInset, enter = ui.Start, railWidth+sheetInset, ui.Pose{X: -sheetEnterDistance}
@@ -33,6 +34,8 @@ func (s *Shell) overlay(c *ui.Context) {
 		title = "状态预览"
 	case state.ConfirmQuit:
 		title = "退出启动器？"
+	case state.ConfirmDownloadCancel:
+		title = "取消当前任务？"
 	case state.NewsDetails:
 		title = "官方公告"
 	case state.GameSettings, state.LocateGame:
@@ -100,6 +103,8 @@ func (s *Shell) overlay(c *ui.Context) {
 				case state.ConfirmQuit:
 					s.quitPanel(c)
 					ui.Box(c).Grow(1)
+				case state.ConfirmDownloadCancel:
+					s.downloadCancelPanel(c)
 				case state.NewsDetails:
 					s.newsDetailsPanel(c)
 				case state.LocateGame:
@@ -156,8 +161,17 @@ func (s *Shell) launcherSettingsSections(c *ui.Context) {
 	ui.Column(c.Key("settings-nav")).Width(launcherSettingsNavWidth).Shrink(0).Gap(launcherSettingsGap).Children(func() {
 		ui.Text(c, "启动器设置").FontSize(launcherSettingsTitleSize).FontWeight(700)
 		ui.Column(c.Key("settings-tabs")).FillWidth().Gap(4).Role(ui.RoleTabList).Label("设置分类").Orientation(ui.Vertical).FocusGroup(ui.Vertical).Children(func() {
-			for i, tab := range [...]struct{ label, icon string }{{"常规", "\uE713"}, {"网络", "\uE774"}, {"关于", "\uE946"}} {
-				item := state.LauncherSettingsSection(i)
+			for _, tab := range []struct {
+				label, icon string
+				section     state.LauncherSettingsSection
+			}{
+				{"常规", "\uE713", state.SettingsGeneral},
+				{"外观", "\uE790", state.SettingsAppearance},
+				{"下载与网络", "\uE774", state.SettingsNetwork},
+				{"文件", "\uE8B7", state.SettingsFiles},
+				{"关于", "\uE946", state.SettingsAbout},
+			} {
+				item := tab.section
 				selected := section == item
 				b := ui.ButtonBase(c.Key(tab.label)).Label(tab.label).Role(ui.RoleTab).Selected(selected).
 					FillWidth().Height(launcherSettingsTabHeight).Padding(0, 12).Gap(10).Radius(8).Justify(ui.Start).TextColor(muted)
@@ -168,9 +182,6 @@ func (s *Shell) launcherSettingsSections(c *ui.Context) {
 					b.TextColor(paper)
 				}
 				b.Children(func() {
-					if selected {
-						ui.Box(c).Absolute().Left(0).Top(12).Bottom(12).Width(3).Radius(1.5).Background(s.tone()).PassThrough()
-					}
 					glyph(c, tab.icon, 16)
 					ui.Text(c, tab.label).FontSize(14)
 				}).OnClick(func() { s.selectSettingsSection(item) })
@@ -180,66 +191,31 @@ func (s *Shell) launcherSettingsSections(c *ui.Context) {
 	ui.Scroll(c.Key("settings-content")).Width(launcherSettingsBodyWidth).MinWidth(0).FillHeight().Scrollbars(true).Children(func() {
 		ui.Column(c.Key("settings-section")).FillWidth().Gap(launcherSettingsGap).Children(func() {
 			switch section {
+			case state.SettingsAppearance:
+				s.appearanceSection(c)
 			case state.SettingsNetwork:
-				s.networkPanel(c)
+				s.downloadSection(c)
+			case state.SettingsFiles:
+				s.filesSection(c)
 			case state.SettingsAbout:
 				s.aboutPanel(c)
 			default:
-				s.setting(c, "motion-setting", "动态背景", "关闭后显示静态背景。", s.Model.Motion, s.Model.Media == state.MediaUnavailable, state.ToggleMotion)
-				s.setting(c, "reduced-motion", "减少动态效果", "暂停背景播放和界面动画。", s.Model.ReducedMotion, false, state.ToggleReducedMotion)
-				if s.Model.MediaPreview {
-					ui.Text(c, "MOCK · 媒体状态预览").FontSize(12).TextColor(muted)
-				}
+				s.generalSection(c)
 			}
 		})
 	})
 }
 
 func (s *Shell) gameSettingsPanel(c *ui.Context) {
-	section := s.Model.GameSettingsSection
-	body := ui.Row(c.Key("game-settings-body")).Grow(1).MinHeight(0).FillWidth().Gap(gameSettingsPaneGap)
-	// The draft belongs to this dialog and remains available when switching tabs.
-	downloadReady := ui.Local(body, "download-form-ready", func() bool { return false })
-	if section == state.GameSettingsDownloads && !*downloadReady {
-		s.resetDownloadForm()
-		*downloadReady = true
-	}
-	body.Children(func() {
-		ui.Column(c.Key("game-settings-tabs")).Width(gameSettingsNavWidth).Shrink(0).AlignSelf(ui.Start).Gap(gameSettingsTabGap).
-			Role(ui.RoleTabList).Label("游戏设置分类").Orientation(ui.Vertical).Children(func() {
-			for _, tab := range [...]state.GameSettingsSection{state.GameSettingsBasic, state.GameSettingsDownloads} {
-				label := tab.Label()
-				selected := section == tab
-				button := ui.ButtonBase(c.Key(label)).Label(label).Role(ui.RoleTab).Selected(selected).FillWidth().
-					Height(gameSettingsTabHeight).Justify(ui.Start).Padding(0, gameSettingsTabInset).Radius(gameSettingsTabRadius).TextColor(muted)
-				if selected {
-					button.Background(s.tone().Alpha(.16)).TextColor(paper)
-				} else if button.Hovered() || button.FocusVisible() {
-					s.controlFill(button, ui.RGBA(255, 255, 255, .08))
-					button.TextColor(paper)
-				}
-				button.Children(func() {
-					if selected {
-						ui.Box(c).Absolute().Left(0).Top(gameSettingsTabInset).Bottom(gameSettingsTabInset).
-							Width(gameSettingsTabMark).Radius(gameSettingsTabMark / 2).Background(s.tone()).PassThrough()
-					}
-					ui.Text(c, label).FontSize(downloadBodySize)
-				}).OnClick(func() {
-					s.Dispatch(state.Event{Kind: state.SelectGameSettingsSection, Index: uint8(tab)})
-				})
-			}
-		})
-		ui.Box(c).Width(1).FillHeight().Background(hairline)
-		ui.Column(c.Key("game-settings-content")).Grow(1).MinWidth(0).FillHeight().Gap(downloadGap).Role(ui.RoleGroup).
-			Label(section.Label()).Children(func() {
-			switch {
-			case s.Model.Overlay == state.LocateGame:
-				s.managedLocationPanel(c)
-			case section == state.GameSettingsDownloads:
-				s.downloadSettingsPanel(c)
-			default:
+	ui.Column(c.Key("game-settings-body")).Grow(1).MinHeight(0).FillWidth().Role(ui.RoleGroup).Label("游戏设置内容").Children(func() {
+		if s.Model.Overlay == state.LocateGame {
+			s.managedLocationPanel(c)
+			return
+		}
+		ui.Scroll(c.Key("game-settings-content")).Grow(1).MinHeight(0).FillWidth().Scrollbars(true).Children(func() {
+			ui.Column(c).FillWidth().Gap(downloadGap).Children(func() {
 				s.gameBasicInformation(c)
-			}
+			})
 		})
 	})
 }
@@ -337,6 +313,9 @@ func (s *Shell) newsDetailsPanel(c *ui.Context) {
 			ui.Text(c, s.Model.DetailBody).FontSize(14).LineHeight(1.8)
 		})
 	}
+	if _, _, url, ok := s.Model.NewsRows.At(uint8(tab), uint8(item)); ok && url != "" && s.OpenURL != nil {
+		s.quietButton(c, "news-open-browser", "在浏览器打开原文", false).FillWidth().Height(40).OnClick(func() { s.OpenURL(url) })
+	}
 	s.quietButton(c, "return-from-news", "返回主页", false).FillWidth().Height(40).OnClick(func() {
 		s.Dispatch(state.Event{Kind: state.Dismiss})
 	})
@@ -353,6 +332,19 @@ func (s *Shell) aboutPanel(c *ui.Context) {
 	ui.Text(c, "GPL-3.0-or-later").FontSize(13)
 	ui.Text(c, "MyGo · MIT License").FontSize(12).TextColor(muted)
 	ui.Text(c, "游戏素材及塔吉多物品图标的版权归各自权利人所有。").FontSize(12).LineHeight(1.6).TextColor(muted)
+	if s.OpenURL != nil {
+		links := []struct{ key, label, url string }{
+			{"about-home", "项目主页", "https://github.com/nerv-base/Oddward"},
+			{"about-issues", "问题反馈", "https://github.com/nerv-base/Oddward/issues"},
+			{"about-releases", "更新记录", "https://github.com/nerv-base/Oddward/releases"},
+		}
+		ui.Row(c).Gap(8).Margin(6, 0, 0, 0).Children(func() {
+			for _, link := range links {
+				url := link.url
+				s.quietButton(c, link.key, link.label, false).Height(32).OnClick(func() { s.OpenURL(url) })
+			}
+		})
+	}
 }
 
 func (s *Shell) quitPanel(c *ui.Context) {

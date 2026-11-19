@@ -2,6 +2,8 @@
 
 package state
 
+import "time"
+
 type DownloadKind uint8
 
 const (
@@ -21,6 +23,7 @@ const (
 	StageApply
 	StageCommit
 	StageFinalize
+	StageComponents
 )
 
 type DownloadPhase uint8
@@ -72,13 +75,15 @@ const (
 	PreloadStateFailed
 )
 
-// DownloadState contains only aggregate facts. Per-file data and task handles
-// stay in the shell/backend; Model remains comparable.
+// DownloadPreferences carries only choices the user can still change.
+// Parallel transfers, cache limits, automatic resume and patch application are
+// fixed engine behavior.
 type DownloadPreferences struct {
-	FilesInFlight, ConnectionsPerFile, RateLimitKiB, CacheLimitGiB int
-	AutoResume, PatchApply                                         bool
+	RateLimitKiB int
 }
 
+// DownloadState contains only aggregate facts. Per-file data and task handles
+// stay in the shell/backend; Model remains comparable.
 type DownloadState struct {
 	CacheRoot                                        string
 	cacheInstallRoot, cacheSelectionRoot             string
@@ -106,12 +111,15 @@ type DownloadState struct {
 	PreloadVersion                                   string
 	Verified, Located                                bool
 	OfficialRunning, GameRunning                     bool
-	AwaitingConfirmation, SpaceShort                 bool
-	Needed, Free, Suggested                          int64
-	operation                                        downloadOperation
-	pausePending, cancelPending                      bool
-	locateInstall                                    bool
-	verifyTask                                       bool
+	// GameSince is the observation start reported by the backend; zero means
+	// the launcher has not confirmed a running game yet.
+	GameSince                        time.Time
+	AwaitingConfirmation, SpaceShort bool
+	Needed, Free, Suggested          int64
+	operation                        downloadOperation
+	pausePending, cancelPending      bool
+	locateInstall                    bool
+	verifyTask                       bool
 }
 type downloadOperation uint8
 
@@ -329,6 +337,13 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 	d := &m.Download
 	recognized := e.Kind >= DownloadRequest && e.Kind <= DownloadRestored
 	switch e.Kind {
+	case OpenOverlay:
+		if e.Overlay == ConfirmDownloadCancel {
+			if m.NormalMode && m.Page == Home && m.Overlay == NoOverlay && PresentDownload(m).CanCancel {
+				m.Overlay = ConfirmDownloadCancel
+			}
+			return m, nil, true
+		}
 	case OpenHomeDownloads:
 		if m.NormalMode && m.Page == Home && m.Overlay == NoOverlay {
 			m.HomeDownloadsOpen = true
@@ -383,6 +398,17 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 	if e.Kind == ManagedAcceptLaunch && (downloadLaunchBlocked(m) || pendingGameInstall(*d)) {
 		return m, nil, true
 	}
+	if e.Kind == Primary && m.Page == Home && m.Overlay == NoOverlay {
+		if p, action, ok := homeDownloadPrimary(m); ok {
+			if !p.Enabled {
+				return m, nil, true
+			}
+			if action == DownloadRequest {
+				m.HomeDownloadsOpen = true
+			}
+			return reduceDownload(m, Event{Kind: action})
+		}
+	}
 	if e.Kind == Primary && downloadLaunchBlocked(m) {
 		if m.Page == Home && m.Overlay == NoOverlay && d.Phase == DownloadRecoveryRequired {
 			m.HomeDownloadsOpen = true
@@ -405,6 +431,13 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 			return m, nil, true
 		}
 		d.OfficialRunning, d.GameRunning = e.Enabled, e.Focused
+		if e.Focused {
+			if d.GameSince.IsZero() {
+				d.GameSince = e.Since
+			}
+		} else {
+			d.GameSince = time.Time{}
+		}
 		if d.OfficialRunning && (d.Phase == DownloadRunning || d.Phase == DownloadVerifying) && !d.pausePending && !d.cancelPending {
 			d.Note = "official-running"
 			d.Request++
@@ -552,10 +585,11 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		if d.Kind == DownloadPreload {
 			k = EffectPreloadRun
 			d.Preload = PreloadStateDownloading
+		} else {
+			m.HomeDownloadsOpen = false
 		}
 		if m.Overlay == OverlayInstallPath {
 			m.Overlay = NoOverlay
-			m.HomeDownloadsOpen = true
 			return m, []Effect{{Kind: SaveManagedSettings, Token: m.Managed.Request, Path: m.Managed.Root}, {Kind: k, Token: d.Request, Path: m.Managed.Root}}, true
 		}
 		return effect(k)
@@ -620,7 +654,10 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		}
 		return effect(k)
 	case DownloadCancel:
-		if !downloadUnfinished(*d) || downloadMutation(*d) || d.cancelPending {
+		if m.Overlay == ConfirmDownloadCancel {
+			m.Overlay = NoOverlay
+		}
+		if !PresentDownload(m).CanCancel {
 			break
 		}
 		d.Request++
@@ -669,7 +706,10 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		if !current || d.pausePending || d.cancelPending || d.Phase != DownloadRunning && d.Phase != DownloadVerifying {
 			break
 		}
-		d.Phase, d.Stage = DownloadVerifying, StageVerify
+		d.Phase = DownloadVerifying
+		if d.Stage != StageComponents {
+			d.Stage = StageVerify
+		}
 		d.Rate, d.ETA = 0, 0
 		if d.Kind == DownloadPreload {
 			d.Preload = PreloadStateVerifying
@@ -754,7 +794,7 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 				d.Preload = PreloadStatePaused
 			}
 		}
-		if e.Stage == StageNetwork && e.Focused && d.Settings.AutoResume {
+		if e.Stage == StageNetwork && e.Focused {
 			return reduceDownload(m, Event{Kind: DownloadResume})
 		}
 	case DownloadRecoveryCleared:
@@ -945,12 +985,12 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 }
 
 func downloadAcceptProgress(d *DownloadState, e Event) bool {
-	if e.Stage < StageNetwork || e.Stage > StageFinalize || e.Downloaded < 0 || e.Total < 0 || e.Downloaded > e.Total || e.Rate < 0 || e.Reused < 0 || e.FilesDone > e.FilesTotal {
+	if e.Stage < StageNetwork || e.Stage > StageComponents || e.Downloaded < 0 || e.Total < 0 || e.Downloaded > e.Total || e.Rate < 0 || e.Reused < 0 || e.FilesDone > e.FilesTotal {
 		return false
 	}
 	switch d.Phase {
 	case DownloadRunning:
-		if e.Stage != StageNetwork && e.Stage != StageVerify {
+		if e.Stage != StageNetwork && e.Stage != StageVerify && e.Stage != StageComponents {
 			return false
 		}
 	case DownloadVerifying:

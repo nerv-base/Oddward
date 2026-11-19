@@ -11,6 +11,7 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"github.com/nerv-base/Oddward/internal/gacha"
+	"github.com/nerv-base/Oddward/internal/launcher/state"
 )
 
 // wishPageData is a UI-thread projection. Archives and maps deliberately stay
@@ -102,10 +103,8 @@ func (s *Shell) wishPage(c *ui.Context, data wishPageData) {
 			ui.Box(c).Absolute().Right(wishBloomRight).Bottom(wishBloomBottom).Size(wishBloomSize, wishBloomSize).PassThrough().RadialGradient(ui.RadialGradient{Radius: wishBloomSize / 2, Stops: []ui.GradientStop{
 				{Color: tone.Alpha(wishHighlightOpacity), At: 0}, {Color: ui.Transparent, At: 1},
 			}})
-			ui.Text(c, "02").Font(monoFont).FontSize(wishTextWatermark).FontWeight(700).TextColor(tone.Alpha(wishWatermarkOpacity)).Absolute().Right(wishWatermarkRight).Bottom(wishWatermarkBottom).PassThrough()
 		}
 		ui.Column(c.Key("wish-header")).Absolute().Left(wishInset).Right(wishInset).Top(wishHeaderTop).Gap(wishSpaceXL).Children(func() {
-			mono(c, "02 / WISH ANALYSIS", wishTextIndex).TextColor(muted)
 			ui.Row(c).Height(wishHeaderHeight).Gap(wishSpaceXL).Children(func() {
 				ui.Text(c, "抽卡分析").FontSize(wishTextTitle).FontWeight(700).Grow(1)
 				if !narrow {
@@ -230,15 +229,20 @@ func (s *Shell) wishActions(c *ui.Context, data wishPageData) {
 		}
 	})
 	s.wishUpdateControl(c, data)
-	s.wishQuietButton(c, "wish-import", "导入", data.Loading || data.Busy).OnClick(func() { wishInvoke(data.OnImport) })
-	s.wishQuietButton(c, "wish-export", "导出 ▾", data.Loading || data.Busy || data.Failed || data.Corrupt || data.Archive.RoleID == "").Label("导出").Menu(func(m *ui.Menu) {
-		if m.Item("Oddward 完整格式").Chosen() && data.OnExport != nil {
-			data.OnExport(false)
-		}
-		if m.Item("NTEUID 互通格式（不含 luck）").Chosen() && data.OnExport != nil {
-			data.OnExport(true)
-		}
-	})
+	// An empty archive has one import entry, in the empty state. Repeating it
+	// in the header only splits attention; export stays out until there is
+	// something to export.
+	if data.Archive.RoleID != "" || len(data.Roles) > 0 {
+		s.wishQuietButton(c, "wish-import", "导入", data.Loading || data.Busy).OnClick(func() { wishInvoke(data.OnImport) })
+		s.wishQuietButton(c, "wish-export", "导出 ▾", data.Loading || data.Busy || data.Failed || data.Corrupt || data.Archive.RoleID == "").Label("导出").Menu(func(m *ui.Menu) {
+			if m.Item("Oddward 完整格式").Chosen() && data.OnExport != nil {
+				data.OnExport(false)
+			}
+			if m.Item("NTEUID 互通格式（不含 luck）").Chosen() && data.OnExport != nil {
+				data.OnExport(true)
+			}
+		})
+	}
 }
 
 // wishUpdateControl is the Tajiduo split key. Its main half links or updates,
@@ -314,7 +318,7 @@ func wishLinkNote(t wishTajiduo) string {
 
 func (s *Shell) wishEmpty(c *ui.Context, data wishPageData, top float32) {
 	ui.Column(c.Key("wish-empty")).Absolute().Left(wishInset).Right(wishInset).Top(top).Padding(wishEmptyPadding).Gap(wishSpaceXXL).Radius(wishCardRadius).Border(wishHairlineWidth, hairline).Material(frostedSurface{Tint: ui.RGBA(12, 14, 18, .22)}).Children(func() {
-		title, body := "还没有抽卡档案", "导入 Oddward 或 NTEUID 格式的 JSON；也可以关联已保存的游戏账号，从塔吉多拉取最近约 6 个月的记录。"
+		title, body := "开始记录你的抽卡数据", "支持 Oddward 或 NTEUID JSON；关联账号可同步最近约 6 个月的记录。"
 		switch {
 		case data.Loading:
 			title, body = "正在读取本地档案", "读取完成后会显示角色档案与出货记录。"
@@ -333,7 +337,13 @@ func (s *Shell) wishEmpty(c *ui.Context, data wishPageData, top float32) {
 		if data.Failed && !data.Corrupt {
 			s.accentButton(c, "wish-retry", "重试读取").AlignSelf(ui.Start).Disabled(data.Busy).OnClick(func() { wishInvoke(data.OnRetry) })
 		} else if !data.Loading {
-			s.accentButton(c, "wish-empty-import", "导入档案").Disabled(data.Busy).AlignSelf(ui.Start).OnClick(func() { wishInvoke(data.OnImport) })
+			s.accentButton(c, "wish-empty-import", "导入抽卡记录").Disabled(data.Busy).AlignSelf(ui.Start).OnClick(func() { wishInvoke(data.OnImport) })
+			if !data.Tajiduo.Linkable && s.Model.NormalMode {
+				s.quietButton(c, "wish-empty-account", "启动游戏并保存账号", false).AlignSelf(ui.Start).OnClick(func() {
+					s.Dispatch(state.Event{Kind: state.Navigate, Page: state.Home})
+					s.Dispatch(state.Event{Kind: state.Primary})
+				})
+			}
 		}
 	})
 }

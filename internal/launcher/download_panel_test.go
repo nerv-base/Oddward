@@ -56,17 +56,20 @@ func TestInstallPathShowsPlanAndStartsProgressOnHome(t *testing.T) {
 	if err := tt.Click("开始下载"); err != nil {
 		t.Fatal(err)
 	}
-	if s.Model.Overlay != state.NoOverlay || s.Model.Page != state.Home || !s.Model.HomeDownloadsOpen {
-		t.Fatalf("explicit start should reveal nonmodal Home progress: %+v", s.Model.Download)
+	if s.Model.Overlay != state.NoOverlay || s.Model.Page != state.Home || s.Model.HomeDownloadsOpen {
+		t.Fatalf("explicit start should return to compact Home progress: %+v", s.Model.Download)
 	}
 	s.Dispatch(state.Event{Kind: state.DownloadStarted, Token: s.Model.Download.Request})
 	s.Dispatch(state.Event{Kind: state.DownloadProgress, Token: s.Model.Download.Request, Stage: state.StageNetwork, Downloaded: 4 << 30, Total: 54 << 30})
 	tt.Frame()
-	if _, ok := tt.AccessByRole(ui.RoleProgress, "游戏下载进度"); !ok {
-		t.Fatal("Home lacks the embedded progress indicator")
-	}
-	if _, ok := tt.AccessByRole(ui.RoleButton, "下载进度"); !ok || !tt.HasText("4.0 GiB / 54.0 GiB") {
+	pause, ok := tt.AccessByRole(ui.RoleButton, "暂停下载")
+	if !ok || !tt.HasText("7%") {
 		t.Fatal("Home does not show live first-install progress")
+	}
+	tt.Move(pause.Bounds.X+pause.Bounds.W/2, pause.Bounds.Y+pause.Bounds.H/2)
+	tt.Frame()
+	if !tt.HasText("4.0 GiB / 54.0 GiB") {
+		t.Fatal("download details must show the reported size")
 	}
 }
 
@@ -216,40 +219,41 @@ func TestDownloadPanelShowsRouteFallbackAndBudget(t *testing.T) {
 	}
 }
 
-func TestDownloadSettingsExposeSixPreferencesAndRejectInvalidInput(t *testing.T) {
+func TestDownloadSettingsExposeOnlyRateLimitAndRejectInvalidInput(t *testing.T) {
 	m := normalFixture(state.ManagedReady)
 	m.Download.Settings = state.DefaultDownloadPreferences()
 	s := NewShell(m)
 	defer s.Dispose()
 	tt := ui.NewTester(s.View, 1280, 720)
-	if err := tt.Click("游戏设置"); err != nil {
+	if err := tt.Click("启动器设置"); err != nil {
 		t.Fatal(err)
 	}
-	if err := tt.Click("下载设置"); err != nil {
+	if err := tt.Click("下载与网络"); err != nil {
 		t.Fatal(err)
 	}
-	for _, label := range []string{"并发文件数", "每文件连接数", "限速（KiB/s，0 为不限）", "缓存上限（GiB，0 为不限）"} {
-		if _, ok := tt.AccessByRole(ui.RoleTextField, label); !ok {
-			t.Errorf("missing accessible setting %q", label)
+	if _, ok := tt.AccessByRole(ui.RoleTextField, "限速（KiB/s，0 为不限）"); !ok {
+		t.Error("missing accessible rate limit setting")
+	}
+	for _, removed := range []string{"并发文件数", "每文件连接数", "缓存上限（GiB，0 为不限）", "自动恢复", "差分更新"} {
+		if _, ok := tt.AccessByRole(ui.RoleTextField, removed); ok {
+			t.Errorf("removed transfer setting %q is still exposed", removed)
+		}
+		if _, ok := tt.AccessByRole(ui.RoleSwitch, removed); ok {
+			t.Errorf("removed transfer switch %q is still exposed", removed)
 		}
 	}
-	for _, label := range []string{"自动恢复", "差分更新"} {
-		if _, ok := tt.AccessByRole(ui.RoleSwitch, label); !ok {
-			t.Errorf("missing accessible switch %q", label)
-		}
-	}
-	if err := tt.Click("并发文件数"); err != nil {
+	if err := tt.Click("限速（KiB/s，0 为不限）"); err != nil {
 		t.Fatal(err)
 	}
 	tt.Key(ui.Ctrl, ui.KeyA)
-	tt.Type("0")
-	if err := tt.Click("保存下载设置"); err != nil {
+	tt.Type("-1")
+	if err := tt.Click("保存限速"); err != nil {
 		t.Fatal(err)
 	}
 	if s.Model.Download.Settings != state.DefaultDownloadPreferences() {
 		t.Fatal("invalid preferences replaced active settings")
 	}
-	if !strings.Contains(strings.Join(tt.Texts(), "\n"), "下载设置无效") {
+	if !strings.Contains(strings.Join(tt.Texts(), "\n"), "限速请填写非负整数") {
 		t.Fatalf("invalid input has no visible validation feedback: model=%+v form=%+v text=%v", s.Model.Download, s.DownloadForm, tt.Texts())
 	}
 }
@@ -287,6 +291,9 @@ func TestDownloadPreloadPanelActions(t *testing.T) {
 		m.Download.Preload = tc.phase
 		s := NewShell(m)
 		tt := ui.NewTester(s.View, 1280, 720)
+		if err := tt.Click("详细信息"); err != nil {
+			t.Fatal(err)
+		}
 		if _, ok := tt.AccessByRole(ui.RoleButton, tc.label); !ok {
 			t.Errorf("preload phase %v missing accessible %q", tc.phase, tc.label)
 		}

@@ -118,6 +118,19 @@ type Shell struct {
 	Minimize        func()
 	Maximize        func()
 	CloseWindow     func()
+	// HideWindow keeps Oddward running in the tray; OpenFolder reveals a
+	// folder in Explorer. Both are nil in tests and headless builds.
+	HideWindow func()
+	OpenFolder func(string)
+	// OpenURL sends a link to the system browser.
+	OpenURL func(string)
+	// SaveUIChoices persists the two launcher window and theming choices.
+	SaveUIChoices func(closeToTray, accentFollow, checkUpdates bool)
+	// HomeAccounts lists remembered accounts; HomeAccountUse makes one the next
+	// account the game login window proposes. Both stay nil in tests.
+	HomeAccounts    func(ctx context.Context, request uint64) ([]state.SavedAccount, string, error)
+	HomeAccountUse  func(ctx context.Context, id string) error
+	DataDir         string
 	theme           *ui.Theme
 	clockPaused     bool
 	now             time.Time
@@ -155,7 +168,11 @@ type Shell struct {
 	CheckInBackend CheckInBackend
 	checkinOut     chan state.Event
 	checkinStarted bool
-	checkinVisit   bool
+	// The home account row reads the saved list once, off the UI thread.
+	accountOut      chan state.Event
+	accountsPending bool
+	accountsStarted bool
+	checkinVisit    bool
 	// checkinAutoBusy serializes automatic-switch writes; checkinLaunch asks
 	// for one automatic attempt after the user starts the game.
 	checkinAutoBusy bool
@@ -190,6 +207,7 @@ func NewShell(m state.Model) *Shell {
 		managedSave: make(chan ManagedPreferences, 1),
 		workOut:     make(chan state.Event, 8), updateProgress: make(chan state.Event, 1),
 		checkinOut: make(chan state.Event, 8),
+		accountOut: make(chan state.Event, 1),
 	}
 	s.NetworkForm = networkForm(m.Network)
 	if state.Active(m.Flow) {
@@ -236,6 +254,14 @@ func (s *Shell) apply(fx []state.Effect) {
 			s.beginNews(f.Token)
 		case state.FetchDetail:
 			s.beginDetail(f.Token)
+		case state.PersistUIPreferences:
+			if s.SaveUIChoices != nil {
+				go s.SaveUIChoices(f.CloseToTray, f.AccentFollow, f.CheckUpdates)
+			}
+		case state.LoadHomeAccounts:
+			s.beginHomeAccounts(f)
+		case state.RememberHomeAccount:
+			s.rememberHomeAccount(f)
 		}
 	}
 }
@@ -415,6 +441,19 @@ func (s *Shell) syncBranding() {
 	}
 }
 
+// syncHomeAccounts delivers a finished account read on the UI thread.
+func (s *Shell) syncHomeAccounts() {
+	for {
+		select {
+		case e := <-s.accountOut:
+			s.accountsPending = false
+			s.Dispatch(e)
+		default:
+			return
+		}
+	}
+}
+
 // syncNews runs on the UI thread, from tick: it delivers whatever came back,
 // then starts the first read of the board if nobody has started one yet.
 func (s *Shell) syncNews() {
@@ -455,6 +494,11 @@ func (s *Shell) tick(c *ui.Context) {
 	if s.ctx.Err() != nil {
 		return
 	}
+	s.syncHomeAccounts()
+	if !s.accountsStarted && s.HomeAccounts != nil {
+		s.accountsStarted = true
+		s.Dispatch(state.Event{Kind: state.HomeAccountsLoad})
+	}
 	if reduced := c.Preferences().ReduceMotion; reduced != s.Model.SystemReducedMotion {
 		s.Dispatch(state.Event{Kind: state.SystemMotionChanged, Enabled: reduced})
 	}
@@ -479,6 +523,9 @@ func (s *Shell) tick(c *ui.Context) {
 		}
 	}
 	s.clockPaused = s.Model.DemoPaused
+	if s.Model.Download.GameRunning {
+		c.After(time.Second)
+	}
 	if !s.Model.MediaPreview {
 		if s.Player == nil && s.backgroundOut == nil && s.Model.Media == state.MediaLoading {
 			s.Dispatch(state.Event{Kind: state.MediaFailed})
@@ -529,7 +576,6 @@ func (s *Shell) View(c *ui.Context) {
 		}
 	}
 	root := ui.Box(c.Key("launcher")).Fill().Clip().Background(bezel).Font("Microsoft YaHei UI").TextColor(paper)
-	s.updateMediaBar(c, root)
 	root.Children(func() {
 		s.stage(c)
 		if s.Model.Page != state.Home {
@@ -548,6 +594,7 @@ func (s *Shell) View(c *ui.Context) {
 		case state.LauncherSettings:
 			s.launcherSettingsPage(c)
 		}
+		s.updateMediaBar(c, root)
 		s.topbar(c)
 		s.mediaBar(c)
 		// Fixed side chrome must remain clickable above the revealed fullwidth

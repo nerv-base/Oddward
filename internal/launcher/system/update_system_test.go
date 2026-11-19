@@ -25,7 +25,7 @@ func tempStore(t *testing.T) *launchsettings.Store {
 func TestEachAdapterSavesOnlyItsOwnFields(t *testing.T) {
 	ctx := context.Background()
 	store := tempStore(t)
-	downloads := state.DownloadPreferences{FilesInFlight: 3, ConnectionsPerFile: 2, RateLimitKiB: 512, CacheLimitGiB: 10}
+	downloads := state.DownloadPreferences{RateLimitKiB: 512}
 	backend := &GameDownloadBackend{Settings: store}
 	if got := backend.HandleDownload(ctx, launcher.DownloadRequest{Effect: state.Effect{Kind: state.EffectSaveDownloads}, Settings: downloads}, nil); got.Kind != state.DownloadSettingsSaved {
 		t.Fatalf("download settings save = %d %s", got.Kind, got.Message)
@@ -46,7 +46,7 @@ func TestEachAdapterSavesOnlyItsOwnFields(t *testing.T) {
 	}
 	want := launchsettings.Settings{GameRoot: `C:\Games\NTE`, RiskVersion: "1", SkippedVersion: "0.2.0",
 		Network:   launchsettings.Network{Proxy: "direct", Mirror: true, MirrorPrefix: netcfg.DefaultMirrorPrefix},
-		Downloads: launchsettings.Downloads{FilesInFlight: 3, ConnectionsPerFile: 2, RateLimitKiB: 512, CacheLimitGiB: 10}}
+		Downloads: launchsettings.Downloads{RateLimitKiB: 512}, UI: launchsettings.DefaultUI()}
 	if got != want {
 		t.Fatalf("saving one panel must keep the others:\n got %+v\nwant %+v", got, want)
 	}
@@ -63,7 +63,7 @@ func TestInvalidNetworkIsNeitherSavedNorApplied(t *testing.T) {
 	if err == nil {
 		t.Fatal("accepted an unsupported proxy")
 	}
-	if got, _ := store.Load(ctx); got != (launchsettings.Settings{}) {
+	if got, _ := store.Load(ctx); got != (launchsettings.Settings{UI: launchsettings.DefaultUI()}) {
 		t.Fatalf("saved %+v", got)
 	}
 	if network.Settings() != netcfg.Default() {

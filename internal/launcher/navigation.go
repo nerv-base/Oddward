@@ -3,8 +3,6 @@
 package launcher
 
 import (
-	"time"
-
 	"github.com/egoist/mygo/ui"
 
 	"github.com/nerv-base/Oddward/internal/branding"
@@ -19,8 +17,8 @@ const (
 )
 
 // The rail is part of the bezel: solid, flush-left and full height. Page
-// tiles keep native labels, tooltips, current-page semantics and focus; a
-// tone pill at the rail edge travels to the current page.
+// tiles are icons only; native labels, tooltips, current-page semantics and
+// focus carry the meaning without permanent captions.
 func (s *Shell) navigation(c *ui.Context) {
 	items := []struct {
 		key, label, icon string
@@ -28,28 +26,11 @@ func (s *Shell) navigation(c *ui.Context) {
 	}{
 		{"home", "游戏主页", "\uE80F", state.Home},
 		{"wish-analysis", "抽卡分析", "\uE9D9", state.WishAnalysis},
-		{"check-in", "自动签到", "\uE787", state.CheckIn},
+		{"check-in", "每日签到", "\uE787", state.CheckIn},
 	}
 	settingsSelected := s.Model.Page == state.LauncherSettings
-	current := 0
-	for i, item := range items {
-		if s.Model.Page == item.page {
-			current = i
-		}
-	}
-	tone := s.tone()
 	ui.Box(c.Key("rail")).Absolute().Left(0).Top(0).Bottom(0).Width(railWidth).Background(bezel).Children(func() {
 		s.railMark(c)
-		y := tileTop + float32(current)*(tileSize+tileGap) + 12
-		bar := ui.Box(c.Key("rail-indicator")).Absolute().Left(1).Width(3).Height(tileSize - 24).Radius(1.5).Background(tone).PassThrough()
-		if settingsSelected {
-			bar.Bottom(28)
-		} else {
-			if s.motion() {
-				y = bar.AnimateTo("y", y, ui.Animation{Duration: 260 * time.Millisecond})
-			}
-			bar.Top(y)
-		}
 		ui.Column(c).Absolute().Left((railWidth - tileSize) / 2).Top(tileTop).Gap(tileGap).Children(func() {
 			for _, item := range items {
 				item := item
@@ -57,19 +38,26 @@ func (s *Shell) navigation(c *ui.Context) {
 				b := ui.ButtonBase(c.Key(item.key)).Label(item.label).Tooltip(item.label).
 					Size(tileSize, tileSize).Radius(12).Justify(ui.Center).TextColor(muted)
 				fill := ui.Transparent
+				color := muted
 				if selected {
 					fill = ui.RGBA(255, 255, 255, .10)
+					color = paper
 					b.TextColor(paper).Current(ui.CurrentPage).Bind(&s.navigationFocus)
 				}
 				if b.Hovered() {
 					fill = ui.RGBA(255, 255, 255, .08)
+					color = paper
 					b.TextColor(paper)
 				}
 				if b.Pressed() {
 					fill = ui.RGBA(255, 255, 255, .14)
 				}
 				s.controlFill(b, fill)
-				b.Children(func() { glyph(c, item.icon, 20) }).OnClick(func() {
+				b.Children(func() {
+					if icon := launcherIcons[item.icon]; icon != nil {
+						ui.Icon(c, icon).FontSize(17).TextColor(color)
+					}
+				}).OnClick(func() {
 					s.Dispatch(state.Event{Kind: state.Navigate, Page: item.page})
 				})
 			}
@@ -89,7 +77,9 @@ func (s *Shell) navigation(c *ui.Context) {
 			fill = ui.RGBA(255, 255, 255, .14)
 		}
 		s.controlFill(settings, fill)
-		settings.Children(func() { glyph(c, "\uE713", 20) }).OnClick(func() {
+		settings.Children(func() {
+			glyph(c, "\uE713", 18)
+		}).OnClick(func() {
 			s.Dispatch(state.Event{Kind: state.Navigate, Page: state.LauncherSettings})
 		})
 	})

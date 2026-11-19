@@ -4,23 +4,20 @@ package state
 
 import "testing"
 
-func TestDownloadStartupAutoResumeRequiresEligibilityPreferenceAndNetworkGuard(t *testing.T) {
+func TestDownloadStartupAutoResumeRequiresEligibilityAndNetworkGuard(t *testing.T) {
 	for _, tt := range []struct {
-		name                                    string
-		auto, eligible, official, preload, game bool
-		want                                    EffectKind
+		name                              string
+		eligible, official, preload, game bool
+		want                              EffectKind
 	}{
-		{name: "eligible", auto: true, eligible: true, want: EffectDownloadRun},
-		{name: "explicit pause", auto: true},
-		{name: "preference off", eligible: true},
-		{name: "official launcher", auto: true, eligible: true, official: true},
-		{name: "game permits network", auto: true, eligible: true, game: true, want: EffectDownloadRun},
-		{name: "preload transfer", auto: true, eligible: true, preload: true, want: EffectPreloadRun},
+		{name: "eligible", eligible: true, want: EffectDownloadRun},
+		{name: "explicit pause"},
+		{name: "official launcher", eligible: true, official: true},
+		{name: "game permits network", eligible: true, game: true, want: EffectDownloadRun},
+		{name: "preload transfer", eligible: true, preload: true, want: EffectPreloadRun},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			m := downloadModel()
-			m.Download.Settings = DefaultDownloadPreferences()
-			m.Download.Settings.AutoResume = tt.auto
 			m.Download.OfficialRunning = tt.official
 			m.Download.GameRunning = tt.game
 			m, _ = Reduce(m, Event{Kind: DownloadRecoveryScanRequest})

@@ -697,7 +697,7 @@ func TestRealGameResourcesHistoricalUpdate(t *testing.T) {
 	if !patchApplyAdmitted && plan.hasPatch() {
 		t.Fatal("production plan crossed the closed patch admission gate")
 	}
-	t.Logf("historical update from=%s old_list=%s old_txn=%s to=%s new_list=%s txn=%s patch_admitted=%v preference_patch=%v targets=%d network_plan=%d patch=%d full=%d cached=%d reused=%d peak=%d reserve=%d free=%d context_limit=%s", original.Version, original.ListHash, original.TxnID, current.Config.ResVersion, current.Config.ListHash, plan.id, patchApplyAdmitted, prefs.PatchApply, len(plan.plan.Targets), plan.plan.DownloadBytes, plan.plan.PatchBytes, plan.plan.FullBytes, plan.plan.CachedBytes, plan.plan.ReusedBytes, plan.plan.PeakAllocBytes, plan.margin, plan.free, limit)
+	t.Logf("historical update from=%s old_list=%s old_txn=%s to=%s new_list=%s txn=%s patch_admitted=%v preference_patch=%v targets=%d network_plan=%d patch=%d full=%d cached=%d reused=%d peak=%d reserve=%d free=%d context_limit=%s", original.Version, original.ListHash, original.TxnID, current.Config.ResVersion, current.Config.ListHash, plan.id, patchApplyAdmitted, patchApplyAdmitted, len(plan.plan.Targets), plan.plan.DownloadBytes, plan.plan.PatchBytes, plan.plan.FullBytes, plan.plan.CachedBytes, plan.plan.ReusedBytes, plan.plan.PeakAllocBytes, plan.margin, plan.free, limit)
 	counts := make(map[string]int)
 	for _, target := range plan.plan.Targets {
 		action := historicalUpdateAction(target.Action)

@@ -16,7 +16,7 @@ func TestNativeSingleGameHasFunctionalNavigation(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	t.Cleanup(s.Dispose)
 	tt := ui.NewTester(s.View, 1280, 720)
-	for _, label := range []string{"游戏主页", "抽卡分析", "自动签到"} {
+	for _, label := range []string{"游戏主页", "抽卡分析", "每日签到"} {
 		item, ok := tt.AccessByRole(ui.RoleButton, label)
 		if !ok || item.Bounds.X > 30 || item.Bounds.W < 44 {
 			t.Fatalf("functional rail entry missing: %s %+v", label, item)
@@ -94,7 +94,7 @@ func TestNativeSwitchChangeDispatchesOnlyOnce(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	t.Cleanup(s.Dispose)
 	tt := ui.NewTester(s.View, 1024, 631)
-	if clickFailed(tt, "启动器设置") || clickFailed(tt, "减少动态效果") {
+	if clickFailed(tt, "启动器设置") || clickFailed(tt, "外观") || clickFailed(tt, "减少动态效果") {
 		t.Fatal("switch unavailable")
 	}
 	for range 3 {

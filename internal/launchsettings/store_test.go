@@ -43,7 +43,7 @@ func TestSaveLoadNonSecretSettings(t *testing.T) {
 	if err := json.Unmarshal(data, &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document) != 6 || string(document["version"]) != "3" || document["gameRoot"] == nil || document["riskVersion"] == nil || document["network"] == nil || document["skippedVersion"] == nil || document["downloads"] == nil {
+	if len(document) != 7 || string(document["version"]) != "6" || document["gameRoot"] == nil || document["riskVersion"] == nil || document["network"] == nil || document["skippedVersion"] == nil || document["downloads"] == nil || document["ui"] == nil {
 		t.Fatalf("settings must contain only schema version and non-secret choices: %s", data)
 	}
 }
@@ -101,7 +101,7 @@ func TestDocumentAtLimitAndChoicesCanBeReplacedAndCleared(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := store.Load(context.Background()); err != nil || got != (launchsettings.Settings{Downloads: launchsettings.DefaultDownloads()}) {
+	if got, err := store.Load(context.Background()); err != nil || got != (launchsettings.Settings{Downloads: launchsettings.DefaultDownloads(), UI: launchsettings.DefaultUI()}) {
 		t.Fatalf("exact-limit document = %+v, %v", got, err)
 	}
 	for _, want := range []launchsettings.Settings{
@@ -195,15 +195,16 @@ func TestStoreRejectsUnsafePathForms(t *testing.T) {
 	}
 }
 
-func TestMissingSettingsReturnZeroWithoutCreatingFiles(t *testing.T) {
+func TestMissingSettingsReturnDefaultsWithoutCreatingFiles(t *testing.T) {
 	parent := filepath.Join(t.TempDir(), "not-created")
 	store, err := launchsettings.NewStore(filepath.Join(parent, "launch.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	got, err := store.Load(context.Background())
-	if err != nil || got != (launchsettings.Settings{}) {
-		t.Fatalf("missing settings = %+v, %v; want zero without error", got, err)
+	want := launchsettings.Settings{Downloads: launchsettings.DefaultDownloads(), UI: launchsettings.DefaultUI()}
+	if err != nil || got != want {
+		t.Fatalf("missing settings = %+v, %v; want defaults without error", got, err)
 	}
 	if _, err := os.Stat(parent); !os.IsNotExist(err) {
 		t.Fatalf("read-only missing Load must not create parent: %v", err)

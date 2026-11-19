@@ -78,6 +78,9 @@ func TestGameDownloadFirstInstallWithLocalCAS(t *testing.T) {
 
 func testGameDownloadFirstInstall(t *testing.T, external bool) {
 	t.Helper()
+	oldComponents := componentVersionURL
+	componentVersionURL = fakeComponentManifest(t)
+	t.Cleanup(func() { componentVersionURL = oldComponents })
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "new-game")
 	content := bytes.Repeat([]byte("fixture: verified game resource\n"), 2048)
@@ -204,8 +207,12 @@ func testGameDownloadFirstInstall(t *testing.T, external bool) {
 			t.Fatal(err)
 		}
 	}
-	if _, err = os.Stat(filepath.Join(root, "NTELauncher")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unexpected official files: %v", err)
+	if _, err = os.Stat(filepath.Join(root, "NTELauncher", "NTEGame.exe")); err != nil {
+		t.Fatalf("runtime components missing: %v", err)
+	}
+	pointer, err := os.ReadFile(filepath.Join(root, "Client", "WindowsNoEditor", "HT", "Binaries", "Win64", "GameLauncher.config"))
+	if err != nil || !strings.Contains(string(pointer), "WPGameClientSDK_64.dll") {
+		t.Fatalf("component pointer = %q, %v", pointer, err)
 	}
 	installation, err := game.Inspect(ctx, root)
 	if err != nil || installation.AppID != bootstrapAppID || installation.Branch != bootstrapBranch {

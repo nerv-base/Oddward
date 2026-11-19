@@ -286,7 +286,7 @@ func TestMockNativeF8DoesNotDismissUnrelatedModals(t *testing.T) {
 
 func TestMockNativeSettingsMarksMediaPreview(t *testing.T) {
 	m := settled(state.Ready)
-	m.Media, m.MediaPreview, m.Page, m.ReducedMotion = state.MediaPlaying, true, state.LauncherSettings, true
+	m.Media, m.MediaPreview, m.Page, m.SettingsSection, m.ReducedMotion = state.MediaPlaying, true, state.LauncherSettings, state.SettingsAppearance, true
 	s := NewShell(m)
 	t.Cleanup(s.Dispose)
 	tt := ui.NewTester(s.View, 1024, 631)

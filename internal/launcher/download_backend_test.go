@@ -289,7 +289,6 @@ func TestDownloadSettingsPersistOnlyAfterBackendAcknowledgement(t *testing.T) {
 		return state.Event{Kind: state.DownloadSettingsSaved, DownloadSettings: r.Settings}
 	})
 	requested := state.DefaultDownloadPreferences()
-	requested.FilesInFlight = 6
 	requested.RateLimitKiB = 1024
 	s.Dispatch(state.Event{Kind: state.DownloadSettingsApply, DownloadSettings: requested})
 	r := receiveDownload(t, calls)

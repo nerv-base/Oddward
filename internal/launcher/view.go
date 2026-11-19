@@ -33,6 +33,7 @@ var (
 	hairline      = ui.RGBA(255, 255, 255, .12)
 	bezel         = ui.Hex("#0E0F12")
 	glassInk      = ui.RGBA(14, 15, 19, .58)
+	homeDockTint  = ui.RGBA(14, 15, 19, .80)
 )
 
 const (
@@ -47,11 +48,15 @@ const (
 	homeDownloadWidth         float32 = 360
 	homeDownloadHeight        float32 = 374
 	homeDownloadInset         float32 = 16
-	homeDownloadGap           float32 = 14
-	homeDownloadDockClearance float32 = 34
+	homeDownloadGap           float32 = 8
+	homeDockHeight            float32 = 48
+	homeDockPrimaryWidth      float32 = 144
+	homeDockWidth                     = homeDockPrimaryWidth + 2*homeDockHeight
+	homeDockBadgeSize         float32 = 34
+	homeDockPopupInset        float32 = 12
+	homeDockPopupRadius       float32 = 8
 	locateActionGap           float32 = 4
 	locateActionTextSize      float32 = 12
-	downloadStatusBottom      float32 = homeBottom - downloadStatusHeight - 8
 	brandMarkSize             float32 = 40
 	bezelWidth                float32 = 8
 	canvasRadius              float32 = 16
@@ -60,7 +65,7 @@ const (
 	newsHeight                float32 = 152
 	coverWidth                float32 = 270
 	coverHeight                       = newsHeight
-	homeBottom                        = bezelWidth + 64
+	homeBottom                        = bezelWidth + 72
 	sheetInset                        = 12
 	sheetEnterDistance        float32 = 12
 	sheetRadius                       = 20
@@ -87,12 +92,12 @@ const (
 	launcherSettingsBodyWidth float32 = 620
 	launcherSettingsColumnGap float32 = 32
 	launcherSettingsMarkSize  float32 = 56
-	dockRight                         = bezelWidth + 32
+	dockRight                         = bezelWidth + 40
 	actionWidth               float32 = 248
 	actionHeight              float32 = 60
 	menuGap                   float32 = 10
 	gameSettingsIconSize      float32 = 16
-	gameSettingsLabelSize     float32 = 10
+	gameSettingsLabelSize     float32 = 11
 	gameSettingsLabelGap      float32 = 3
 	dockWidth                         = actionWidth + menuGap + actionHeight
 	deckHeight                        = 96
@@ -129,17 +134,16 @@ const (
 	wishMonospace                     = "Consolas"
 	wishIconCacheSize                 = 128
 	wishIconDecodeEdge                = 96
-	wishTextFootnote          float32 = 9
-	wishTextIndex             float32 = 10
-	wishTextCaption           float32 = 11
-	wishTextBody              float32 = 12
+	wishTextFootnote          float32 = 11
+	wishTextIndex             float32 = 11
+	wishTextCaption           float32 = 12
+	wishTextBody              float32 = 13
 	wishTextNumber            float32 = 13
 	wishTextHelp              float32 = 14
 	wishTextPool              float32 = 16
 	wishTextIcon              float32 = 14
 	wishTextDialog            float32 = 22
 	wishTextTitle             float32 = 30
-	wishTextWatermark         float32 = 240
 	wishSpaceXXS              float32 = 4
 	wishSpaceXS               float32 = 5
 	wishSpaceSM               float32 = 6
@@ -166,10 +170,7 @@ const (
 	wishBloomSize             float32 = 720
 	wishBloomRight            float32 = -200
 	wishBloomBottom           float32 = -260
-	wishWatermarkRight        float32 = 48
-	wishWatermarkBottom       float32 = 28
 	wishHighlightOpacity      float32 = .12
-	wishWatermarkOpacity      float32 = .06
 	wishBackdropOpacity       float32 = .72
 	wishOpaqueHighlightMix    float32 = .82
 	wishBodyLineHeight        float32 = 1.6
@@ -197,13 +198,12 @@ const (
 	checkinMeterRadius   float32 = 3
 	checkinSourceDotSize float32 = 6
 	checkinStatGap       float32 = 24
-	checkinTextIndex     float32 = 11
-	checkinTextCaption   float32 = 11
-	checkinTextBody      float32 = 12
+	checkinTextIndex     float32 = 12
+	checkinTextCaption   float32 = 12
+	checkinTextBody      float32 = 13
 	checkinTextHelp      float32 = 14
 	checkinTextValue     float32 = 22
 	checkinTextTitle     float32 = 30
-	checkinTextWatermark float32 = 240
 	checkinSpaceXXS      float32 = 4
 	checkinSpaceXS       float32 = 6
 	checkinSpaceSM       float32 = 8
@@ -211,7 +211,6 @@ const (
 	checkinSpaceLG       float32 = 18
 	checkinSpaceXL       float32 = 24
 	checkinHairlineWidth float32 = 1
-	checkinWatermarkOpp  float32 = .06
 	checkinStatusOpacity float32 = .18
 	monoFont                     = "Bahnschrift"
 )
@@ -230,7 +229,7 @@ func launcherTheme() *ui.Theme {
 // tone is the launch colour: the key art's own hue when one was derived,
 // the default signal yellow otherwise.
 func (s *Shell) tone() ui.Color {
-	if s.Accent.A == 0 {
+	if s.Accent.A == 0 || !s.Model.AccentFollow {
 		return defaultAccent
 	}
 	return s.Accent
@@ -363,29 +362,27 @@ func (s *Shell) hero(c *ui.Context) {
 func (s *Shell) action(c *ui.Context) {
 	p := state.Present(s.Model)
 	s.newsCard(c)
-	ui.Box(c.Key("action-area")).Absolute().Right(dockRight+actionHeight+menuGap).Bottom(homeBottom).Size(actionWidth, actionHeight).Children(func() {
-		s.primary(c, p)
-	})
-	if p.LocateExisting {
-		s.locateExistingAction(c)
-	}
-	s.gameSettingsButton(c)
-	s.taskDeck(c, p)
 	if s.Model.NormalMode {
 		s.managedActionNote(c, p)
-	}
-	if s.Model.HomeDownloadsOpen {
-		s.homeDownloads(c)
+		// The compact capsule already carries progress, so no deck repeats it.
+		s.homeDock(c, p)
+		if s.Model.HomeDownloadsOpen && s.Model.Overlay == state.NoOverlay {
+			s.homeDownloads(c)
+		}
 	} else {
-		s.downloadStatus(c, p.LocateExisting)
+		s.taskDeck(c, p)
+		ui.Box(c.Key("action-area")).Absolute().Right(dockRight+actionHeight+menuGap).Bottom(homeBottom).Size(actionWidth, actionHeight).Children(func() {
+			s.primary(c, p)
+		})
+		s.gameSettingsButton(c)
 	}
 	s.footer(c)
 }
 
 func (s *Shell) locateExistingAction(c *ui.Context) {
-	ui.Row(c.Key("locate-existing-row")).Absolute().Right(dockRight+actionHeight+menuGap).
-		Bottom(homeBottom-downloadStatusHeight-locateActionGap).Size(actionWidth, downloadStatusHeight).
-		Justify(ui.Center).AlignItems(ui.Center).Children(func() {
+	ui.Row(c.Key("locate-existing-row")).Absolute().Right(dockRight+homeDockHeight).
+		Bottom(homeBottom-downloadStatusHeight-locateActionGap).Size(homeDockPrimaryWidth, downloadStatusHeight).
+		Justify(ui.End).AlignItems(ui.Center).Children(func() {
 		ui.Text(c, "已下载游戏？点击").FontSize(locateActionTextSize).TextColor(paper).SingleLine().PassThrough()
 		const label = "定位游戏"
 		b := ui.ButtonBase(c.Key("locate-existing")).Label(label).Height(downloadStatusHeight).Justify(ui.Center)

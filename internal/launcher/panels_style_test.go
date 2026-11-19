@@ -70,7 +70,7 @@ func TestCheckInPageLeadsWithALinkedTonePill(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	defer s.Dispose()
 	tt := ui.NewTester(s.View, 1280, 720)
-	if clickFailed(tt, "自动签到") {
+	if clickFailed(tt, "每日签到") {
 		t.Fatal("check-in page unreachable")
 	}
 	// A saved account with no Tajiduo link has exactly one tone action: relink.
@@ -88,13 +88,7 @@ func TestCheckInPageLeadsWithALinkedTonePill(t *testing.T) {
 	if got := img.RGBAAt(int(b.X+1), int(b.Y+1)); sameColor(got, want, 12) {
 		t.Fatalf("the main action must be a pill: %+v", got)
 	}
-	quiet, ok := tt.Find("刷新")
-	if !ok {
-		t.Fatal("refresh action missing")
-	}
-	if got := img.RGBAAt(int(quiet.X+14), int(quiet.Y+quiet.H/2)); sameColor(got, want, 40) {
-		t.Fatal("secondary actions must stay quiet glass")
-	}
+
 	if tt.HasText("今日已签到") {
 		t.Fatal("an unlinked account cannot have a finished task")
 	}

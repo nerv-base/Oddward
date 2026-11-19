@@ -11,7 +11,8 @@ import (
 )
 
 func (s *Shell) gameBasicInformation(c *ui.Context) {
-	ui.Text(c, "游戏目录").FontSize(gameSettingsHeadingSize).FontWeight(600)
+	p := state.PresentDownload(s.Model)
+	ui.Text(c, "游戏").FontSize(gameSettingsHeadingSize).FontWeight(600)
 	ui.Row(c.Key("current-game-path")).FillWidth().Gap(downloadGap).Children(func() {
 		root := s.Model.Managed.Root
 		path := root
@@ -28,6 +29,44 @@ func (s *Shell) gameBasicInformation(c *ui.Context) {
 		})
 	})
 	ui.Text(c, "定位已有安装时只读检查游戏文件。").FontSize(downloadCaptionSize).TextColor(muted).LineHeight(1.5)
+	if root := s.Model.Managed.Root; root != "" {
+		ui.Text(c, "版本").FontSize(gameSettingsHeadingSize).FontWeight(600).Margin(8, 0, 0, 0)
+		current := p.Current
+		if current == "" {
+			current = "尚未确认"
+		}
+		s.settingLine(c, "当前版本", current)
+		if p.OfferVersion != "" {
+			s.settingLine(c, "可更新到", p.OfferVersion)
+		}
+		ui.Row(c.Key("game-panel-actions")).FillWidth().Gap(downloadGap).Children(func() {
+			open := s.quietButton(c, "game-open-folder", "打开安装文件夹", s.OpenFolder == nil)
+			open.Shrink(0).Height(downloadButtonHeight).OnClick(func() {
+				if s.OpenFolder != nil {
+					s.OpenFolder(root)
+				}
+			})
+			if p.CanVerify {
+				s.quietButton(c, "game-verify", "重新校验", false).Shrink(0).Height(downloadButtonHeight).OnClick(func() {
+					s.Dispatch(state.Event{Kind: state.InstallVerifyRequest})
+				})
+			}
+			if s.Model.Download.Preload != state.PreloadStateUnavailable || s.Model.Download.Phase != state.DownloadIdle {
+				s.quietButton(c, "game-preload", "预下载管理", false).Shrink(0).Height(downloadButtonHeight).OnClick(func() {
+					s.Dispatch(state.Event{Kind: state.Dismiss})
+					s.Dispatch(state.Event{Kind: state.OpenHomeDownloads})
+				})
+			}
+		})
+	}
+}
+
+// settingLine is one read-only label and value pair in the game panel.
+func (s *Shell) settingLine(c *ui.Context, label, value string) {
+	ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
+		ui.Text(c, label).FontSize(downloadCaptionSize).TextColor(muted).Shrink(0)
+		ui.Text(c, value).FontSize(downloadCaptionSize).SingleLine().Grow(1).TextAlign(ui.End)
+	})
 }
 
 func (s *Shell) managedLocationPanel(c *ui.Context) {
@@ -85,7 +124,7 @@ func (s *Shell) managedNoticePanel(c *ui.Context) {
 
 func (s *Shell) managedActionNote(c *ui.Context, presentation state.Presentation) {
 	p := s.Model.Managed
-	bottom := float32(homeBottom + actionHeight + 14)
+	bottom := homeBottom + homeDockHeight + 14
 	if presentation.Progress {
 		bottom += deckHeight + deckGap
 	}

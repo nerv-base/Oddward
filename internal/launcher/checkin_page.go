@@ -75,11 +75,9 @@ func (s *Shell) checkInPage(c *ui.Context, data checkInPageData) {
 			ui.Box(c).Absolute().Right(wishBloomRight).Bottom(wishBloomBottom).Size(wishBloomSize, wishBloomSize).PassThrough().RadialGradient(ui.RadialGradient{Radius: wishBloomSize / 2, Stops: []ui.GradientStop{
 				{Color: tone.Alpha(wishHighlightOpacity), At: 0}, {Color: ui.Transparent, At: 1},
 			}})
-			ui.Text(c, "03").Font(monoFont).FontSize(checkinTextWatermark).FontWeight(700).TextColor(tone.Alpha(checkinWatermarkOpp)).Absolute().Right(wishWatermarkRight).Bottom(wishWatermarkBottom).PassThrough()
 		}
 		ui.Column(c.Key("checkin-header")).Absolute().Left(checkinInset).Right(checkinInset).Top(checkinHeaderTop).Gap(checkinSpaceMD).Children(func() {
-			mono(c, "03 / DAILY CHECK-IN", checkinTextIndex).TextColor(muted)
-			ui.Text(c, "自动签到").FontSize(checkinTextTitle).FontWeight(700)
+			ui.Text(c, "每日签到").FontSize(checkinTextTitle).FontWeight(700)
 			s.checkInSourceLine(c, data)
 		})
 		ui.Scroll(c.Key("checkin-body")).Absolute().Left(checkinInset).Right(checkinInset).Top(checkinBodyTop).Bottom(checkinBottomInset).Scrollbars(true).Children(func() {
@@ -89,6 +87,9 @@ func (s *Shell) checkInPage(c *ui.Context, data checkInPageData) {
 					return
 				}
 				s.checkInAccountCard(c, data)
+				if !data.Linked {
+					return
+				}
 				ui.Row(c.Key("checkin-tasks")).FillWidth().Gap(checkinCardGap).AlignItems(ui.Stretch).Children(func() {
 					for k := 0; k < state.CheckInKinds; k++ {
 						s.checkInTaskCard(c, data, state.CheckInKind(k))
@@ -118,15 +119,16 @@ func (s *Shell) checkInSourceLine(c *ui.Context, data checkInPageData) {
 	}
 	line := "尚未关联塔吉多"
 	switch {
-	case data.Linked && data.Role.Name != "":
-		line = "塔吉多 · 角色 " + data.Role.Name
 	case data.Linked:
-		line = "塔吉多 · 角色 " + data.RoleID
+		line = ""
 	case data.AccountID != "":
-		line = "已保存账号 · 未关联塔吉多"
+		line = "未关联塔吉多"
 	}
 	if data.Loaded {
-		line += " · 今日 " + now.In(time.Local).Format("2006-01-02")
+		if line != "" {
+			line += " · "
+		}
+		line += "今日 " + now.In(time.Local).Format("2006-01-02")
 	}
 	ui.Row(c.Key("checkin-source")).Gap(checkinSpaceSM).AlignItems(ui.Center).Children(func() {
 		dot := muted
@@ -186,14 +188,20 @@ func (s *Shell) checkInAccountCard(c *ui.Context, data checkInPageData) {
 				role = data.Role.Name + " · " + data.RoleID
 			}
 			ui.Text(c, "角色 "+role).FontSize(checkinTextHelp).FontWeight(600).SingleLine().Shrink(1)
-			body := "签到与游戏信息都通过这条塔吉多关联查询，Oddward 不会启动游戏，也不会读取游戏内存。"
 			if data.NeedsRelink {
-				body = "这条关联的凭据已失效，本地记录仍然保留；重新关联后才能签到和刷新游戏信息。"
+				ui.Text(c, "这条关联已失效，本地记录仍然保留；重新关联后才能签到。").
+					FontSize(checkinTextBody).TextColor(muted).LineHeight(wishBodyLineHeight)
 			}
-			ui.Text(c, body).FontSize(checkinTextBody).TextColor(muted).LineHeight(wishBodyLineHeight)
 		case data.AccountID == "":
 			ui.Text(c, "还没有已保存的游戏账号").FontSize(checkinTextHelp).FontWeight(600)
-			ui.Text(c, "自动签到复用一个已保存在本机的游戏账号；先在登录窗口勾选「在此设备保存账号」。").FontSize(checkinTextBody).TextColor(muted).LineHeight(wishBodyLineHeight)
+			ui.Text(c, "启动游戏并在登录窗口勾选「在此设备保存账号」，回来就能关联塔吉多。").
+				FontSize(checkinTextBody).TextColor(muted).LineHeight(wishBodyLineHeight)
+			if s.Model.NormalMode {
+				s.accentButton(c, "checkin-start-game", "启动游戏并保存账号").AlignSelf(ui.Start).OnClick(func() {
+					s.Dispatch(state.Event{Kind: state.Navigate, Page: state.Home})
+					s.Dispatch(state.Event{Kind: state.Primary})
+				})
+			}
 		default:
 			ui.Text(c, "关联塔吉多后即可签到").FontSize(checkinTextHelp).FontWeight(600)
 			ui.Text(c, "关联会复用已保存的游戏账号，走塔吉多官方短信登录，不需要再登录游戏；手机号未注册过时会自动注册。").FontSize(checkinTextBody).TextColor(muted).LineHeight(wishBodyLineHeight)
@@ -329,7 +337,7 @@ func (s *Shell) checkInTaskCard(c *ui.Context, data checkInPageData, k state.Che
 			ui.Box(c).Grow(1)
 			// The caption is the switch's accessible name, so it names the task
 			// instead of a bare "自动".
-			caption := ui.Text(c, title+" · 自动").FontSize(checkinTextBody).TextColor(muted)
+			caption := ui.Text(c, "启动游戏时自动").FontSize(checkinTextBody).TextColor(muted).Label(title + " · 启动游戏时自动")
 			s.preferenceSwitchFor(c, "checkin-auto-"+kindKey(k), caption, data.Auto[k], !data.Linked || data.NeedsRelink, func(on bool) state.Event {
 				return state.Event{Kind: state.CheckInAutoToggle, Check: state.CheckInPayload{Kind: k, Enabled: on}}
 			})
@@ -411,7 +419,7 @@ func (s *Shell) checkInStatusCard(c *ui.Context, data checkInPageData) {
 			secondary += fmt.Sprintf(" · 成就 %d/%d", role.Achievement, role.AchievementTotal)
 		}
 		ui.Text(c, secondary).FontSize(checkinTextBody).TextColor(muted).SingleLine().Shrink(1).Tooltip(secondary)
-		ui.Text(c, "数值来自塔吉多服务器；接口没有体力恢复时间、溢出资源或派遣数据，此处不推算。").FontSize(checkinTextCaption).TextColor(muted).LineHeight(wishBodyLineHeight)
+		ui.Text(c, "数值来自塔吉多；未提供的体力恢复、溢出与派遣数据不做推算。").FontSize(checkinTextCaption).TextColor(muted).LineHeight(wishBodyLineHeight)
 	})
 }
 

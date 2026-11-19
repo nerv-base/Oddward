@@ -143,8 +143,8 @@ func TestInstallDialogPlansSelectedPathBeforeExplicitStart(t *testing.T) {
 	}
 	m, fx = Reduce(m, Event{Kind: DownloadConfirm})
 	if len(fx) != 2 || fx[0].Kind != SaveManagedSettings || fx[1].Kind != EffectDownloadRun || fx[1].Path != selected ||
-		m.Overlay != NoOverlay || !m.HomeDownloadsOpen {
-		t.Fatalf("explicit start must save the target, start the transfer and reveal Home progress: %+v %+v", m.Download, fx)
+		m.Overlay != NoOverlay || m.HomeDownloadsOpen || Present(m).Primary != "正在准备下载" {
+		t.Fatalf("explicit start must save the target and show preparation in the compact Home action: %+v %+v", m.Download, fx)
 	}
 }
 

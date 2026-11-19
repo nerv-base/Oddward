@@ -62,6 +62,7 @@ func (s *Shell) installPathDialog(c *ui.Context) {
 						installMetric(c, p.BudgetVolume+"可用空间", p.Free)
 						installMetric(c, p.BudgetVolume+"所需空间", p.Needed)
 					})
+					ui.Text(c, "下载时会一并安装运行组件（约 30 MB），不需要官方启动器。").FontSize(downloadCaptionSize).TextColor(muted).FillWidth()
 				}
 				note := p.Error
 				if note == "" {

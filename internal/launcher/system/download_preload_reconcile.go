@@ -87,10 +87,6 @@ func (b *GameDownloadBackend) preloadReconcileLocked(ctx context.Context, root s
 			return gameinstall.ReconcileResult{}, nil, ctx.Err()
 		}
 	}
-	prefs, err := b.preferences(ctx)
-	if err != nil {
-		return gameinstall.ReconcileResult{}, nil, err
-	}
 	free, err := b.space(root)
 	if err != nil {
 		return gameinstall.ReconcileResult{}, nil, err
@@ -101,7 +97,7 @@ func (b *GameDownloadBackend) preloadReconcileLocked(ctx context.Context, root s
 	}
 	rates, _ := b.downloadPerfRates(ctx, root)
 	budget := gameres.BudgetInput{VolumeFreeBytes: free, CacheFreeBytes: free, ReserveBytes: max(2<<30, formal.Config.ResSize/50), NetBytesPerSecond: rates.NetBytesPerSecond, VerifyBytesPerSecond: rates.HashBytesPerSecond, IOBytesPerSecond: rates.IOBytesPerSecond}
-	result, err := gameinstall.Reconcile(ctx, gameinstall.ReconcileInput{Record: r, Formal: formalSnapshot, PreRelease: preSnapshot, CurrentBranch: base.Branch, CurrentVersion: base.Version, BaselineVerified: true, Local: local, Capabilities: gameres.Capabilities{PatchApply: patchApplyAdmitted && prefs.PatchApply}, Budget: budget, Now: time.Now().UTC(), NewerFormalVersions: len(r.ObservedFormalVersions), VerifiedBlobs: verified, GameRunning: processes.game, OfficialRunning: processes.official, LockAvailable: true})
+	result, err := gameinstall.Reconcile(ctx, gameinstall.ReconcileInput{Record: r, Formal: formalSnapshot, PreRelease: preSnapshot, CurrentBranch: base.Branch, CurrentVersion: base.Version, BaselineVerified: true, Local: local, Capabilities: gameres.Capabilities{PatchApply: patchApplyAdmitted}, Budget: budget, Now: time.Now().UTC(), NewerFormalVersions: len(r.ObservedFormalVersions), VerifiedBlobs: verified, GameRunning: processes.game, OfficialRunning: processes.official, LockAvailable: true})
 	if err != nil {
 		return result, nil, err
 	}

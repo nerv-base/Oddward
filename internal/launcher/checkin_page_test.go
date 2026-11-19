@@ -36,7 +36,7 @@ func TestCheckInPageUnlinkedAccountOffersNoWrite(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	defer s.Dispose()
 	tt := ui.NewTester(s.View, 1280, 720)
-	if clickFailed(tt, "自动签到") {
+	if clickFailed(tt, "每日签到") {
 		t.Fatal("check-in page unreachable")
 	}
 	loadCheckInPage(t, s, state.CheckInPayload{AccountID: "preview-account"})
@@ -47,11 +47,13 @@ func TestCheckInPageUnlinkedAccountOffersNoWrite(t *testing.T) {
 	if !tt.HasText("未关联塔吉多") {
 		t.Fatal("the page must say the account is not linked")
 	}
-	if !tt.HasText("关联塔吉多后才能签到") {
-		t.Fatal("the page must explain why the write is unavailable")
+	if !tt.HasText("关联塔吉多后即可签到") {
+		t.Fatal("the page must say what the link unlocks")
 	}
-	// The action stays on screen but a click can never start a write.
-	_ = tt.Click("签到")
+	// An unlinked page shows guidance only; no task card can start a write.
+	if _, ok := tt.Find("签到"); ok {
+		t.Fatal("unlinked guidance must not expose a disabled sign-in button")
+	}
 	if s.Model.CheckIn.Busy[state.CheckGame] || s.Model.CheckIn.Phase[state.CheckGame] != state.CheckInUnlinked {
 		t.Fatal("an unlinked account must never start a sign-in write")
 	}
@@ -64,7 +66,7 @@ func TestCheckInPageShowsOnlyServerNumbers(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	defer s.Dispose()
 	tt := ui.NewTester(s.View, 1280, 720)
-	if clickFailed(tt, "自动签到") {
+	if clickFailed(tt, "每日签到") {
 		t.Fatal("check-in page unreachable")
 	}
 	payload := linkedCheckInPayload("preview-account")
@@ -87,7 +89,7 @@ func TestCheckInPageShowsOnlyServerNumbers(t *testing.T) {
 			t.Fatalf("status panel must show %q from the server payload", want)
 		}
 	}
-	if !tt.HasText("没有体力恢复时间") {
+	if !tt.HasText("未提供的体力恢复") {
 		t.Fatal("the panel must say which data the server does not provide")
 	}
 	if tt.HasText("MOCK · 仅内存演示") {
@@ -100,7 +102,7 @@ func TestCheckInPageAccessibleLabelsAcrossPreferences(t *testing.T) {
 		s := NewShell(settled(state.Ready))
 		tt := ui.NewTester(s.View, 1280, 720)
 		tt.SetPreferences(prefs)
-		if clickFailed(tt, "自动签到") {
+		if clickFailed(tt, "每日签到") {
 			t.Fatal("check-in page unreachable")
 		}
 		loadCheckInPage(t, s, linkedCheckInPayload("preview-account"))
@@ -116,8 +118,8 @@ func TestCheckInPageAccessibleLabelsAcrossPreferences(t *testing.T) {
 		}{
 			{ui.RoleButton, "签到"},
 			{ui.RoleButton, "刷新"},
-			{ui.RoleSwitch, "游戏签到 · 自动"},
-			{ui.RoleSwitch, "社区签到 · 自动"},
+			{ui.RoleSwitch, "游戏签到 · 启动游戏时自动"},
+			{ui.RoleSwitch, "社区签到 · 启动游戏时自动"},
 		} {
 			if _, ok := tt.AccessByRole(role.role, role.name); !ok {
 				t.Fatalf("prefs %+v: role %d %q must be reachable by role and name", prefs, role.role, role.name)
@@ -131,7 +133,7 @@ func TestCheckInPageUnknownResultNeverLooksFinished(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	defer s.Dispose()
 	tt := ui.NewTester(s.View, 1280, 720)
-	if clickFailed(tt, "自动签到") {
+	if clickFailed(tt, "每日签到") {
 		t.Fatal("check-in page unreachable")
 	}
 	payload := linkedCheckInPayload("preview-account")
@@ -154,7 +156,7 @@ func TestCheckInPageShowsPartialSuccess(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	defer s.Dispose()
 	tt := ui.NewTester(s.View, 1280, 720)
-	if clickFailed(tt, "自动签到") {
+	if clickFailed(tt, "每日签到") {
 		t.Fatal("check-in page unreachable")
 	}
 	payload := linkedCheckInPayload("preview-account")
@@ -273,7 +275,7 @@ func TestCheckInShellLoadsOnEntryAndSignsWithoutBlockingUI(t *testing.T) {
 	}
 	s.CheckInBackend = fake
 	tt := ui.NewTester(s.View, 1280, 720)
-	if clickFailed(tt, "自动签到") {
+	if clickFailed(tt, "每日签到") {
 		t.Fatal("check-in page unreachable")
 	}
 	waitCheckIn(t, tt, func() bool {
@@ -325,7 +327,7 @@ func TestCheckInUnknownResultNeedsExplicitConfirmation(t *testing.T) {
 	}
 	s.CheckInBackend = fake
 	tt := ui.NewTester(s.View, 1280, 720)
-	if clickFailed(tt, "自动签到") {
+	if clickFailed(tt, "每日签到") {
 		t.Fatal("check-in page unreachable")
 	}
 	waitCheckIn(t, tt, func() bool {
@@ -395,7 +397,7 @@ func TestCheckInAutoWaitsForTheLaunch(t *testing.T) {
 		}
 		tt.Advance(next.Sub(local))
 	}
-	if clickFailed(tt, "自动签到") {
+	if clickFailed(tt, "每日签到") {
 		t.Fatal("check-in page unreachable")
 	}
 	waitCheckIn(t, tt, func() bool {

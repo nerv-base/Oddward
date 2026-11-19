@@ -28,20 +28,30 @@ type Settings struct {
 	SkippedVersion string
 	Network        Network
 	Downloads      Downloads
+	UI             UI
 }
 
-// Downloads holds the transfer settings. The zero value selects defaults.
+// UI holds launcher window and theming choices. Both default to on for new
+// and older profiles.
+type UI struct {
+	CloseToTray  bool `json:"closeToTray"`
+	AccentFollow bool `json:"accentFollow"`
+	CheckUpdates bool `json:"checkUpdates"`
+}
+
+func DefaultUI() UI {
+	return UI{CloseToTray: true, AccentFollow: true, CheckUpdates: true}
+}
+
+// Downloads holds the transfer settings the user can still choose. Parallel
+// transfers, cache limits, automatic resume and patch application are fixed
+// engine behavior now, so they are no longer stored.
 type Downloads struct {
-	FilesInFlight      int  `json:"filesInFlight"`
-	ConnectionsPerFile int  `json:"connectionsPerFile"`
-	RateLimitKiB       int  `json:"rateLimitKiB"`
-	AutoResume         bool `json:"autoResume"`
-	CacheLimitGiB      int  `json:"cacheLimitGiB"`
-	PatchApply         bool `json:"patchApply"`
+	RateLimitKiB int `json:"rateLimitKiB"`
 }
 
 func DefaultDownloads() Downloads {
-	return Downloads{FilesInFlight: 4, ConnectionsPerFile: 4, AutoResume: true, PatchApply: true}
+	return Downloads{}
 }
 
 // Network is the persisted network choice. It never carries credentials.
@@ -108,7 +118,8 @@ func (s *Store) load(ctx context.Context) (Settings, error) {
 	}
 	file, err := os.Open(s.file)
 	if errors.Is(err, os.ErrNotExist) {
-		return Settings{}, ctx.Err()
+		// A fresh profile starts from the same defaults the UI shows.
+		return Settings{Downloads: DefaultDownloads(), UI: DefaultUI()}, ctx.Err()
 	}
 	if err != nil {
 		return Settings{}, err
@@ -159,11 +170,11 @@ func decode(data []byte) (Settings, error) {
 		json.Unmarshal(fields["riskVersion"], &risk) != nil || risk == nil {
 		return Settings{}, invalid
 	}
-	settings := Settings{GameRoot: *root, RiskVersion: *risk, Downloads: DefaultDownloads()}
+	settings := Settings{GameRoot: *root, RiskVersion: *risk, Downloads: DefaultDownloads(), UI: DefaultUI()}
 	if version == 1 && len(fields) == 3 {
 		return settings, nil
 	}
-	if !(version == 2 && len(fields) == 5 || version == 3 && len(fields) == 6) {
+	if !(version == 2 && len(fields) == 5 || version == 3 && len(fields) == 6 || version == 4 && len(fields) == 6 || version == 5 && len(fields) == 7 || version == 6 && len(fields) == 7) {
 		return Settings{}, invalid
 	}
 	var skipped *string
@@ -178,12 +189,58 @@ func decode(data []byte) (Settings, error) {
 	}
 	settings.SkippedVersion, settings.Network = *skipped, *n
 	if version == 3 {
+		settings.Downloads, err = decodeDownloadsV3(fields["downloads"])
+		if err != nil {
+			return Settings{}, err
+		}
+	}
+	if version == 4 {
 		settings.Downloads, err = decodeDownloads(fields["downloads"])
 		if err != nil {
 			return Settings{}, err
 		}
 	}
+	if version >= 5 {
+		settings.Downloads, err = decodeDownloads(fields["downloads"])
+		if err != nil {
+			return Settings{}, err
+		}
+		settings.UI, err = decodeUI(fields["ui"], version)
+		if err != nil {
+			return Settings{}, err
+		}
+	}
 	return settings, nil
+}
+
+func decodeUI(data []byte, version int) (UI, error) {
+	fields, err := decodeObject(data)
+	if err != nil {
+		return UI{}, err
+	}
+	invalid := errors.New("invalid launcher ui settings")
+	var closeToTray, accentFollow *bool
+	if json.Unmarshal(fields["closeToTray"], &closeToTray) != nil || closeToTray == nil {
+		return UI{}, invalid
+	}
+	if json.Unmarshal(fields["accentFollow"], &accentFollow) != nil || accentFollow == nil {
+		return UI{}, invalid
+	}
+	delete(fields, "closeToTray")
+	delete(fields, "accentFollow")
+	ui := UI{CloseToTray: *closeToTray, AccentFollow: *accentFollow, CheckUpdates: true}
+	if version >= 6 {
+		var checkUpdates *bool
+		if json.Unmarshal(fields["checkUpdates"], &checkUpdates) != nil || checkUpdates == nil {
+			return UI{}, invalid
+		}
+		delete(fields, "checkUpdates")
+		ui.CheckUpdates = *checkUpdates
+	}
+	if len(fields) != 0 {
+		return UI{}, invalid
+	}
+	return ui, nil
 }
 
 func decodeObject(data []byte) (map[string]json.RawMessage, error) {
@@ -227,34 +284,56 @@ func decodeDownloads(data []byte) (Downloads, error) {
 	}
 	invalid := errors.New("invalid downloads settings")
 	d := DefaultDownloads()
-	for name, dest := range map[string]*int{
-		"filesInFlight": &d.FilesInFlight, "connectionsPerFile": &d.ConnectionsPerFile, "rateLimitKiB": &d.RateLimitKiB,
+	var rate *int
+	if json.Unmarshal(fields["rateLimitKiB"], &rate) != nil || rate == nil {
+		return Downloads{}, invalid
+	}
+	d.RateLimitKiB = *rate
+	delete(fields, "rateLimitKiB")
+	if len(fields) != 0 || !validDownloads(d) {
+		return Downloads{}, invalid
+	}
+	return d, nil
+}
+
+// decodeDownloadsV3 reads the pre-v4 document, which also stored parallel
+// transfer counts, a cache limit and engine switches. Those values are fixed
+// defaults now, so only the user's rate limit survives the migration.
+func decodeDownloadsV3(data []byte) (Downloads, error) {
+	fields, err := decodeObject(data)
+	if err != nil {
+		return Downloads{}, err
+	}
+	invalid := errors.New("invalid downloads settings")
+	var files, connections, rate *int
+	for name, dest := range map[string]**int{
+		"filesInFlight": &files, "connectionsPerFile": &connections, "rateLimitKiB": &rate,
 	} {
-		var n *int
-		if json.Unmarshal(fields[name], &n) != nil || n == nil {
+		if json.Unmarshal(fields[name], dest) != nil || *dest == nil {
 			return Downloads{}, invalid
 		}
-		*dest = *n
 		delete(fields, name)
+	}
+	if *files < 1 || *files > 8 || *connections < 1 || *connections > 16 {
+		return Downloads{}, invalid
 	}
 	if raw, ok := fields["cacheLimitGiB"]; ok {
 		var limit *int
-		if json.Unmarshal(raw, &limit) != nil || limit == nil {
+		if json.Unmarshal(raw, &limit) != nil || limit == nil || *limit < 0 || *limit > 1<<30 {
 			return Downloads{}, invalid
 		}
-		d.CacheLimitGiB = *limit
 		delete(fields, "cacheLimitGiB")
 	}
-	for name, value := range map[string]*bool{"autoResume": &d.AutoResume, "patchApply": &d.PatchApply} {
+	for name := range map[string]bool{"autoResume": true, "patchApply": true} {
 		if raw, ok := fields[name]; ok {
 			var enabled *bool
 			if json.Unmarshal(raw, &enabled) != nil || enabled == nil {
 				return Downloads{}, invalid
 			}
-			*value = *enabled
 			delete(fields, name)
 		}
 	}
+	d := Downloads{RateLimitKiB: *rate}
 	if len(fields) != 0 || !validDownloads(d) {
 		return Downloads{}, invalid
 	}
@@ -262,8 +341,7 @@ func decodeDownloads(data []byte) (Downloads, error) {
 }
 
 func validDownloads(d Downloads) bool {
-	return d.FilesInFlight >= 1 && d.FilesInFlight <= 8 && d.ConnectionsPerFile >= 1 && d.ConnectionsPerFile <= 16 &&
-		d.RateLimitKiB >= 0 && d.RateLimitKiB <= 1048576 && d.CacheLimitGiB >= 0 && d.CacheLimitGiB <= 1<<30
+	return d.RateLimitKiB >= 0 && d.RateLimitKiB <= 1048576
 }
 
 type document struct {
@@ -273,6 +351,7 @@ type document struct {
 	SkippedVersion string    `json:"skippedVersion"`
 	Network        Network   `json:"network"`
 	Downloads      Downloads `json:"downloads"`
+	UI             UI        `json:"ui"`
 }
 
 // Save stages and syncs a bounded document, then replaces the directory entry
@@ -312,7 +391,7 @@ func (s *Store) save(ctx context.Context, settings Settings) (result error) {
 	if err := validateSettings(ctx, &settings); err != nil {
 		return err
 	}
-	data, err := json.Marshal(document{Version: 3, GameRoot: settings.GameRoot, RiskVersion: settings.RiskVersion, SkippedVersion: settings.SkippedVersion, Network: settings.Network, Downloads: settings.Downloads})
+	data, err := json.Marshal(document{Version: 6, GameRoot: settings.GameRoot, RiskVersion: settings.RiskVersion, SkippedVersion: settings.SkippedVersion, Network: settings.Network, Downloads: settings.Downloads, UI: settings.UI})
 	if err != nil {
 		return err
 	}

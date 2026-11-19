@@ -22,7 +22,11 @@ import (
 	"github.com/nerv-base/Oddward/internal/launchsettings"
 )
 
-const patchApplyAdmitted = true // SPEC Phase 5B D1–D6 verified with official samples and same-update Full fallback.
+const (
+	patchApplyAdmitted        = true // SPEC Phase 5B D1–D6 verified with official samples and same-update Full fallback.
+	defaultFilesInFlight      = 4
+	defaultConnectionsPerFile = 4
+)
 
 func downloadWork(root string) string { return filepath.Join(root, ".oddward") }
 func (b *GameDownloadBackend) installStore() (*gameinstall.Store, error) {
@@ -70,7 +74,7 @@ func (b *GameDownloadBackend) newDownloadEngine(ctx context.Context, p *download
 		return nil, err
 	}
 	metadata := b.metadata()
-	params := gamedl.Parameters{FilesInFlight: prefs.FilesInFlight, ConnectionsPerFile: prefs.ConnectionsPerFile, RateLimitKiB: int64(prefs.RateLimitKiB)}
+	params := gamedl.Parameters{FilesInFlight: defaultFilesInFlight, ConnectionsPerFile: defaultConnectionsPerFile, RateLimitKiB: int64(prefs.RateLimitKiB)}
 	return gamedl.New(gamedl.Options{
 		WorkRoot: p.engineRoot(), StateRoot: b.taskRoot(p.key), Client: metadata.client, Resolve: metadata.resolve(p.delivery.Branch), Lease: lease,
 		Parameters: params, UserAgent: "Oddward/" + b.Version,
@@ -236,11 +240,7 @@ func (b *GameDownloadBackend) buildDownloadPlan(ctx context.Context, root string
 			local.installed[strings.ToUpper(target.Path)] = gameres.Object{MD5: target.MD5, Size: target.Size}
 		}
 	}
-	prefs, err := b.preferences(ctx)
-	if err != nil {
-		return nil, err
-	}
-	caps := gameres.Capabilities{PatchApply: patchApplyAdmitted && prefs.PatchApply}
+	caps := gameres.Capabilities{PatchApply: patchApplyAdmitted}
 	var cacheGraph *gameres.PatchGraph
 	if caps.PatchApply && len(local.installed) > 0 {
 		cacheGraph = delivery.Graph

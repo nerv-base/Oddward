@@ -27,9 +27,14 @@ type LauncherSettingsSection uint8
 
 const (
 	SettingsGeneral LauncherSettingsSection = iota
+	SettingsAppearance
 	SettingsNetwork
+	SettingsFiles
 	SettingsAbout
 )
+
+// Valid reports whether the section exists; event indexes arrive as numbers.
+func (s LauncherSettingsSection) Valid() bool { return s <= SettingsAbout }
 
 const (
 	// NetworkApply carries the edited form: Index proxy mode, Path proxy URL,
@@ -47,7 +52,7 @@ func reduceNetwork(m Model, e Event) (Model, []Effect, bool) {
 	switch e.Kind {
 	case SelectLauncherSettingsSection:
 		section := LauncherSettingsSection(e.Index)
-		if m.Page == LauncherSettings && m.Overlay == NoOverlay && section <= SettingsAbout {
+		if m.Page == LauncherSettings && m.Overlay == NoOverlay && section.Valid() {
 			m.SettingsSection = section
 		}
 	case NetworkApply:

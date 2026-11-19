@@ -16,7 +16,14 @@ func TestLauncherSettingsSwitchesSectionsInPlace(t *testing.T) {
 	s := NewShell(m)
 	t.Cleanup(s.Dispose)
 	tt := ui.NewTester(s.View, 1024, 631)
-	for _, step := range []struct{ click, text string }{{"启动器设置", "动态背景"}, {"网络", "跟随系统"}, {"关于", "GPL-3.0-or-later"}, {"常规", "动态背景"}} {
+	for _, step := range []struct{ click, text string }{
+		{"启动器设置", "关闭窗口时最小化到托盘"},
+		{"外观", "动态背景"},
+		{"下载与网络", "跟随系统"},
+		{"文件", "游戏安装"},
+		{"关于", "GPL-3.0-or-later"},
+		{"常规", "关闭窗口时最小化到托盘"},
+	} {
 		if err := tt.Click(step.click); err != nil {
 			t.Fatal(err)
 		}
@@ -56,8 +63,20 @@ func TestLauncherSettingsOnlyShowsLauncherControls(t *testing.T) {
 		role  ui.Role
 		label string
 	}{
-		{ui.RoleSwitch, "动态背景"}, {ui.RoleSwitch, "减少动态效果"},
-		{ui.RoleTab, "常规"}, {ui.RoleTab, "网络"}, {ui.RoleTab, "关于"},
+		{ui.RoleTab, "常规"}, {ui.RoleTab, "外观"}, {ui.RoleTab, "下载与网络"}, {ui.RoleTab, "文件"}, {ui.RoleTab, "关于"},
+	} {
+		if _, ok := tt.AccessByRole(want.role, want.label); !ok {
+			t.Errorf("missing launcher settings control %q", want.label)
+		}
+	}
+	if err := tt.Click("外观"); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []struct {
+		role  ui.Role
+		label string
+	}{
+		{ui.RoleSwitch, "动态背景"}, {ui.RoleSwitch, "减少动态效果"}, {ui.RoleSwitch, "强调色跟随版本主视觉"},
 	} {
 		if _, ok := tt.AccessByRole(want.role, want.label); !ok {
 			t.Errorf("missing launcher settings control %q", want.label)
@@ -133,27 +152,22 @@ func TestHomeGameSettingsRoutes(t *testing.T) {
 
 	click("游戏设置")
 	wantDialog("游戏设置")
-	basic, hasBasic := tt.AccessByRole(ui.RoleTab, "基本信息")
-	download, hasDownload := tt.AccessByRole(ui.RoleTab, "下载设置")
-	if !hasBasic || !hasDownload || !basic.Selected || download.Selected || basic.Bounds.X != download.Bounds.X || basic.Bounds.Y+basic.Bounds.H > download.Bounds.Y {
-		t.Fatalf("expected vertically stacked game tabs, basic=%+v download=%+v", basic, download)
+	if _, ok := tt.AccessByRole(ui.RoleTab, "基本信息"); ok {
+		t.Fatal("game settings is a single page now; it must not carry launcher-style tabs")
 	}
 	path, hasPath := tt.Find(m.Managed.Root)
-	if !hasPath || path.X <= basic.Bounds.X+basic.Bounds.W || path.X+path.W > shell.X+shell.W || basic.Bounds.Y >= path.Y {
-		t.Fatalf("expected top-aligned navigation to the left of the known game path, found=%t bounds=%+v", hasPath, path)
+	if !hasPath || path.X+path.W > shell.X+shell.W {
+		t.Fatalf("expected the known game path inside the dialog, found=%t bounds=%+v", hasPath, path)
 	}
-	if tt.HasText("并发文件数") {
-		t.Fatal("download preferences must only be shown in their tab")
-	}
-	for _, label := range []string{"动态背景", "减少动态效果", "检查更新", "网络", "关于", "状态预览"} {
+	for _, label := range []string{"动态背景", "减少动态效果", "检查更新", "网络", "关于", "状态预览", "下载设置"} {
 		if _, ok := tt.Find(label); ok {
 			t.Errorf("game settings exposes launcher control %q", label)
 		}
 	}
 	click("定位游戏")
 	wantDialog("游戏设置")
-	if browse, ok := tt.AccessByRole(ui.RoleButton, "浏览游戏目录"); !ok || browse.Disabled || browse.Bounds.X <= basic.Bounds.X+basic.Bounds.W {
-		t.Fatal("game settings must show the existing directory picker in the right pane")
+	if browse, ok := tt.AccessByRole(ui.RoleButton, "浏览游戏目录"); !ok || browse.Disabled || browse.Bounds.X < shell.X || browse.Bounds.X+browse.Bounds.W > shell.X+shell.W {
+		t.Fatalf("game settings must show the existing directory picker: found=%t browse=%+v path=%+v shell=%+v", ok, browse.Bounds, path, shell)
 	}
 	// A previous directory check can report a long diagnostic. Actions should
 	// stay visible while the message scrolls in the dialog body.
@@ -168,23 +182,6 @@ func TestHomeGameSettingsRoutes(t *testing.T) {
 	}
 	click("返回")
 	s.Model.Managed.Error = ""
-	wantDialog("游戏设置")
-	if err := tt.Click("下载设置"); err != nil {
-		t.Fatal(err)
-	}
-	wantDialog("游戏设置")
-	if tab, ok := tt.AccessByRole(ui.RoleTab, "下载设置"); !ok || !tab.Selected || tab.Bounds != download.Bounds {
-		t.Fatalf("download preferences must select the existing tab in place, found=%t tab=%+v", ok, tab)
-	}
-	if save, ok := tt.AccessByRole(ui.RoleButton, "保存下载设置"); !ok || save.Bounds.X <= basic.Bounds.X+basic.Bounds.W || save.Bounds.Y+save.Bounds.H > shell.Y+shell.H-24 {
-		t.Fatalf("download settings must show its save action in the right pane without scrolling at the minimum window size, found=%t bounds=%+v", ok, save.Bounds)
-	}
-	if tt.HasText(m.Managed.Root) {
-		t.Fatal("the basic tab's path should be replaced by download preferences")
-	}
-	if err := tt.Click("基本信息"); err != nil {
-		t.Fatal(err)
-	}
 	wantDialog("游戏设置")
 	click("关闭面板")
 	if s.Model.Overlay != state.NoOverlay || s.Model.Page != state.Home {

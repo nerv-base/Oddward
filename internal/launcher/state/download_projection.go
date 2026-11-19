@@ -48,6 +48,8 @@ func PresentDownload(m Model) DownloadPresentation {
 		p.StageText = "正在提交更新"
 	case StageFinalize:
 		p.StageText = "正在完成"
+	case StageComponents:
+		p.StageText = "正在准备运行组件"
 	default:
 		p.StageText = "尚未开始"
 	}

@@ -42,7 +42,11 @@ func (s *Shell) taskDeck(c *ui.Context, p state.Presentation) {
 	if paused {
 		fill = tone.Mix(ui.Hex("#8A8E97"), .55)
 	}
-	deck := ui.Column(c.Key("task-deck")).Absolute().Right(dockRight).Bottom(homeBottom+actionHeight+deckGap).Size(dockWidth, deckHeight).
+	height := actionHeight
+	if s.Model.NormalMode {
+		height = homeDockHeight
+	}
+	deck := ui.Column(c.Key("task-deck")).Absolute().Right(dockRight).Bottom(homeBottom+height+deckGap).Size(dockWidth, deckHeight).
 		Padding(14, 18, 14, 18).Gap(10).Radius(18).Clip().Border(1, ui.RGBA(255, 255, 255, .10)).Material(frostedSurface{Tint: glassInk})
 	if !s.Model.ReducedMotion && !s.Model.SystemReducedMotion {
 		value = deck.AnimateTo("deck-value", value, ui.Animation{Duration: 240 * time.Millisecond})

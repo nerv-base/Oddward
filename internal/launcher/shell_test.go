@@ -78,6 +78,9 @@ func TestNativeSettingsAndEscape(t *testing.T) {
 	if clickFailed(tt, "启动器设置") || s.Model.Page != state.LauncherSettings || s.Model.Overlay != state.NoOverlay {
 		t.Fatal("settings inaccessible")
 	}
+	if clickFailed(tt, "外观") {
+		t.Fatal("appearance section inaccessible")
+	}
 	if clickFailed(tt, "减少动态效果") {
 		t.Fatal("motion setting inaccessible")
 	}
@@ -161,6 +164,9 @@ func TestNativeSettingsSwitchSemanticsAndPageNavigation(t *testing.T) {
 	}
 	if _, ok := tt.AccessByRole(ui.RoleButton, "启动游戏"); ok {
 		t.Fatal("home control still visible on the settings page")
+	}
+	if clickFailed(tt, "外观") {
+		t.Fatal("appearance section inaccessible")
 	}
 	sw, ok := tt.AccessByRole(ui.RoleSwitch, "动态背景")
 	if !ok || !sw.Checked {

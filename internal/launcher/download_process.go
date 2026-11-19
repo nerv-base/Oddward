@@ -39,7 +39,7 @@ func (s *Shell) syncDownloadProcesses(c *ui.Context) {
 		case result := <-work.out:
 			work.pending = false
 			if result.err == nil && result.root == s.Model.Managed.Root && result.token == s.Model.Download.Request && result.token != 0 {
-				s.Dispatch(state.Event{Kind: state.DownloadProcessesObserved, Token: result.token, Enabled: result.official, Focused: result.game})
+				s.Dispatch(state.Event{Kind: state.DownloadProcessesObserved, Token: result.token, Enabled: result.official, Focused: result.game, Since: time.Now()})
 			}
 		default:
 		}

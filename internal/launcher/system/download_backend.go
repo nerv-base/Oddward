@@ -175,11 +175,7 @@ func (b *GameDownloadBackend) HandleDownload(ctx context.Context, req launcher.D
 			break
 		}
 		err = b.Settings.Update(ctx, func(current *launchsettings.Settings) {
-			p := req.Settings
-			current.Downloads = launchsettings.Downloads{
-				FilesInFlight: p.FilesInFlight, ConnectionsPerFile: p.ConnectionsPerFile, RateLimitKiB: p.RateLimitKiB,
-				AutoResume: p.AutoResume, CacheLimitGiB: p.CacheLimitGiB, PatchApply: p.PatchApply,
-			}
+			current.Downloads = launchsettings.Downloads{RateLimitKiB: req.Settings.RateLimitKiB}
 		})
 		if err == nil {
 			event.Kind = state.DownloadSettingsSaved

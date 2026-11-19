@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+package state
+
+// homeDownloadPrimary shares presentation and dispatch so the main button
+// cannot say one thing and start a different operation.
+func homeDownloadPrimary(m Model) (Presentation, EventKind, bool) {
+	if !m.NormalMode || downloadLaunchBlocked(m) || ManagedBusy(m.Managed.Phase) || ManagedActive(m.Managed.Phase) {
+		return Presentation{}, 0, false
+	}
+	d, p := m.Download, PresentDownload(m)
+	if p.OfferVersion != "" && p.OfferVersion != p.Current {
+		return Presentation{Primary: "更新游戏", Detail: "可用正式版本 " + p.OfferVersion, Enabled: true}, DownloadRequest, true
+	}
+	// Preloading alone must leave the ordinary launch button reachable.
+	if d.Kind != DownloadUpdate && d.Kind != DownloadInstall {
+		return Presentation{}, 0, false
+	}
+	out := Presentation{Task: true, Status: p.StageText, Detail: p.NextAction}
+	if p.Error != "" {
+		out.Detail = p.Error
+	}
+	status := func(label string) (Presentation, EventKind, bool) {
+		out.Primary = label
+		return out, 0, true
+	}
+	action := func(label string, event EventKind) (Presentation, EventKind, bool) {
+		out.Primary, out.Enabled = label, true
+		return out, event, true
+	}
+	switch {
+	case d.cancelPending:
+		return status("正在取消")
+	case d.pausePending:
+		return status("正在暂停")
+	case d.AwaitingConfirmation && m.Overlay != OverlayInstallPath:
+		return action("查看下载方案", OpenHomeDownloads)
+	case d.Phase == DownloadRunning && p.CanPause:
+		return action("暂停下载", DownloadPause)
+	case d.Phase == DownloadSuspended:
+		if d.operation == downloadOperationRun {
+			return status("正在继续")
+		}
+		if p.CanResume {
+			return action("继续下载", DownloadResume)
+		}
+		return status("下载已暂停")
+	case d.Phase == DownloadPreparing:
+		if d.Stage == StageNetwork {
+			return status("正在准备下载")
+		}
+		return status("正在检查更新")
+	case d.Phase == DownloadRunning && d.Stage == StageComponents:
+		return status("正在准备运行组件")
+	case d.Phase == DownloadVerifying:
+		return status("检查游戏文件")
+	case d.Phase == DownloadError || d.Phase == DownloadStale:
+		if d.Kind == DownloadUpdate && (d.Located || d.Verified) {
+			if d.offerResultRoot != "" && SameManagedRoot(d.offerResultRoot, m.Managed.Root) && d.OfferVersion != "" && d.OfferVersion != d.Current {
+				return action("重试更新", DownloadRequest)
+			}
+			return Presentation{}, 0, false
+		}
+		return action("查看下载问题", OpenHomeDownloads)
+	default:
+		return Presentation{}, 0, false
+	}
+}

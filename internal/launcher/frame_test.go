@@ -204,7 +204,7 @@ func TestRailHoldsRoundedPageTiles(t *testing.T) {
 		s := NewShell(settled(state.Ready))
 		tt := ui.NewTester(s.View, size[0], size[1])
 		var previous ui.Rect
-		for i, label := range []string{"游戏主页", "抽卡分析", "自动签到"} {
+		for i, label := range []string{"游戏主页", "抽卡分析", "每日签到"} {
 			b, ok := tt.AccessByRole(ui.RoleButton, label)
 			if !ok || b.Bounds.W != tileSize || b.Bounds.H != tileSize || !near(b.Bounds.X, (railWidth-tileSize)/2, .5) {
 				t.Fatalf("%s must be a centered %vx%v tile: %+v", label, tileSize, tileSize, b.Bounds)
@@ -222,21 +222,20 @@ func TestRailHoldsRoundedPageTiles(t *testing.T) {
 	}
 }
 
-func TestRailMarksCurrentPageWithToneIndicator(t *testing.T) {
+func TestRailMarksCurrentPageWithQuietFill(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	defer s.Dispose()
 	tt := ui.NewTester(s.View, 1280, 720)
 	home, _ := tt.Find("游戏主页")
 	other, _ := tt.Find("抽卡分析")
 	img := tt.Image()
-	isTone := func(c color.RGBA) bool {
-		return near(float32(c.R), float32(defaultAccent.R), 16) && near(float32(c.G), float32(defaultAccent.G), 16) && near(float32(c.B), float32(defaultAccent.B), 16)
+	if mark := img.RGBAAt(2, int(home.Y+home.H/2)); mark.R != 14 || mark.G != 15 || mark.B != 18 {
+		t.Fatalf("rail edge must stay clear of indicators, got %+v", mark)
 	}
-	if mark := img.RGBAAt(2, int(home.Y+home.H/2)); !isTone(mark) {
-		t.Fatalf("current page needs a tone indicator at the rail edge, got %+v", mark)
-	}
-	if rest := img.RGBAAt(2, int(other.Y+other.H/2)); isTone(rest) {
-		t.Fatalf("only the current page carries the indicator, got %+v", rest)
+	selected := img.RGBAAt(int(home.X+5), int(home.Y+home.H/2))
+	idle := img.RGBAAt(int(other.X+5), int(other.Y+other.H/2))
+	if selected.R <= idle.R || selected.G <= idle.G || selected.B <= idle.B {
+		t.Fatalf("current page needs a quieter fill than the rest: selected %+v idle %+v", selected, idle)
 	}
 }
 

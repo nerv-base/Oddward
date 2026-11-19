@@ -98,12 +98,12 @@ func TestUpdatePillWalksTheReleaseToARestart(t *testing.T) {
 	if f.count(&f.checks) != 1 {
 		t.Fatalf("start-up must check exactly once, got %d", f.checks)
 	}
-	pill, ok := tt.Find("新版本 v0.2.0")
+	pill, ok := tt.Find("Oddward 新版本 v0.2.0")
 	minimize, _ := tt.Find("最小化")
 	if !ok || pill.X+pill.W > minimize.X || pill.Y != minimize.Y || pill.H != minimize.H {
 		t.Fatalf("the pill must sit left of the caption buttons on their line: %+v vs %+v", pill, minimize)
 	}
-	if err := tt.Click("新版本 v0.2.0"); err != nil {
+	if err := tt.Click("Oddward 新版本 v0.2.0"); err != nil {
 		t.Fatal(err)
 	}
 	if s.Model.Overlay != state.UpdateDetails || !tt.HasText("修复了若干问题") || !tt.HasText("v0.2.0") {
@@ -157,7 +157,7 @@ func TestSkippingAVersionPersistsAndHidesThePill(t *testing.T) {
 	f := &fakeUpdates{offer: UpdateOffer{Version: "0.2.0", Size: 1 << 20, Newer: true}}
 	s, tt := updatableShell(t, f, 1280, 720)
 	waitFor(t, tt, "check", func() bool { return s.Model.Update.Phase == state.SelfUpdateAvailable })
-	_ = tt.Click("新版本 v0.2.0")
+	_ = tt.Click("Oddward 新版本 v0.2.0")
 	if err := tt.Click("跳过此版本"); err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestSkippingAVersionPersistsAndHidesThePill(t *testing.T) {
 	if f.skipped[0] != "0.2.0" || s.Model.Overlay != state.NoOverlay {
 		t.Fatalf("skip: %v overlay %v", f.skipped, s.Model.Overlay)
 	}
-	if _, ok := tt.Find("新版本 v0.2.0"); ok {
+	if _, ok := tt.Find("Oddward 新版本 v0.2.0"); ok {
 		t.Fatal("a skipped version must not keep nagging")
 	}
 }
@@ -226,7 +226,7 @@ func TestNetworkPanelEditsAFormAndSavesOnce(t *testing.T) {
 	f := &fakeNetwork{}
 	s.NetworkBackend = f
 	tt := ui.NewTester(s.View, 1024, 631)
-	if clickFailed(tt, "启动器设置") || clickFailed(tt, "网络") {
+	if clickFailed(tt, "启动器设置") || clickFailed(tt, "下载与网络") {
 		t.Fatal("network settings unreachable")
 	}
 	if s.Model.Page != state.LauncherSettings || s.Model.Overlay != state.NoOverlay || s.Model.SettingsSection != state.SettingsNetwork || !tt.HasText("跟随系统") {
@@ -239,7 +239,7 @@ func TestNetworkPanelEditsAFormAndSavesOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	tt.Type("socks5://127.0.0.1:1080")
-	if clickFailed(tt, "关于") || clickFailed(tt, "网络") || s.NetworkForm.ProxyURL != "socks5://127.0.0.1:1080" {
+	if clickFailed(tt, "关于") || clickFailed(tt, "下载与网络") || s.NetworkForm.ProxyURL != "socks5://127.0.0.1:1080" {
 		t.Fatal("switching settings sections must preserve unsaved network edits")
 	}
 	if err := tt.Click("GitHub 加速"); err != nil {
@@ -294,7 +294,7 @@ func TestSettingsStillFitWithTheVersionRowAtTheMinimumWindow(t *testing.T) {
 	tt.Advance(time.Second)
 	tt.Frame()
 	panel, _ := tt.AccessByRole(ui.RoleGroup, "启动器设置内容")
-	for _, label := range []string{"检查更新", "常规", "网络", "关于"} {
+	for _, label := range []string{"检查更新", "常规", "外观", "下载与网络", "文件", "关于"} {
 		r, ok := tt.Find(label)
 		if !ok || r.Y+r.H > panel.Bounds.Y+panel.Bounds.H-20 {
 			t.Fatalf("%s clipped: %+v in %+v", label, r, panel.Bounds)

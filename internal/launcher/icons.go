@@ -27,6 +27,8 @@ var launcherIcons = map[string]*ui.SVG{
 	"\uE895": lineIcon(`<circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/>`),
 	"\uE73E": lineIcon(`<path d="m5 12 4.5 4.5L19 7"/>`),
 	"\uE76C": lineIcon(`<path d="m9 5 7 7-7 7"/>`),
+	"\uE70D": lineIcon(`<path d="m6 9 6 6 6-6"/>`),
+	"\uE70E": lineIcon(`<path d="m6 15 6-6 6 6"/>`),
 	"\uE700": lineIcon(`<path d="M5 7h14M5 12h14M5 17h14"/>`),
 	"\uE72B": lineIcon(`<path d="m15 5-7 7 7 7"/>`),
 	"\uE77B": lineIcon(`<circle cx="12" cy="8" r="4"/><path d="M4 21c1.2-4 4.3-6 8-6s6.8 2 8 6"/>`),

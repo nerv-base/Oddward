@@ -62,7 +62,7 @@ func TestNativeFeatureNavigationKeepsPagesHonest(t *testing.T) {
 		for _, item := range []struct {
 			label string
 			page  state.Page
-		}{{"抽卡分析", state.WishAnalysis}, {"自动签到", state.CheckIn}} {
+		}{{"抽卡分析", state.WishAnalysis}, {"每日签到", state.CheckIn}} {
 			if clickFailed(tt, item.label) || s.Model.Page != item.page {
 				t.Fatalf("missing functional navigation %s", item.label)
 			}
@@ -124,7 +124,7 @@ func TestNativeSpineCellsKeepAccessibleTargets(t *testing.T) {
 		t.Cleanup(s.Dispose)
 		tt := ui.NewTester(s.View, size[0], size[1])
 
-		for _, label := range []string{"游戏主页", "抽卡分析", "自动签到", "启动器设置"} {
+		for _, label := range []string{"游戏主页", "抽卡分析", "每日签到", "启动器设置"} {
 			a, ok := tt.AccessByRole(ui.RoleButton, label)
 			if !ok || a.Bounds.X != (railWidth-tileSize)/2 || a.Bounds.W != tileSize || a.Bounds.H != tileSize || !a.Focusable {
 				t.Fatalf("rail must retain a centered tile target: %s %+v", label, a)
@@ -145,7 +145,7 @@ func TestNativeSpineCellsKeepAccessibleTargets(t *testing.T) {
 		for _, tc := range []struct {
 			label string
 			page  state.Page
-		}{{"抽卡分析", state.WishAnalysis}, {"自动签到", state.CheckIn}, {"游戏主页", state.Home}} {
+		}{{"抽卡分析", state.WishAnalysis}, {"每日签到", state.CheckIn}, {"游戏主页", state.Home}} {
 			if clickFailed(tt, tc.label) {
 				t.Fatalf("navigation %s inaccessible", tc.label)
 			}
@@ -157,7 +157,7 @@ func TestNativeSpineCellsKeepAccessibleTargets(t *testing.T) {
 	}
 }
 
-func TestNativeSpineIsFullHeightAndMarksSelectionWithAccentBar(t *testing.T) {
+func TestNativeSpineIsFullHeightAndMarksSelectionWithQuietFill(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	t.Cleanup(s.Dispose)
 	tt := ui.NewTester(func(c *ui.Context) {
@@ -174,15 +174,23 @@ func TestNativeSpineIsFullHeightAndMarksSelectionWithAccentBar(t *testing.T) {
 	for _, tc := range []struct {
 		label string
 		page  state.Page
-	}{{"游戏主页", state.Home}, {"抽卡分析", state.WishAnalysis}, {"自动签到", state.CheckIn}} {
+	}{{"游戏主页", state.Home}, {"抽卡分析", state.WishAnalysis}, {"每日签到", state.CheckIn}} {
 		s.Model.Page = tc.page
 		tt.Frame()
 		tt.Advance(time.Second)
 		tt.Frame()
 		r, _ := tt.Find(tc.label)
-		mark := tt.Image().RGBAAt(2, int(r.Y+r.H/2))
-		if mark.R < 200 || mark.G < 180 || mark.B > 140 {
-			t.Fatalf("selected navigation %s needs the travelling accent bar, got %+v", tc.label, mark)
+		if mark := tt.Image().RGBAAt(2, int(r.Y+r.H/2)); mark.R != 14 || mark.G != 15 || mark.B != 18 {
+			t.Fatalf("selected navigation %s must not draw a bar, got %+v", tc.label, mark)
+		}
+		other, _ := tt.Find("抽卡分析")
+		if tc.page == state.WishAnalysis {
+			other, _ = tt.Find("游戏主页")
+		}
+		selected := tt.Image().RGBAAt(int(r.X+5), int(r.Y+r.H/2))
+		idle := tt.Image().RGBAAt(int(other.X+5), int(other.Y+other.H/2))
+		if selected.R <= idle.R || selected.G <= idle.G || selected.B <= idle.B {
+			t.Fatalf("selected navigation %s needs the quiet fill: selected %+v idle %+v", tc.label, selected, idle)
 		}
 	}
 }
@@ -191,7 +199,7 @@ func TestNativeColdWhiteSwitchRetainsHitAreaAndSemantics(t *testing.T) {
 	s := NewShell(settled(state.Ready))
 	t.Cleanup(s.Dispose)
 	tt := ui.NewTester(s.View, 1280, 720)
-	if clickFailed(tt, "启动器设置") {
+	if clickFailed(tt, "启动器设置") || clickFailed(tt, "外观") {
 		t.Fatal("settings unavailable")
 	}
 	sw, ok := tt.AccessByRole(ui.RoleSwitch, "减少动态效果")

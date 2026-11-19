@@ -30,7 +30,7 @@ func TestDownloadOfferPollWaitsMinimumIntervalAndPreservesTask(t *testing.T) {
 		}
 	}
 	s.GameDownloads = downloadBackendFunc(func(_ context.Context, r DownloadRequest, report func(state.Event)) state.Event {
-		report(state.Event{Kind: state.DownloadSettingsLoaded, DownloadSettings: state.DownloadPreferences{FilesInFlight: 8}})
+		report(state.Event{Kind: state.DownloadSettingsLoaded, DownloadSettings: state.DownloadPreferences{RateLimitKiB: 512}})
 		report(state.Event{Kind: state.DownloadPlanned, Path: r.Root, Message: "unexpected-task"})
 		calls <- r
 		return state.Event{Kind: state.DownloadOfferPolled, Path: r.Root, Message: "2.0.0", Body: "3.0.0", Enabled: true}

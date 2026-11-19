@@ -34,13 +34,9 @@ func (b *GameDownloadBackend) collectDownloadCache(ctx context.Context, p *downl
 			protected = append(protected, file.Object)
 		}
 	}
-	prefs, err := b.preferences(ctx)
-	if err != nil {
-		return
-	}
 	options := gamedl.GCOptions{
 		WorkRoot: downloadWork(p.root), StateRoot: b.taskRoot(p.key), Lease: lease,
-		Protected: protected, MaxBlobBytes: int64(prefs.CacheLimitGiB) << 30, MaxAge: 14 * 24 * time.Hour,
+		Protected: protected, MaxBlobBytes: 0, MaxAge: 14 * 24 * time.Hour,
 	}
 	_, _ = gamedl.Collect(ctx, options)
 	if p.externalCache != "" {

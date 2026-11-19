@@ -6,12 +6,12 @@ import "testing"
 
 func TestDownloadSettingsPersistOnlyAfterSuccessfulTokenAck(t *testing.T) {
 	m := downloadModel()
-	old := DownloadPreferences{FilesInFlight: 4, ConnectionsPerFile: 4, AutoResume: true, PatchApply: true}
+	old := DownloadPreferences{RateLimitKiB: 64}
 	m, _ = Reduce(m, Event{Kind: DownloadSettingsLoaded, DownloadSettings: old})
 	if m.Download.Settings != old {
 		t.Fatal("persisted preferences not loaded")
 	}
-	candidate := DownloadPreferences{FilesInFlight: 8, ConnectionsPerFile: 16, RateLimitKiB: 512, CacheLimitGiB: 40}
+	candidate := DownloadPreferences{RateLimitKiB: 512}
 	m, fx := Reduce(m, Event{Kind: DownloadSettingsApply, DownloadSettings: candidate})
 	if m.Download.Settings != old || m.Download.PendingSettings != candidate || !m.Download.SettingsSaving || len(fx) != 1 || fx[0].Kind != EffectSaveDownloads || fx[0].Token != m.Download.SettingsRequest {
 		t.Fatalf("candidate changed active settings before save: %+v %+v", m.Download, fx)
@@ -32,16 +32,11 @@ func TestDownloadSettingsPersistOnlyAfterSuccessfulTokenAck(t *testing.T) {
 }
 func TestDownloadSettingsRejectInvalidCandidateWithoutEffect(t *testing.T) {
 	for _, candidate := range []DownloadPreferences{
-		{FilesInFlight: 0, ConnectionsPerFile: 4},
-		{FilesInFlight: 9, ConnectionsPerFile: 4},
-		{FilesInFlight: 4, ConnectionsPerFile: 0},
-		{FilesInFlight: 4, ConnectionsPerFile: 17},
-		{FilesInFlight: 4, ConnectionsPerFile: 4, RateLimitKiB: -1},
-		{FilesInFlight: 4, ConnectionsPerFile: 4, RateLimitKiB: 1048577},
-		{FilesInFlight: 4, ConnectionsPerFile: 4, CacheLimitGiB: -1},
+		{RateLimitKiB: -1},
+		{RateLimitKiB: 1048577},
 	} {
 		m := downloadModel()
-		m.Download.Settings = DownloadPreferences{FilesInFlight: 4, ConnectionsPerFile: 4}
+		m.Download.Settings = DownloadPreferences{RateLimitKiB: 64}
 		n, fx := Reduce(m, Event{Kind: DownloadSettingsApply, DownloadSettings: candidate})
 		if n.Download.Settings != m.Download.Settings || n.Download.SettingsError == "" || len(fx) != 0 {
 			t.Fatalf("invalid settings admitted: %+v => %+v %+v", candidate, n.Download, fx)

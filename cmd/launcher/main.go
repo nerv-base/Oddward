@@ -101,9 +101,40 @@ func main() {
 			prefs = launchsettings.DefaultDownloads()
 		}
 		s.Model, _ = state.Reduce(s.Model, state.Event{Kind: state.DownloadSettingsLoaded, DownloadSettings: state.DownloadPreferences{
-			FilesInFlight: prefs.FilesInFlight, ConnectionsPerFile: prefs.ConnectionsPerFile, RateLimitKiB: prefs.RateLimitKiB,
-			CacheLimitGiB: prefs.CacheLimitGiB, AutoResume: prefs.AutoResume, PatchApply: prefs.PatchApply,
+			RateLimitKiB: prefs.RateLimitKiB,
 		}})
+		s.Model, _ = state.Reduce(s.Model, state.Event{Kind: state.UIPreferencesLoaded, CloseToTray: saved.UI.CloseToTray, AccentFollow: saved.UI.AccentFollow, CheckUpdates: saved.UI.CheckUpdates})
+		s.DataDir = filepath.Dir(settingsPath)
+		s.SaveUIChoices = func(closeToTray, accentFollow, checkUpdates bool) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := store.Update(ctx, func(st *launchsettings.Settings) {
+				st.UI = launchsettings.UI{CloseToTray: closeToTray, AccentFollow: accentFollow, CheckUpdates: checkUpdates}
+			}); err != nil {
+				log.Printf("save launcher window choices: %v", err)
+			}
+		}
+		// The home account row lists the same saved accounts the login window
+		// offers; choosing one only changes which account the next login
+		// proposes.
+		s.HomeAccounts = func(ctx context.Context, _ uint64) ([]state.SavedAccount, string, error) {
+			list, _, err := accountStore.List()
+			if err != nil {
+				return nil, "", err
+			}
+			out := make([]state.SavedAccount, 0, len(list))
+			for _, account := range list {
+				out = append(out, state.SavedAccount{ID: account.ID, Label: account.Label})
+			}
+			last, err := accountStore.Last()
+			if err != nil {
+				return out, "", err
+			}
+			return out, last, nil
+		}
+		s.HomeAccountUse = func(_ context.Context, id string) error {
+			return accountStore.SetLast(id)
+		}
 		s.ManagedBackend = system.NativeManagedBackend{
 			Downloads:       downloads,
 			LoginUI:         resolveLoginUI(executable, *loginUI),
@@ -243,9 +274,26 @@ func main() {
 		// Intentionally no Maximize/SetFullScreen callback: direct native calls can
 		// bypass the fixed window's style flags even when the caption is hidden.
 		s.CloseWindow = w.Close
+		s.HideWindow = w.Hide
+		s.OpenFolder = func(path string) {
+			if path == "" {
+				return
+			}
+			go func() {
+				if err := mygo.Shell.OpenPath(path); err != nil {
+					log.Printf("open folder %q: %v", path, err)
+				}
+			}()
+		}
+		installTray(w, s)
 		w.Invalidate()
 		w.OnClose(func(e *mygo.CloseEvent) {
 			if s.Model.Closed {
+				return
+			}
+			if s.Model.CloseToTray {
+				e.PreventDefault()
+				w.Hide()
 				return
 			}
 			previous := s.CloseWindow

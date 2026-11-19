@@ -146,7 +146,7 @@ func (b *GameDownloadBackend) runDownload(ctx context.Context, req launcher.Down
 	if p.kind == state.DownloadPreload {
 		start, progress = state.PreloadStarted, state.PreloadProgress
 		updateLimits = func(game bool) error {
-			files, connections := prefs.FilesInFlight, prefs.ConnectionsPerFile
+			files, connections := defaultFilesInFlight, defaultConnectionsPerFile
 			if game {
 				files, connections = min(files, 2), min(connections, 2)
 			}
@@ -386,6 +386,11 @@ func (b *GameDownloadBackend) verifyWithEngine(ctx context.Context, p *downloadP
 	}
 	if hashDuration >= 20*time.Second {
 		_ = b.recordDownloadPerf(ctx, p.root, PerfSample{HashReadBytes: hashed, HashDuration: hashDuration})
+	}
+	if p.kind == state.DownloadInstall {
+		if err := b.stageRuntimeComponents(ctx, p.root, report); err != nil {
+			return event, err
+		}
 	}
 	event.Kind = state.DownloadVerified
 	return event, nil

@@ -452,7 +452,7 @@ func TestWishEmptyArchiveExplainsImportAndHasAccessibleActions(t *testing.T) {
 	s := NewShell(m)
 	defer s.Dispose()
 	tt := ui.NewTester(s.View, 1280, 720)
-	if !tt.HasText("导入 Oddward 或 NTEUID 格式的 JSON") {
+	if !tt.HasText("NTEUID") || !tt.HasText("最近约 6 个月") {
 		t.Fatal("empty wish page must explain supported local JSON formats")
 	}
 	if tt.HasText("MOCK · 仅内存演示") || tt.HasText("载入示例记录") {
@@ -461,13 +461,13 @@ func TestWishEmptyArchiveExplainsImportAndHasAccessibleActions(t *testing.T) {
 	if tt.HasText("不推算当前已垫") {
 		t.Fatal("wish analysis footer must not carry a pity disclaimer")
 	}
-	for _, name := range []string{"角色档案", "导入", "导出"} {
-		role := ui.RoleButton
-		if name != "导入" {
-			role = ui.RoleMenuButton
-		}
-		if _, ok := tt.AccessByRole(role, name); !ok {
-			t.Fatalf("missing accessible %s action; nodes=%+v", name, tt.AccessAll())
-		}
+	if _, ok := tt.AccessByRole(ui.RoleMenuButton, "角色档案"); !ok {
+		t.Fatalf("missing archive menu; nodes=%+v", tt.AccessAll())
+	}
+	if _, ok := tt.AccessByRole(ui.RoleButton, "导入抽卡记录"); !ok {
+		t.Fatalf("missing empty-state import; nodes=%+v", tt.AccessAll())
+	}
+	if _, ok := tt.AccessByRole(ui.RoleMenuButton, "导出"); ok {
+		t.Fatal("empty archive must not offer export")
 	}
 }
