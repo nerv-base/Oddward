@@ -111,6 +111,15 @@ type CheckInDetails struct {
 	Vehicle    CheckInCollection
 }
 
+// CheckInAvatar is the role's current in-game portrait, fetched from the
+// official community CDN. The bytes are kept behind a pointer on CheckInRole so
+// Model stays comparable; an empty PNG means the portrait could not be loaded
+// and the page falls back to a monogram.
+type CheckInAvatar struct {
+	ID  string
+	PNG []byte
+}
+
 // CheckInRole is the role summary the status panel shows. Values come from
 // the server; a zero cap means the server did not report that figure.
 type CheckInRole struct {
@@ -122,6 +131,8 @@ type CheckInRole struct {
 	LoginDays, CharCount          int
 	Achievement, AchievementTotal int
 	FetchedAt                     time.Time
+	// Avatar is the current portrait reported by the role-home endpoint.
+	Avatar *CheckInAvatar
 	// Details carries the richer role-home payload used by the game-data page.
 	Details *CheckInDetails
 }

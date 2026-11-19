@@ -64,6 +64,7 @@ type Config struct {
 type Client struct {
 	http            *http.Client
 	base, laohuBase string
+	avatarBase      string
 	now             func() time.Time
 	random          io.Reader
 	randomMu        sync.Mutex
@@ -110,7 +111,14 @@ func NewClient(cfg Config) (*Client, error) {
 	if cfg.Rand == nil {
 		cfg.Rand = rand.Reader
 	}
-	return &Client{http: &h, base: strings.TrimRight(cfg.BaseURL, "/"), laohuBase: strings.TrimRight(cfg.LaohuBaseURL, "/"), now: cfg.Now, random: cfg.Rand}, nil
+	return &Client{
+		http:       &h,
+		base:       strings.TrimRight(cfg.BaseURL, "/"),
+		laohuBase:  strings.TrimRight(cfg.LaohuBaseURL, "/"),
+		avatarBase: defaultAvatarBase,
+		now:        cfg.Now,
+		random:     cfg.Rand,
+	}, nil
 }
 func validBase(raw string) bool {
 	u, e := url.Parse(raw)

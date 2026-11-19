@@ -411,7 +411,7 @@ func (s *Shell) checkInStatusCard(c *ui.Context, data checkInPageData) {
 			s.checkInMeterStat(c, "周本剩余", role.WeekRemain, 3, "次", statWidth, tone)
 		})
 		ui.Box(c).FillWidth().Height(checkinHairlineWidth).Background(hairline)
-		secondary := fmt.Sprintf("角色等级 %d · 世界等级 %d · 登录 %d 天 · 角色 %d", role.Level, role.WorldLevel, role.LoginDays, role.CharCount)
+		secondary := fmt.Sprintf("角色等级 %d · 鉴别等级 %d · 登录 %d 天 · 角色 %d", role.Level, role.WorldLevel, role.LoginDays, role.CharCount)
 		if role.Server != "" {
 			secondary += " · " + role.Server
 		}

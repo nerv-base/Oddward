@@ -219,7 +219,7 @@ func (s *Shell) gameDataRoleCard(c *ui.Context, data gameDataPageData, tone ui.C
 			s.checkInMeterStat(c, "周本剩余", role.WeekRemain, 3, "次", statWidth, tone)
 		})
 		ui.Box(c).FillWidth().Height(checkinHairlineWidth).Background(hairline)
-		secondary := fmt.Sprintf("角色等级 %d · 世界等级 %d · 登录 %d 天", role.Level, role.WorldLevel, role.LoginDays)
+		secondary := fmt.Sprintf("角色等级 %d · 鉴别等级 %d · 登录 %d 天", role.Level, role.WorldLevel, role.LoginDays)
 		if role.CharCount > 0 {
 			secondary += fmt.Sprintf(" · 角色 %d", role.CharCount)
 		}

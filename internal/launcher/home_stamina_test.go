@@ -40,7 +40,7 @@ func TestHomeStaminaCardOnlyWithLinkedRole(t *testing.T) {
 		card.X+card.W > 1280-dockRight {
 		t.Fatalf("home stamina card leaves its safe corner: %+v", card)
 	}
-	for _, text := range []string{"都市活力", "今日活跃度", "周本剩余", "角色数量"} {
+	for _, text := range []string{"都市活力", "今日活跃度", "周本剩余", "轨外之境", "鉴别等级"} {
 		if !tt.HasText(text) {
 			t.Fatalf("home stamina card is missing %q", text)
 		}

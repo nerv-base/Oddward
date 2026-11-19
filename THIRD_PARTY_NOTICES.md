@@ -47,6 +47,14 @@ The Public Suffix List's exact source data is available at
 The generated representation and generation program are in
 <https://github.com/golang/net/tree/v0.59.0/publicsuffix>.
 
+## Official game artwork
+
+`internal/launcher/assets/stamina.webp` and
+`internal/launcher/assets/city-stamina.webp` are the in-game resource icons
+for 本性像素 and 都市活力. They remain the property of their rights holder
+and are included only to label those game resources; they are not covered by
+Oddward's GPL-3.0-or-later license.
+
 ## Self-contained login window
 
 The original Oddward login helper uses .NET SDK `10.0.303` to publish the

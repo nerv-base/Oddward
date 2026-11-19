@@ -177,6 +177,9 @@ func (s *Shell) syncCheckIn(c *ui.Context) {
 				s.checkinAutoBusy = false
 			}
 			s.Dispatch(event)
+			if event.Kind == state.CheckInStatusLoaded {
+				s.setRoleAvatar(event.Check.Role.Avatar)
+			}
 			continue
 		default:
 		}

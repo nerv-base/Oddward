@@ -432,6 +432,15 @@ func (b *TajiduoBackend) RoleStatus(ctx context.Context) (state.CheckInRole, err
 	if err != nil {
 		return state.CheckInRole{}, checkInFailure(err)
 	}
+	var avatar *state.CheckInAvatar
+	if home.Avatar != "" {
+		avatar = &state.CheckInAvatar{ID: home.Avatar}
+		// The portrait is decorative and public; a failed download must not
+		// turn the role snapshot into an error.
+		if png, err := b.client.Avatar(ctx, home.Avatar); err == nil {
+			avatar.PNG = png
+		}
+	}
 	return state.CheckInRole{
 		RoleID: home.RoleID, Name: home.RoleName, Server: home.ServerName,
 		Level: home.Level, WorldLevel: home.WorldLevel,
@@ -441,6 +450,7 @@ func (b *TajiduoBackend) RoleStatus(ctx context.Context) (state.CheckInRole, err
 		LoginDays: home.LoginDays, CharCount: home.CharCount,
 		Achievement: home.Achievement, AchievementTotal: home.AchievementTotal,
 		FetchedAt: home.FetchedAt,
+		Avatar:    avatar,
 		Details:   checkInDetails(home),
 	}, nil
 }

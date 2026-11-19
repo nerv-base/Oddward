@@ -73,14 +73,19 @@ func (s *Shell) homeStaminaHeader(c *ui.Context, role state.CheckInRole) {
 		initial = string(runes[0])
 	}
 	ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(9).Children(func() {
-		ui.Box(c).Size(34, 34).Radius(17).Background(s.tone()).Justify(ui.Center).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, initial).FontSize(15).FontWeight(600).TextColor(glassInk).SingleLine()
-		})
+		if s.RoleAvatar != nil {
+			ui.Image(c, s.RoleAvatar).Size(40, 40).Radius(20).Fit(ui.Cover).PassThrough().
+				Label("角色头像")
+		} else {
+			ui.Box(c).Size(40, 40).Radius(20).Background(s.tone()).Justify(ui.Center).AlignItems(ui.Center).Children(func() {
+				ui.Text(c, initial).FontSize(16).FontWeight(600).TextColor(glassInk).SingleLine()
+			})
+		}
 		ui.Column(c).Grow(1).Gap(1).Children(func() {
 			ui.Text(c, name).FontSize(14).FontWeight(600).TextColor(paper).SingleLine().Shrink(1)
 			meta := "已保存的游戏账号"
 			if role.Level > 0 && role.WorldLevel > 0 {
-				meta = fmt.Sprintf("Lv.%d · 世界等级 %d", role.Level, role.WorldLevel)
+				meta = fmt.Sprintf("Lv.%d · 鉴别等级 %d", role.Level, role.WorldLevel)
 			} else if role.Level > 0 {
 				meta = fmt.Sprintf("Lv.%d", role.Level)
 			}
@@ -89,9 +94,23 @@ func (s *Shell) homeStaminaHeader(c *ui.Context, role state.CheckInRole) {
 	})
 }
 
+// setRoleAvatar decodes the portrait bytes delivered with a status snapshot.
+// It runs on the UI thread, once per read, never per frame.
+func (s *Shell) setRoleAvatar(avatar *state.CheckInAvatar) {
+	if avatar == nil || len(avatar.PNG) == 0 {
+		s.RoleAvatar = nil
+		return
+	}
+	s.RoleAvatar = decodeBundledIcon(avatar.PNG)
+}
+
 func (s *Shell) homeStaminaMain(c *ui.Context, f state.StaminaForecast, status string) {
 	ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(8).Children(func() {
-		ui.Icon(c, launcherIcons["\uE9D8"]).FontSize(22).TextColor(s.tone())
+		if s.StaminaIcon != nil {
+			ui.Image(c, s.StaminaIcon).Size(30, 30).Fit(ui.Contain).PassThrough()
+		} else {
+			ui.Icon(c, launcherIcons["\uE9D8"]).FontSize(28).TextColor(s.tone())
+		}
 		ui.Column(c).Gap(1).Children(func() {
 			ui.Text(c, "本性像素").FontSize(11).TextColor(muted).SingleLine()
 			ui.Row(c).AlignItems(ui.Center).Gap(3).Children(func() {
@@ -116,7 +135,11 @@ func (s *Shell) homeStaminaCity(c *ui.Context, role state.CheckInRole) {
 		city = fmt.Sprintf("%d / %d", role.CityStamina, role.CityStaminaMax)
 	}
 	ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(8).Children(func() {
-		ui.Icon(c, launcherIcons["\uE9D7"]).FontSize(18).TextColor(muted)
+		if s.CityStaminaIcon != nil {
+			ui.Image(c, s.CityStaminaIcon).Size(22, 22).Fit(ui.Contain).PassThrough()
+		} else {
+			ui.Icon(c, launcherIcons["\uE9D7"]).FontSize(22).TextColor(muted)
+		}
 		ui.Column(c).Grow(1).Gap(1).Children(func() {
 			ui.Text(c, "都市活力").FontSize(10).TextColor(muted).SingleLine()
 			ui.Text(c, city).FontSize(12).TextColor(paper).SingleLine()
@@ -126,23 +149,23 @@ func (s *Shell) homeStaminaCity(c *ui.Context, role state.CheckInRole) {
 }
 
 func (s *Shell) homeStaminaStats(c *ui.Context, role state.CheckInRole) {
-	characters := "—"
-	if role.CharCount > 0 {
-		characters = fmt.Sprintf("%d", role.CharCount)
-	}
 	stats := []struct {
 		label string
 		value string
+		tip   string
 	}{
-		{"今日活跃度", fmt.Sprintf("%d / 100", role.DayValue)},
-		{"周本剩余", fmt.Sprintf("%d / 3", role.WeekRemain)},
-		{"角色数量", characters},
+		{"今日活跃度", fmt.Sprintf("%d / 100", role.DayValue), ""},
+		{"周本剩余", fmt.Sprintf("%d / 3", role.WeekRemain), ""},
+		{"轨外之境", "—", "塔吉多未提供轨外之境进度"},
 	}
 	ui.Row(c).FillWidth().Gap(8).Children(func() {
 		for _, stat := range stats {
 			ui.Column(c).Grow(1).Shrink(1).Gap(1).Children(func() {
 				ui.Text(c, stat.label).FontSize(9).TextColor(muted).SingleLine()
-				ui.Text(c, stat.value).FontSize(11).TextColor(paper).SingleLine()
+				value := ui.Text(c, stat.value).FontSize(11).TextColor(paper).SingleLine()
+				if stat.tip != "" {
+					value.Tooltip(stat.tip)
+				}
 			})
 		}
 	})

@@ -108,6 +108,12 @@ type Shell struct {
 	Logo               *ui.Bitmap
 	News               *ui.Bitmap
 	Poster             *ui.Bitmap
+	// StaminaIcon and CityStaminaIcon are the embedded official resource
+	// icons used by the home stamina card.
+	StaminaIcon     *ui.Bitmap
+	CityStaminaIcon *ui.Bitmap
+	// RoleAvatar is decoded from the role-home portrait once per status read.
+	RoleAvatar *ui.Bitmap
 	// Accent is the launch tone derived from the poster (PosterAccent); the
 	// zero value keeps the default tone.
 	Accent          ui.Color
@@ -209,6 +215,8 @@ func NewShell(m state.Model) *Shell {
 		checkinOut: make(chan state.Event, 8),
 		accountOut: make(chan state.Event, 1),
 	}
+	s.StaminaIcon = decodeBundledIcon(staminaIconData)
+	s.CityStaminaIcon = decodeBundledIcon(cityStaminaIconData)
 	s.NetworkForm = networkForm(m.Network)
 	if state.Active(m.Flow) {
 		s.apply([]state.Effect{{Kind: state.Simulate, Flow: m.Flow, Token: m.Token}})
