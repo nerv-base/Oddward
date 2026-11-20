@@ -29,7 +29,23 @@ closure with the `mygo_noinspector` release tag.
 | `golang.org/x/net` `v0.59.0` | BSD-3-Clause with additional patent grant | `golang-x-net/LICENSE.txt`, `golang-x-net/PATENTS.txt` |
 | `golang.org/x/sys` `v0.49.0` | BSD-3-Clause with additional patent grant | `golang-x-sys/LICENSE.txt`, `golang-x-sys/PATENTS.txt` |
 | `golang.org/x/text` `v0.43.0` | BSD-3-Clause with additional patent grant | `golang-x-text/LICENSE.txt`, `golang-x-text/PATENTS.txt` |
+| `modernc.org/sqlite` `v1.62.0` (pure-Go SQLite driver; no SQLite DLL or C toolchain is required) | BSD-3-Clause | `modernc-sqlite/LICENSE.txt`, `modernc-sqlite/THIRD-PARTY.md` |
+| SQLite amalgamation generated into `modernc.org/sqlite` `v1.62.0` (SQLite 3.54.1) | Public domain | `modernc-sqlite/SQLITE.txt` |
+| `modernc.org/libc` `v1.80.1` | BSD-3-Clause | `modernc-libc/LICENSE.txt`, `modernc-libc/THIRD-PARTY.md` |
+| `modernc.org/mathutil` `v1.7.1` | BSD-3-Clause | `modernc-mathutil/LICENSE.txt` |
+| `modernc.org/memory` `v1.12.1` | BSD-3-Clause | `modernc-memory/LICENSE.txt`, `modernc-memory/GO.txt`, `modernc-memory/MMAP-GO.txt` |
+| `github.com/dustin/go-humanize` `v1.1.0` | MIT | `go-humanize/LICENSE.txt` |
+| `github.com/google/uuid` `v1.6.0` | BSD-3-Clause | `google-uuid/LICENSE.txt` |
+| `github.com/mattn/go-isatty` `v0.0.24` | MIT | `go-isatty/LICENSE.txt` |
+| `github.com/ncruces/go-strftime` `v1.1.0` | MIT | `go-strftime/LICENSE.txt` |
+| `github.com/remyoudompheng/bigfft` `v0.0.0-20230129092748-24d4a6f8daec` | BSD-3-Clause | `bigfft/LICENSE.txt` |
 | Public Suffix List data embedded by `golang.org/x/net/publicsuffix`, commit `d6c92f1bbb7433e5db7b8405c25d4035fb8ff376` | MPL-2.0 | `publicsuffix/LICENSE.txt` |
+
+The SQLite driver is linked statically: the amalgamation is generated into Go
+by `modernc.org/sqlite`, so no `sqlite3.dll` is installed or loaded at runtime.
+`modernc.org/libc` is the C-library shim that driver needs; on Windows it also
+uses the bundled `go-strftime` implementation of `strftime`. Its third-party
+notice covers the Go-derived portions of those packages.
 
 MyGo's shader compiler and intermediate representation retain the source
 notices `Copyright 2020 The Ebiten Authors`, `Copyright 2022 The Ebiten Authors`

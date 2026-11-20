@@ -111,6 +111,132 @@
       "sha256Lf": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
     },
     {
+      "file": "modernc-sqlite/LICENSE.txt",
+      "component": "modernc.org/sqlite",
+      "version": "v1.62.0",
+      "source": "https://gitlab.com/cznic/sqlite/-/raw/v1.62.0/LICENSE",
+      "upstreamPath": "LICENSE",
+      "sha256": "c6fe05491a60ae13bcd223088d2705e36dede24e5587226231d2459ada5c4822",
+      "sha256Lf": "c6fe05491a60ae13bcd223088d2705e36dede24e5587226231d2459ada5c4822"
+    },
+    {
+      "file": "modernc-sqlite/SQLITE.txt",
+      "component": "SQLite amalgamation embedded in modernc.org/sqlite",
+      "version": "3.54.1",
+      "source": "https://gitlab.com/cznic/sqlite/-/raw/v1.62.0/LICENSE-SQLITE",
+      "upstreamPath": "LICENSE-SQLITE",
+      "sha256": "8438c9c89b849131ead81d5435cb97fcf052df5b0b286dda8a2d4c29e6cb3fd0",
+      "sha256Lf": "8438c9c89b849131ead81d5435cb97fcf052df5b0b286dda8a2d4c29e6cb3fd0"
+    },
+    {
+      "file": "modernc-sqlite/THIRD-PARTY.md",
+      "component": "modernc.org/sqlite",
+      "version": "v1.62.0",
+      "source": "https://gitlab.com/cznic/sqlite/-/raw/v1.62.0/LICENSE-3RD-PARTY.md",
+      "upstreamPath": "LICENSE-3RD-PARTY.md",
+      "sha256": "f4a00ade8f4057ab0ea49097d9c459df8559fcf10ca78da0c950343fb7428d37",
+      "sha256Lf": "f4a00ade8f4057ab0ea49097d9c459df8559fcf10ca78da0c950343fb7428d37"
+    },
+    {
+      "file": "modernc-libc/LICENSE.txt",
+      "component": "modernc.org/libc",
+      "version": "v1.80.1",
+      "source": "https://gitlab.com/cznic/libc/-/raw/v1.80.1/LICENSE",
+      "upstreamPath": "LICENSE",
+      "sha256": "95ff867eb55a56935fa7492406cfa953fb7c13ca73f4c0a86ae05756b4605600",
+      "sha256Lf": "95ff867eb55a56935fa7492406cfa953fb7c13ca73f4c0a86ae05756b4605600"
+    },
+    {
+      "file": "modernc-libc/THIRD-PARTY.md",
+      "component": "modernc.org/libc",
+      "version": "v1.80.1",
+      "source": "https://gitlab.com/cznic/libc/-/raw/v1.80.1/LICENSE-3RD-PARTY.md",
+      "upstreamPath": "LICENSE-3RD-PARTY.md",
+      "sha256": "f597097efe3d97021f89170746bd3a0fb9a8b6fb26b82043ed68a4e0283bee6c",
+      "sha256Lf": "f597097efe3d97021f89170746bd3a0fb9a8b6fb26b82043ed68a4e0283bee6c"
+    },
+    {
+      "file": "modernc-mathutil/LICENSE.txt",
+      "component": "modernc.org/mathutil",
+      "version": "v1.7.1",
+      "source": "https://gitlab.com/cznic/mathutil/-/raw/v1.7.1/LICENSE",
+      "upstreamPath": "LICENSE",
+      "sha256": "bfa9bf72a72ca009fd62a8f84fca3dca67e51d93af96352723646599898b6cf5",
+      "sha256Lf": "bfa9bf72a72ca009fd62a8f84fca3dca67e51d93af96352723646599898b6cf5"
+    },
+    {
+      "file": "modernc-memory/LICENSE.txt",
+      "component": "modernc.org/memory",
+      "version": "v1.12.1",
+      "source": "https://gitlab.com/cznic/memory/-/raw/v1.12.1/LICENSE",
+      "upstreamPath": "LICENSE",
+      "sha256": "59895e669f48f168b6b858358f6005779cdf40a265f7828813061b56af67b496",
+      "sha256Lf": "59895e669f48f168b6b858358f6005779cdf40a265f7828813061b56af67b496"
+    },
+    {
+      "file": "modernc-memory/GO.txt",
+      "component": "modernc.org/memory",
+      "version": "v1.12.1",
+      "source": "https://gitlab.com/cznic/memory/-/raw/v1.12.1/LICENSE-GO",
+      "upstreamPath": "LICENSE-GO",
+      "sha256": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067",
+      "sha256Lf": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067"
+    },
+    {
+      "file": "modernc-memory/MMAP-GO.txt",
+      "component": "modernc.org/memory",
+      "version": "v1.12.1",
+      "source": "https://gitlab.com/cznic/memory/-/raw/v1.12.1/LICENSE-MMAP-GO",
+      "upstreamPath": "LICENSE-MMAP-GO",
+      "sha256": "c2eba69f20d05414538c3a5df7694dde392e065ff70882e1625e90f5d6659fff",
+      "sha256Lf": "c2eba69f20d05414538c3a5df7694dde392e065ff70882e1625e90f5d6659fff"
+    },
+    {
+      "file": "go-humanize/LICENSE.txt",
+      "component": "github.com/dustin/go-humanize",
+      "version": "v1.1.0",
+      "source": "https://raw.githubusercontent.com/dustin/go-humanize/v1.1.0/LICENSE",
+      "upstreamPath": "LICENSE",
+      "sha256": "a973b4498c13eb74baa2a8e5c351426a6826f2fcdd909916dbe53ee2e755fd71",
+      "sha256Lf": "a973b4498c13eb74baa2a8e5c351426a6826f2fcdd909916dbe53ee2e755fd71"
+    },
+    {
+      "file": "google-uuid/LICENSE.txt",
+      "component": "github.com/google/uuid",
+      "version": "v1.6.0",
+      "source": "https://raw.githubusercontent.com/google/uuid/v1.6.0/LICENSE",
+      "upstreamPath": "LICENSE",
+      "sha256": "0a8d61ed3cbfd5312326e8126c31ce9c627a283adc99131b56896d29ada04b2d",
+      "sha256Lf": "0a8d61ed3cbfd5312326e8126c31ce9c627a283adc99131b56896d29ada04b2d"
+    },
+    {
+      "file": "go-isatty/LICENSE.txt",
+      "component": "github.com/mattn/go-isatty",
+      "version": "v0.0.24",
+      "source": "https://raw.githubusercontent.com/mattn/go-isatty/v0.0.24/LICENSE",
+      "upstreamPath": "LICENSE",
+      "sha256": "08eab1118c80885fa1fa6a6dd7303f65a379fcb3733e063d20d1bbc2c76e6fa1",
+      "sha256Lf": "08eab1118c80885fa1fa6a6dd7303f65a379fcb3733e063d20d1bbc2c76e6fa1"
+    },
+    {
+      "file": "go-strftime/LICENSE.txt",
+      "component": "github.com/ncruces/go-strftime",
+      "version": "v1.1.0",
+      "source": "https://raw.githubusercontent.com/ncruces/go-strftime/v1.1.0/LICENSE",
+      "upstreamPath": "LICENSE",
+      "sha256": "38ae43959daf953a393a585b2988672cb65a5a541aca0d0be5e72595a0a16883",
+      "sha256Lf": "38ae43959daf953a393a585b2988672cb65a5a541aca0d0be5e72595a0a16883"
+    },
+    {
+      "file": "bigfft/LICENSE.txt",
+      "component": "github.com/remyoudompheng/bigfft",
+      "version": "v0.0.0-20230129092748-24d4a6f8daec",
+      "source": "https://raw.githubusercontent.com/remyoudompheng/bigfft/24d4a6f8daec/LICENSE",
+      "upstreamPath": "LICENSE",
+      "sha256": "dd26a7abddd02e2d0aba97805b31f248ef7835d9e10da289b22e3b8ab78b324d",
+      "sha256Lf": "dd26a7abddd02e2d0aba97805b31f248ef7835d9e10da289b22e3b8ab78b324d"
+    },
+    {
       "file": "go/LICENSE.txt",
       "component": "Go runtime and standard library",
       "version": "go1.27.3",
