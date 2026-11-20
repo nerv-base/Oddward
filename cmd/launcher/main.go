@@ -117,7 +117,12 @@ func main() {
 	feed := news.NewClient()
 	feed.HTTP.Transport = network
 	announcements := system.NewLauncherNews(db, feed, filepath.Join(dataRoot, "cache", "news"))
-	adoptLegacyRecords(db, store, wishArchives, accountStore, checkInRecords, downloads, announcements, brandingStore)
+	if err := adoptLegacyRecords(db, store, wishArchives, accountStore, checkInRecords, downloads, announcements, brandingStore); err != nil {
+		// User data the previous build wrote could not be adopted. Writing now would
+		// overwrite it, so the launcher exits without touching the files: the stub
+		// falls back to the build that owns them.
+		log.Fatalf("launcher records unavailable: %v", err)
+	}
 	tajiduoClient, err := tajiduo.NewClient(tajiduo.Config{HTTPClient: &http.Client{Transport: network}})
 	if err != nil {
 		log.Fatal("cannot initialize Tajiduo client")
