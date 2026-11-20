@@ -58,7 +58,7 @@ func TestSyntheticGiBBoundedMemory(t *testing.T) {
 		http.ServeContent(w, r, "fixture", zeroTime, io.NewSectionReader(repeatedByte('a'+i), 0, size))
 	}))
 	defer server.Close()
-	e, err := gamedl.New(gamedl.Options{WorkRoot: t.TempDir(), StateRoot: t.TempDir(), Client: server.Client(), Resolve: func(_ context.Context, s gameres.Source) ([]string, error) {
+	e, err := gamedl.New(gamedl.Options{DB: testDB(t), WorkRoot: t.TempDir(), StateRoot: t.TempDir(), Client: server.Client(), Resolve: func(_ context.Context, s gameres.Source) ([]string, error) {
 		for i, obj := range objects {
 			if obj == s.Object {
 				return []string{fmt.Sprintf("%s/%d", server.URL, i)}, nil

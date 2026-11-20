@@ -5,13 +5,12 @@
 package launchsettings_test
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -19,42 +18,42 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func TestReplacementFailureRetainsOldFileAndCleansStage(t *testing.T) {
+func TestMirrorFailureRefusesTheSaveAndCleansStage(t *testing.T) {
 	dir := t.TempDir()
-	file := filepath.Join(dir, "launch.json")
-	store, err := launchsettings.NewStore(file)
-	if err != nil {
+	file := filepath.Join(dir, "launcher-v1.json")
+	store, db := newStoreFor(t, file)
+	previous := launchsettings.Settings{GameRoot: filepath.Join(dir, "old"), RiskVersion: "v1"}
+	if err := store.Save(context.Background(), previous); err != nil {
 		t.Fatal(err)
 	}
-	old := launchsettings.Settings{GameRoot: filepath.Join(dir, "old"), RiskVersion: "v1"}
-	if err := store.Save(context.Background(), old); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(file)
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := readFile(t, file)
 	name, err := windows.UTF16PtrFromString(file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Allow ordinary reads/writes but deny deleting/replacing the old directory
-	// entry. An unsafe in-place write succeeds and corrupts the old contents.
+	// Allow ordinary reads and writes but deny deleting or replacing the directory
+	// entry, so the mirror can only be replaced by writing over it in place.
 	h, err := windows.CreateFile(name, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer windows.CloseHandle(h)
-	if err := store.Save(context.Background(), launchsettings.Settings{}); err == nil {
-		t.Error("Save succeeded despite replacement being denied; likely overwrote in place")
+	want := launchsettings.Settings{GameRoot: filepath.Join(dir, "new"), RiskVersion: "v2"}
+	err = store.Save(context.Background(), want)
+	if err == nil || !strings.Contains(err.Error(), "write settings mirror") {
+		t.Errorf("Save with a blocked mirror = %v; want the mirror write reported", err)
 	}
-	after, err := os.ReadFile(file)
-	if err != nil || !bytes.Equal(before, after) {
-		t.Fatalf("failed replacement changed old bytes: %v", err)
+	// The mirror is written before the rows, so a refused mirror write leaves the
+	// previous choices and the previous file in place instead of accepting a value
+	// that a rolled-back build would then revert.
+	requireSettings(t, previous, mustLoad(t, store))
+	requireFile(t, file, before)
+	if mirrorStale(t, db) {
+		t.Error("a refused mirror write must not report a stale mirror")
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) != 1 {
-		t.Fatalf("failed replacement leaked stage: %v, %v", entries, err)
+		t.Fatalf("failed mirror write leaked a temporary file: %v, %v", entries, err)
 	}
 }
 
@@ -65,55 +64,47 @@ func TestReparseAncestorsAndHardlinkedTargetsAreRejected(t *testing.T) {
 		t.Fatalf("create isolated synthetic junction: %v: %s", err, output)
 	}
 	t.Cleanup(func() { _ = os.Remove(link) })
-	store, err := launchsettings.NewStore(filepath.Join(link, "launch.json"))
-	if err == nil {
-		if _, err := store.Load(context.Background()); err == nil {
-			t.Error("Load followed linked parent")
-		}
-		if err := store.Save(context.Background(), launchsettings.Settings{}); err == nil {
-			t.Error("Save followed linked parent")
-		}
+	store, db := newStoreFor(t, filepath.Join(link, "launcher-v1.json"))
+	if err := store.Save(context.Background(), launchsettings.Settings{}); err == nil {
+		t.Error("Save followed a linked mirror parent")
 	}
+	if _, err := db.RunImport(context.Background(), launchsettings.Domain, launchsettings.ImportVersion, store.ImportLegacy); err == nil {
+		t.Error("the import followed a linked mirror parent")
+	}
+	requireSettings(t, freshProfile(), mustLoad(t, store))
 	entries, err := os.ReadDir(target)
 	if err != nil || len(entries) != 0 {
-		t.Errorf("rejected parent created target data: %v, %v", entries, err)
+		t.Errorf("a rejected mirror parent wrote into its target: %v, %v", entries, err)
 	}
 
-	file := filepath.Join(base, "launch.json")
-	store, err = launchsettings.NewStore(file)
-	if err != nil {
-		t.Fatal(err)
+	// The game root is checked with the same guard, so a junction there is refused
+	// before it can be persisted.
+	rootStore, _ := newStoreFor(t, filepath.Join(base, "settings.json"))
+	if err := rootStore.Save(context.Background(), launchsettings.Settings{GameRoot: link}); err == nil {
+		t.Error("persisted a junction game root")
 	}
-	if err := store.Save(context.Background(), launchsettings.Settings{GameRoot: link}); err == nil {
-		t.Error("persisted junction game root")
-	}
-	// Remove only this known synthetic fixture if a regressed Save created it.
-	if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
+
+	// A hardlinked legacy file may be a system file this build must not replace.
 	original := filepath.Join(base, "original.json")
 	before := []byte(`{"version":1,"gameRoot":"","riskVersion":""}`)
-	if err := os.WriteFile(original, before, 0600); err != nil {
+	writeLegacy(t, original, before)
+	linked := filepath.Join(base, "linked.json")
+	if err := os.Link(original, linked); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Link(original, file); err != nil {
-		t.Fatal(err)
+	linkedStore, linkedDB := newStoreFor(t, linked)
+	if _, err := linkedDB.RunImport(context.Background(), launchsettings.Domain, launchsettings.ImportVersion, linkedStore.ImportLegacy); err == nil {
+		t.Error("the import accepted a hardlinked legacy file")
 	}
-	if _, err := store.Load(context.Background()); err == nil {
-		t.Error("Load accepted linked target")
+	if err := linkedStore.Save(context.Background(), launchsettings.Settings{}); err == nil {
+		t.Error("Save accepted a hardlinked mirror")
 	}
-	if err := store.Save(context.Background(), launchsettings.Settings{}); err == nil {
-		t.Error("Save accepted linked target")
-	}
-	after, err := os.ReadFile(original)
-	if err != nil || !bytes.Equal(before, after) {
-		t.Fatalf("linked original changed: %v", err)
-	}
+	requireFile(t, original, before)
 }
 
 func TestDirectoryReparseRejectedWithLegacyGoMode(t *testing.T) {
-	// Under this supported Go compatibility flag, junctions report ModeDir,
-	// not ModeSymlink or ModeIrregular; Windows reparse attributes still apply.
+	// Under this supported Go compatibility flag, junctions report ModeDir, not
+	// ModeSymlink or ModeIrregular; the Windows reparse attribute still applies.
 	t.Setenv("GODEBUG", "winsymlink=0")
 	base, target := t.TempDir(), t.TempDir()
 	link := filepath.Join(base, "junction")
@@ -121,104 +112,52 @@ func TestDirectoryReparseRejectedWithLegacyGoMode(t *testing.T) {
 		t.Fatalf("create isolated legacy-mode junction: %v: %s", err, output)
 	}
 	t.Cleanup(func() { _ = os.Remove(link) })
-	store, err := launchsettings.NewStore(filepath.Join(link, "launch.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Load(context.Background()); err == nil {
-		t.Error("Load accepted legacy-mode reparse directory")
-	}
+	store, db := newStoreFor(t, filepath.Join(link, "launcher-v1.json"))
 	if err := store.Save(context.Background(), launchsettings.Settings{}); err == nil {
-		t.Error("Save followed legacy-mode reparse directory")
+		t.Error("Save followed a legacy-mode reparse directory")
+	}
+	if _, err := db.RunImport(context.Background(), launchsettings.Domain, launchsettings.ImportVersion, store.ImportLegacy); err == nil {
+		t.Error("the import accepted a legacy-mode reparse directory")
 	}
 	entries, err := os.ReadDir(target)
 	if err != nil || len(entries) != 0 {
-		t.Errorf("legacy-mode reparse refusal changed target: %v, %v", entries, err)
-	}
-}
-
-// This context cancels when the required same-directory stage first exists,
-// without exposing Store internals or relying on a particular Err call count.
-type cancelOnStage struct {
-	context.Context
-	cancel context.CancelFunc
-	dir    string
-}
-
-func (c cancelOnStage) Err() error {
-	entries, _ := os.ReadDir(c.dir)
-	for _, entry := range entries {
-		if entry.Name() != "launch.json" {
-			c.cancel()
-			break
-		}
-	}
-	return c.Context.Err()
-}
-
-func TestCancellationAfterStagingDoesNotCommit(t *testing.T) {
-	dir := t.TempDir()
-	file := filepath.Join(dir, "launch.json")
-	store, err := launchsettings.NewStore(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	old := launchsettings.Settings{GameRoot: filepath.Join(dir, "old"), RiskVersion: "v1"}
-	if err := store.Save(context.Background(), old); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	base, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ctx := cancelOnStage{Context: base, cancel: cancel, dir: dir}
-	if err := store.Save(ctx, launchsettings.Settings{}); !errors.Is(err, context.Canceled) {
-		t.Errorf("staged cancellation = %v; want context.Canceled", err)
-	}
-	after, err := os.ReadFile(file)
-	if err != nil || !bytes.Equal(before, after) {
-		t.Fatalf("canceled staged Save changed old bytes: %v", err)
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("cancellation leaked stage: %v, %v", entries, err)
+		t.Errorf("a rejected legacy-mode reparse directory changed its target: %v, %v", entries, err)
 	}
 }
 
 func TestConcurrentSavesAndLoadsStayComplete(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "launch.json")
-	store, err := launchsettings.NewStore(file)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store, db, file := newStore(t)
 	root := t.TempDir()
 	var group sync.WaitGroup
-	errorsFound := make(chan error, 64)
+	failures := make(chan error, 64)
 	for i := range 32 {
 		group.Add(1)
 		go func(i int) {
 			defer group.Done()
 			if err := store.Save(context.Background(), launchsettings.Settings{GameRoot: filepath.Join(root, fmt.Sprint(i)), RiskVersion: "v1"}); err != nil {
-				errorsFound <- err
+				failures <- err
 			}
 			if _, err := store.Load(context.Background()); err != nil {
-				errorsFound <- err
+				failures <- err
 			}
 		}(i)
 	}
 	group.Wait()
-	close(errorsFound)
-	for err := range errorsFound {
+	close(failures)
+	for err := range failures {
 		t.Error(err)
 	}
-	got, err := store.Load(context.Background())
-	if err != nil || got.RiskVersion != "v1" {
-		t.Fatalf("concurrent final state = %+v, %v", got, err)
+	got := mustLoad(t, store)
+	if got.RiskVersion != "v1" {
+		t.Fatalf("concurrent final state = %+v", got)
 	}
+	if count := settingsRows(t, db); count != 1 {
+		t.Fatalf("concurrent writers left %d rows", count)
+	}
+	// Every writer replaced the mirror through a temporary file; a leak would show
+	// up next to it.
 	entries, err := os.ReadDir(filepath.Dir(file))
 	if err != nil || len(entries) != 1 {
-		t.Fatalf("concurrent writers leaked stage: %v, %v", entries, err)
+		t.Fatalf("concurrent writers leaked a temporary file: %v, %v", entries, err)
 	}
 }

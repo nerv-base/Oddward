@@ -3,12 +3,14 @@ package gameinstall
 
 import (
 	"context"
-	"github.com/nerv-base/Oddward/internal/gameres"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nerv-base/Oddward/internal/gameres"
 )
 
 func TestPreloadEngineCacheLayoutIsRetainedWithoutCopies(t *testing.T) {
@@ -17,7 +19,7 @@ func TestPreloadEngineCacheLayoutIsRetainedWithoutCopies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := PreloadStore{StateRoot: t.TempDir(), WorkRoot: t.TempDir(), EngineCache: true}
+	s := preloadStateStore(t, true)
 	r := p.Record
 	path, err := s.BlobPath(r, r.Files[0].Object)
 	if err != nil {
@@ -50,7 +52,7 @@ func TestPreloadPlanSnapshotPersisted(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	s := PreloadStore{StateRoot: t.TempDir(), WorkRoot: t.TempDir()}
+	s := preloadStateStore(t, false)
 	if e = s.Save(context.Background(), p.Record); e != nil {
 		t.Fatal(e)
 	}
@@ -94,7 +96,7 @@ func TestPreloadStateTransitionsPersist(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	s := PreloadStore{StateRoot: t.TempDir(), WorkRoot: t.TempDir()}
+	s := preloadStateStore(t, false)
 	r := p.Record
 	for _, next := range []PreloadState{PreloadDownloading, PreloadPaused, PreloadDownloading, PreloadVerifying, PreloadDownloading, PreloadVerifying, PreloadStaged, PreloadWaitingRelease, PreloadReconcile, PreloadApplicable, PreloadApplying, PreloadCompleted} {
 		if next == PreloadStaged {
@@ -124,7 +126,7 @@ func TestPreloadRecordMalformedAndRetryLimit(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	s := PreloadStore{StateRoot: t.TempDir(), WorkRoot: t.TempDir()}
+	s := preloadStateStore(t, false)
 	r := p.Record
 	r.State = PreloadWaitingRelease
 	r.Files[0].State = PreloadFileStaged
@@ -138,8 +140,16 @@ func TestPreloadRecordMalformedAndRetryLimit(t *testing.T) {
 	if e = os.WriteFile(path, []byte(`{"schema":1`), 0600); e != nil {
 		t.Fatal(e)
 	}
-	if _, e = s.Load(context.Background(), r.Branch, r.Version); e == nil {
-		t.Fatal("truncated record accepted")
+	// A damaged mirror must not become the record again, and the importer that a
+	// rolled-back build relies on refuses it by name instead of accepting it.
+	if got, err := s.Load(context.Background(), r.Branch, r.Version); err != nil || got.State != PreloadFailed {
+		t.Fatalf("damaged mirror disturbed the record: %+v %v", got, err)
+	}
+	if _, _, err := s.ImportLegacy(context.Background()); !errors.Is(err, ErrPreloadRecord) || !strings.Contains(err.Error(), path) {
+		t.Fatalf("truncated mirror accepted: %v", err)
+	}
+	if got, err := s.Load(context.Background(), r.Branch, r.Version); err != nil || got.State != PreloadFailed {
+		t.Fatalf("rejected import changed the record: %+v %v", got, err)
 	}
 	r.Branch = "../escape"
 	if e = s.Save(context.Background(), r); e == nil {
@@ -152,7 +162,7 @@ func TestPreloadDiscardMissingWorkStillPersistsStale(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	s := PreloadStore{StateRoot: t.TempDir(), WorkRoot: t.TempDir()}
+	s := preloadStateStore(t, false)
 	if e = s.Save(context.Background(), p.Record); e != nil {
 		t.Fatal(e)
 	}
@@ -170,7 +180,7 @@ func TestPreloadDiscardFailureAndLinksAreClosed(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	s := PreloadStore{StateRoot: t.TempDir(), WorkRoot: t.TempDir()}
+	s := preloadStateStore(t, false)
 	r := p.Record
 	path, e := s.BlobPath(r, r.Files[0].Object)
 	if e != nil {

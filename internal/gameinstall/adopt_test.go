@@ -135,7 +135,7 @@ func TestInstallStoreMissingAtomicValidatedAndRootKey(t *testing.T) {
 	}
 	bad := got.Record
 	bad.InstallKey = "wrong"
-	if err := s.writeInstall(bad); err == nil {
+	if err := s.writeInstall(context.Background(), bad); err == nil {
 		t.Fatal("invalid record overwrote good state")
 	}
 	persisted, err := s.ReadInstall(root)

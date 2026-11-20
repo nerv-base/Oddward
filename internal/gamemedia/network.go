@@ -53,7 +53,7 @@ func allowedURL(raw string, hosts []string) error {
 	}
 	return errors.New("gamemedia: host is not allowlisted")
 }
-func (c *Cache) download(ctx context.Context, key Key, previous entry, hasOld bool) (downloaded, bool, error) {
+func (c *Cache) download(ctx context.Context, key Key, previous cachedIcon, hasOld bool) (downloaded, bool, error) {
 	select {
 	case downloads <- struct{}{}:
 		defer func() { <-downloads }()
@@ -72,11 +72,11 @@ func (c *Cache) download(ctx context.Context, key Key, previous entry, hasOld bo
 		req.Header.Set("User-Agent", "oddward-launcher (game record icons)")
 		req.Header.Set("Accept", "image/png")
 		if hasOld {
-			if previous.ETag != "" {
-				req.Header.Set("If-None-Match", previous.ETag)
+			if previous.etag != "" {
+				req.Header.Set("If-None-Match", previous.etag)
 			}
-			if previous.LastModified != "" {
-				req.Header.Set("If-Modified-Since", previous.LastModified)
+			if previous.lastModified != "" {
+				req.Header.Set("If-Modified-Since", previous.lastModified)
 			}
 		}
 		resp, err := c.http.Do(req)

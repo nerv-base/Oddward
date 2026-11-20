@@ -3,137 +3,142 @@
 package launchsettings_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 	"github.com/nerv-base/Oddward/internal/launchsettings"
 )
 
 func TestSaveLoadNonSecretSettings(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "owned", "nested", "launch.json")
-	store, err := launchsettings.NewStore(file)
-	if err != nil {
-		t.Fatal(err)
+	file := filepath.Join(t.TempDir(), "owned", "nested", "launcher-v1.json")
+	store, db := newStoreFor(t, file)
+	want := launchsettings.Settings{
+		GameRoot:       filepath.Join(t.TempDir(), "游戏"),
+		RiskVersion:    "standalone-login-v1",
+		SkippedVersion: "0.2.0",
+		Network:        launchsettings.Network{Proxy: "custom", ProxyURL: "socks5://127.0.0.1:7891", Mirror: true, MirrorPrefix: "https://gh-proxy.com/"},
+		Downloads:      launchsettings.Downloads{RateLimitKiB: 256},
+		UI:             launchsettings.UI{CloseToTray: false, AccentFollow: true, CheckUpdates: false},
 	}
-	want := launchsettings.Settings{GameRoot: filepath.Join(t.TempDir(), "game"), RiskVersion: "standalone-login-v1"}
 	if err := store.Save(context.Background(), want); err != nil {
 		t.Fatalf("save non-secret launcher choices: %v", err)
 	}
-	// A fresh Store must read disk, not an in-memory cache.
-	reopened, err := launchsettings.NewStore(file)
+	// The row is the store: a second instance on the same database must read the
+	// same values, so nothing is cached in memory or read from the mirror.
+	reopened, err := launchsettings.NewStore(db, file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := reopened.Load(context.Background())
-	want.Downloads = launchsettings.DefaultDownloads()
-	if err != nil || got != want {
-		t.Fatalf("reopened settings = %+v, %v; want %+v", got, err, want)
-	}
-	data, err := os.ReadFile(file)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireSettings(t, want, mustLoad(t, reopened))
+	// The mirror is the canonical version 6 document the file-based build wrote.
 	var document map[string]json.RawMessage
-	if err := json.Unmarshal(data, &document); err != nil {
-		t.Fatal(err)
+	if err := json.Unmarshal(readFile(t, file), &document); err != nil {
+		t.Fatalf("mirror is not a JSON document: %v", err)
 	}
-	if len(document) != 7 || string(document["version"]) != "6" || document["gameRoot"] == nil || document["riskVersion"] == nil || document["network"] == nil || document["skippedVersion"] == nil || document["downloads"] == nil || document["ui"] == nil {
-		t.Fatalf("settings must contain only schema version and non-secret choices: %s", data)
+	if len(document) != 7 || string(document["version"]) != "6" || document["gameRoot"] == nil || document["riskVersion"] == nil ||
+		document["skippedVersion"] == nil || document["network"] == nil || document["downloads"] == nil || document["ui"] == nil {
+		t.Fatalf("mirror must carry only the version 6 schema and non-secret choices: %s", readFile(t, file))
+	}
+	// A row this build wrote records the document version it can read, not the
+	// version of whatever legacy file happened to be imported before.
+	if version := sourceVersion(t, db); version != 6 {
+		t.Fatalf("source_version = %d, want 6 for a row saved by this build", version)
 	}
 }
 
-func TestInvalidDocumentsAreRejectedAndPreserved(t *testing.T) {
-	cases := map[string]string{
-		"malformed":            `{`,
-		"unknown version":      `{"version":4,"gameRoot":"","riskVersion":""}`,
-		"v1 with v2 field":     `{"version":1,"gameRoot":"","riskVersion":"","skippedVersion":""}`,
-		"v2 missing network":   `{"version":2,"gameRoot":"","riskVersion":"","skippedVersion":""}`,
-		"v2 network secret":    `{"version":2,"gameRoot":"","riskVersion":"","skippedVersion":"","network":{"proxy":"","proxyURL":"","mirror":false,"mirrorPrefix":"","password":"x"}}`,
-		"v2 control chars":     "{\"version\":2,\"gameRoot\":\"\",\"riskVersion\":\"\",\"skippedVersion\":\"\\u0007\",\"network\":{\"proxy\":\"\",\"proxyURL\":\"\",\"mirror\":false,\"mirrorPrefix\":\"\"}}",
-		"missing version":      `{"gameRoot":"","riskVersion":""}`,
-		"unknown secret field": `{"version":1,"gameRoot":"","riskVersion":"","token":"not-a-real-token"}`,
-		"duplicate field":      `{"version":1,"version":1,"gameRoot":"","riskVersion":""}`,
-		"null document":        `null`,
-		"null choice":          `{"version":1,"gameRoot":null,"riskVersion":""}`,
-		"missing choice":       `{"version":1,"gameRoot":""}`,
-		"wrong type":           `{"version":1,"gameRoot":12,"riskVersion":""}`,
-		"trailing document":    `{"version":1,"gameRoot":"","riskVersion":""} {}`,
-		"oversized":            strings.Repeat(" ", 16*1024+1),
+func TestSaveWritesMirrorWithoutStaleState(t *testing.T) {
+	store, db, file := newStore(t)
+	saved := launchsettings.Settings{GameRoot: filepath.Join(t.TempDir(), "game"), RiskVersion: "v1"}
+	if err := store.Save(context.Background(), saved); err != nil {
+		t.Fatal(err)
 	}
-	for name, fixture := range cases {
+	if mirrorStale(t, db) {
+		t.Fatal("a mirror this build just wrote reported stale")
+	}
+	// A rolled-back build may change the file, but the row stays authoritative
+	// until the importer reconciles it; the file is never read as a fallback.
+	writeLegacy(t, file, []byte(`{"version":1,"gameRoot":"","riskVersion":""}`))
+	if !mirrorStale(t, db) {
+		t.Error("a mirror changed by another build must report stale")
+	}
+	requireSettings(t, saved, mustLoad(t, store))
+}
+
+func TestZeroValuesSurviveRoundTrip(t *testing.T) {
+	store, _, file := newStore(t)
+	// No game root, no rate limit and every switch off must all persist: a fresh
+	// profile is not a reason to substitute defaults.
+	want := launchsettings.Settings{}
+	if err := store.Save(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+	requireSettings(t, want, mustLoad(t, store))
+	mirror := string(readFile(t, file))
+	for _, fragment := range []string{
+		`"gameRoot":""`, `"riskVersion":""`, `"skippedVersion":""`,
+		`"proxy":""`, `"proxyURL":""`, `"mirror":false`, `"mirrorPrefix":""`,
+		`"rateLimitKiB":0`,
+		`"closeToTray":false`, `"accentFollow":false`, `"checkUpdates":false`,
+	} {
+		if !strings.Contains(mirror, fragment) {
+			t.Errorf("mirror lost the zero value %s: %s", fragment, mirror)
+		}
+	}
+}
+
+func TestInvalidChoicesCannotOverwrite(t *testing.T) {
+	store, _, file := newStore(t)
+	root := t.TempDir()
+	previous := launchsettings.Settings{GameRoot: filepath.Join(root, "old"), RiskVersion: "v1"}
+	if err := store.Save(context.Background(), previous); err != nil {
+		t.Fatal(err)
+	}
+	before := readFile(t, file)
+	cases := map[string]launchsettings.Settings{
+		"relative root":            {GameRoot: "relative"},
+		"UNC root":                 {GameRoot: `\\server\share\game`},
+		"verbatim root":            {GameRoot: `\\?\C:\game`},
+		"alternate data stream":    {GameRoot: `C:\game:stream`},
+		"root with trailing dot":   {GameRoot: `C:\bad.\game`},
+		"root with trailing space": {GameRoot: `C:\bad \game`},
+		"reserved device root":     {GameRoot: `C:\NUL\game`},
+		"root with NUL":            {GameRoot: "C:\\bad\x00game"},
+		"consent without root":     {RiskVersion: "v1"},
+		"oversized consent":        {GameRoot: root, RiskVersion: strings.Repeat("r", 129)},
+		"consent with newline":     {GameRoot: root, RiskVersion: "v1\nsecret"},
+		"oversized multibyte":      {GameRoot: filepath.Join(root, "game"), RiskVersion: strings.Repeat("界", 10000)},
+		"negative rate limit":      {Downloads: launchsettings.Downloads{RateLimitKiB: -1}},
+		"rate limit above maximum": {Downloads: launchsettings.Downloads{RateLimitKiB: 1048577}},
+		"oversized proxy name":     {Network: launchsettings.Network{Proxy: strings.Repeat("p", 17)}},
+		"oversized proxy url":      {Network: launchsettings.Network{ProxyURL: "socks5://" + strings.Repeat("u", 512)}},
+		"oversized mirror prefix":  {Network: launchsettings.Network{MirrorPrefix: strings.Repeat("m", 513)}},
+		"oversized skipped":        {SkippedVersion: strings.Repeat("s", 65)},
+	}
+	for name, choice := range cases {
 		t.Run(name, func(t *testing.T) {
-			file := filepath.Join(t.TempDir(), "launch.json")
-			before := []byte(fixture)
-			if err := os.WriteFile(file, before, 0600); err != nil {
-				t.Fatal(err)
+			if err := store.Save(context.Background(), choice); err == nil {
+				t.Fatal("invalid choice was saved")
 			}
-			store, err := launchsettings.NewStore(file)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got, err := store.Load(context.Background()); err == nil || got != (launchsettings.Settings{}) {
-				t.Errorf("invalid document accepted or leaked partial state: %+v, %v", got, err)
-			}
-			if err := store.Save(context.Background(), launchsettings.Settings{}); err == nil {
-				t.Error("Save silently overwrote invalid or unsupported previous data")
-			}
-			after, err := os.ReadFile(file)
-			if err != nil || !bytes.Equal(after, before) {
-				t.Fatalf("invalid old document changed: %q, %v", after, err)
-			}
+			requireFile(t, file, before)
+			requireSettings(t, previous, mustLoad(t, store))
 		})
 	}
 }
 
-func TestDocumentAtLimitAndChoicesCanBeReplacedAndCleared(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "launch.json")
-	payload := `{"version":1,"gameRoot":"","riskVersion":""}`
-	if err := os.WriteFile(file, []byte(payload+strings.Repeat(" ", 16*1024-len(payload))), 0600); err != nil {
-		t.Fatal(err)
-	}
-	store, err := launchsettings.NewStore(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, err := store.Load(context.Background()); err != nil || got != (launchsettings.Settings{Downloads: launchsettings.DefaultDownloads(), UI: launchsettings.DefaultUI()}) {
-		t.Fatalf("exact-limit document = %+v, %v", got, err)
-	}
-	for _, want := range []launchsettings.Settings{
-		{GameRoot: filepath.Join(t.TempDir(), "游戏"), RiskVersion: strings.Repeat("界", 42) + "v1"},
-		{GameRoot: filepath.Join(t.TempDir(), "replacement"), RiskVersion: "v2"},
-		{},
-	} {
-		if err := store.Save(context.Background(), want); err != nil {
-			t.Fatal(err)
-		}
-		got, err := store.Load(context.Background())
-		want.Downloads = launchsettings.DefaultDownloads()
-		if err != nil || got != want {
-			t.Fatalf("replacement/clear = %+v, %v; want %+v", got, err, want)
-		}
-	}
-}
-
 func TestCanceledOperationsRetainPreviousSettings(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "launch.json")
-	store, err := launchsettings.NewStore(file)
-	if err != nil {
+	store, _, file := newStore(t)
+	previous := launchsettings.Settings{GameRoot: filepath.Join(t.TempDir(), "old"), RiskVersion: "v1"}
+	if err := store.Save(context.Background(), previous); err != nil {
 		t.Fatal(err)
 	}
-	old := launchsettings.Settings{GameRoot: filepath.Join(t.TempDir(), "old"), RiskVersion: "v1"}
-	if err := store.Save(context.Background(), old); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(file)
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := readFile(t, file)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if got, err := store.Load(ctx); !errors.Is(err, context.Canceled) || got != (launchsettings.Settings{}) {
@@ -142,71 +147,113 @@ func TestCanceledOperationsRetainPreviousSettings(t *testing.T) {
 	if err := store.Save(ctx, launchsettings.Settings{}); !errors.Is(err, context.Canceled) {
 		t.Errorf("canceled Save = %v", err)
 	}
-	after, err := os.ReadFile(file)
-	if err != nil || !bytes.Equal(before, after) {
-		t.Fatalf("canceled operation changed prior file: %v", err)
+	if err := store.Update(ctx, func(*launchsettings.Settings) {}); !errors.Is(err, context.Canceled) {
+		t.Errorf("canceled Update = %v", err)
 	}
-}
-
-func TestInvalidChoicesCannotOverwriteOrLoad(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "launch.json")
-	store, err := launchsettings.NewStore(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	old := []byte(`{"version":1,"gameRoot":"","riskVersion":""}`)
-	cases := []launchsettings.Settings{
-		{GameRoot: "relative"}, {GameRoot: `\\server\share\game`}, {GameRoot: `\\?\C:\game`},
-		{GameRoot: `C:\game:stream`}, {GameRoot: `C:\bad.\game`}, {GameRoot: `C:\bad \game`},
-		{GameRoot: `C:\NUL\game`}, {GameRoot: "C:\\bad\x00game"},
-		{RiskVersion: "v1"}, {GameRoot: t.TempDir(), RiskVersion: strings.Repeat("r", 129)},
-		{GameRoot: t.TempDir(), RiskVersion: "v1\nsecret"},
-		{GameRoot: filepath.Join(t.TempDir(), "game"), RiskVersion: strings.Repeat("界", 10000)},
-	}
-	for i, choice := range cases {
-		if err := os.WriteFile(file, old, 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := store.Save(context.Background(), choice); err == nil {
-			t.Errorf("invalid choice %d was saved", i)
-		}
-		after, err := os.ReadFile(file)
-		if err != nil || !bytes.Equal(after, old) {
-			t.Errorf("invalid choice %d changed previous document: %v", i, err)
-		}
-		fixture, err := json.Marshal(map[string]any{"version": 1, "gameRoot": choice.GameRoot, "riskVersion": choice.RiskVersion})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(file, fixture, 0600); err != nil {
-			t.Fatal(err)
-		}
-		if got, err := store.Load(context.Background()); err == nil || got != (launchsettings.Settings{}) {
-			t.Errorf("invalid choice %d loaded or leaked partial state: %v", i, err)
-		}
-	}
+	requireFile(t, file, before)
+	requireSettings(t, previous, mustLoad(t, store))
 }
 
 func TestStoreRejectsUnsafePathForms(t *testing.T) {
-	for _, path := range []string{"", ".", "launch.json", `C:relative`, `\root-relative`, `\\server\share\launch.json`, `//server/share/launch.json`, `\\?\C:\launch.json`, `\\.\C:\launch.json`, `C:\state:stream`, `C:\bad.\launch.json`, `C:\bad \launch.json`, `C:\NUL.json`, `C:\COM¹.json`, `C:\LPT²\launch.json`, "C:\\bad\x00path"} {
-		if store, err := launchsettings.NewStore(path); err == nil || store != nil {
-			t.Errorf("unsafe store path accepted: %q, %v", path, err)
+	db := dbtest.Open(t)
+	for _, path := range []string{"", ".", "launcher-v1.json", `C:relative`, `\root-relative`, `\\server\share\launcher-v1.json`, `//server/share/launcher-v1.json`, `\\?\C:\launcher-v1.json`, `\\.\C:\launcher-v1.json`, `C:\state:stream`, `C:\bad.\launcher-v1.json`, `C:\bad \launcher-v1.json`, `C:\NUL.json`, `C:\COM¹.json`, `C:\LPT²\launcher-v1.json`, "C:\\bad\x00path"} {
+		if store, err := launchsettings.NewStore(db, path); err == nil || store != nil {
+			t.Errorf("unsafe legacy path accepted: %q, %v", path, err)
 		}
+	}
+	if store, err := launchsettings.NewStore(nil, `C:\state\launcher-v1.json`); err == nil || store != nil {
+		t.Errorf("store without a database accepted: %v", err)
 	}
 }
 
 func TestMissingSettingsReturnDefaultsWithoutCreatingFiles(t *testing.T) {
 	parent := filepath.Join(t.TempDir(), "not-created")
-	store, err := launchsettings.NewStore(filepath.Join(parent, "launch.json"))
-	if err != nil {
+	store, _ := newStoreFor(t, filepath.Join(parent, "launcher-v1.json"))
+	requireSettings(t, freshProfile(), mustLoad(t, store))
+	if _, err := os.Stat(parent); !os.IsNotExist(err) {
+		t.Fatalf("reading an empty database must not create the mirror parent: %v", err)
+	}
+}
+
+func TestUpdateChangesOnlyWhatTheCallerTouches(t *testing.T) {
+	store, _, _ := newStore(t)
+	root := filepath.Join(t.TempDir(), "game")
+	if err := store.Update(context.Background(), func(s *launchsettings.Settings) { s.GameRoot, s.RiskVersion = root, "r1" }); err != nil {
 		t.Fatal(err)
 	}
-	got, err := store.Load(context.Background())
-	want := launchsettings.Settings{Downloads: launchsettings.DefaultDownloads(), UI: launchsettings.DefaultUI()}
-	if err != nil || got != want {
-		t.Fatalf("missing settings = %+v, %v; want defaults without error", got, err)
+	if err := store.Update(context.Background(), func(s *launchsettings.Settings) { s.Network.Proxy = "direct" }); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(parent); !os.IsNotExist(err) {
-		t.Fatalf("read-only missing Load must not create parent: %v", err)
+	got := mustLoad(t, store)
+	if got.GameRoot != root || got.RiskVersion != "r1" || got.Network.Proxy != "direct" {
+		t.Fatalf("merge lost a field: %+v", got)
+	}
+	if err := store.Update(context.Background(), func(s *launchsettings.Settings) { s.SkippedVersion = "bad\x00" }); err == nil {
+		t.Fatal("invalid update committed")
+	}
+	requireSettings(t, got, mustLoad(t, store))
+}
+
+func TestConcurrentUpdatesKeepBothFields(t *testing.T) {
+	store, _, _ := newStore(t)
+	if err := store.Save(context.Background(), launchsettings.Settings{}); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "game")
+	changes := []func(*launchsettings.Settings){
+		func(s *launchsettings.Settings) { s.GameRoot, s.RiskVersion = root, "r1" },
+		func(s *launchsettings.Settings) { s.SkippedVersion, s.Network.Mirror = "0.2.0", true },
+	}
+	start := make(chan struct{})
+	failures := make(chan error, len(changes))
+	var group sync.WaitGroup
+	for _, change := range changes {
+		group.Add(1)
+		go func(change func(*launchsettings.Settings)) {
+			defer group.Done()
+			<-start
+			if err := store.Update(context.Background(), change); err != nil {
+				failures <- err
+			}
+		}(change)
+	}
+	close(start)
+	group.Wait()
+	close(failures)
+	for err := range failures {
+		t.Errorf("concurrent update: %v", err)
+	}
+	got := mustLoad(t, store)
+	if got.GameRoot != root || got.RiskVersion != "r1" || got.SkippedVersion != "0.2.0" || !got.Network.Mirror {
+		t.Fatalf("concurrent updates lost a field: %+v", got)
+	}
+}
+
+func TestDamagedStoredRowIsNotReplaced(t *testing.T) {
+	store, db, file := newStore(t)
+	insertDamagedRow(t, db, "relative")
+	if got, err := store.Load(context.Background()); err == nil || got != (launchsettings.Settings{}) {
+		t.Fatalf("damaged row loaded as %+v, %v", got, err)
+	}
+	attempts := map[string]func() error{
+		"Save":   func() error { return store.Save(context.Background(), launchsettings.Settings{}) },
+		"Update": func() error { return store.Update(context.Background(), func(*launchsettings.Settings) {}) },
+	}
+	for name, attempt := range attempts {
+		err := attempt()
+		// The error must say the old data was kept, because a caller that retries or
+		// reports it must not imply the store was reset to defaults.
+		if err == nil || !strings.Contains(err.Error(), "previous launch settings retained") {
+			t.Errorf("%s did not refuse a damaged store: %v", name, err)
+		}
+	}
+	if root := insertedGameRoot(t, db); root != "relative" {
+		t.Errorf("damaged row was rewritten to %q", root)
+	}
+	if count := settingsRows(t, db); count != 1 {
+		t.Errorf("launch_settings rows = %d, want the damaged row alone", count)
+	}
+	if _, err := os.Stat(file); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("refused Save wrote a mirror: %v", err)
 	}
 }

@@ -57,7 +57,7 @@ func (b *GameDownloadBackend) preloadStore(root string) (gameinstall.PreloadStor
 	if err != nil {
 		return gameinstall.PreloadStore{}, err
 	}
-	return gameinstall.PreloadStore{StateRoot: b.taskRoot(key), WorkRoot: downloadWork(root), EngineCache: true}, nil
+	return gameinstall.NewPreloadStore(b.DB, b.taskRoot(key), downloadWork(root), true)
 }
 func preloadSystemWork(root string, r gameinstall.PreloadRecord) string {
 	return filepath.Join(downloadWork(root), "preload", r.Branch, r.Version)

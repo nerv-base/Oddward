@@ -25,6 +25,7 @@ type fileTransfer struct {
 	approved       map[int]bool
 	urls           []string
 	save           func(Transfer) error
+	progressSave   func(int64) error
 	progress       *progressState
 	activeRequests int // guarded by engine.admission.mu
 }
@@ -39,7 +40,7 @@ func (f *fileTransfer) snapshot() Transfer {
 	defer f.mu.Unlock()
 	return f.snapshotLocked()
 }
-func (e *Engine) download(ctx context.Context, tr Transfer, progress *progressState, save func(Transfer) error) (Transfer, error) {
+func (e *Engine) download(ctx context.Context, tr Transfer, progress *progressState, save func(Transfer) error, progressSave func(int64) error) (Transfer, error) {
 	if err := mkdirSafe(e.root, objectDir(tr.Object)); err != nil {
 		return tr, err
 	}
@@ -56,7 +57,7 @@ func (e *Engine) download(ctx context.Context, tr Transfer, progress *progressSt
 	if err != nil {
 		return tr, err
 	}
-	f := &fileTransfer{engine: e, transfer: tr, file: file, bm: bm, save: save, progress: progress, approved: map[int]bool{}}
+	f := &fileTransfer{engine: e, transfer: tr, file: file, bm: bm, save: save, progressSave: progressSave, progress: progress, approved: map[int]bool{}}
 	f.transfer.BytesDone = bm.downloaded()
 	progress.addDownloaded(f.transfer.BytesDone)
 	if tr.Object.Size > 0 {
@@ -339,9 +340,13 @@ func (f *fileTransfer) commit(ctx context.Context, index uint32, digest string) 
 		return err
 	}
 	f.transfer.BytesDone = f.bm.downloaded()
+	done := f.transfer.BytesDone
 	f.mu.Unlock()
 	f.progress.addDownloaded(size)
-	return nil
+	// The bitmap is already durable, so the task row is only a report; the
+	// engine throttles these writes and recomputes progress from the bitmap on
+	// recovery.
+	return f.progressSave(done)
 }
 func (f *fileTransfer) sequential(ctx context.Context) error {
 	_, raw, err := f.selected(ctx)
@@ -367,12 +372,13 @@ func (f *fileTransfer) sequential(ctx context.Context) error {
 			if err == nil {
 				f.transfer.BytesDone = f.transfer.Object.Size
 			}
+			done := f.transfer.BytesDone
 			f.mu.Unlock()
 			if err != nil {
 				return err
 			}
 			f.progress.addDownloaded(f.transfer.Object.Size)
-			return nil
+			return f.progressSave(done)
 		}
 		last = err
 		if !retryable(err) || ctx.Err() != nil {

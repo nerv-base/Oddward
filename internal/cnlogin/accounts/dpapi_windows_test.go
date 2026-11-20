@@ -9,6 +9,8 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 )
 
 // These tests call the real CurrentUser DPAPI. That only uses the current
@@ -50,7 +52,8 @@ func TestDPAPIRoundTrip(t *testing.T) {
 
 func TestDPAPIStoreRoundTrip(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "accounts")
-	s, err := Open(dir, DPAPI{})
+	db := dbtest.Open(t)
+	s, err := Open(db, dir, DPAPI{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +62,7 @@ func TestDPAPIStoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	s2, err := Open(dir, DPAPI{})
+	s2, err := Open(db, dir, DPAPI{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +71,7 @@ func TestDPAPIStoreRoundTrip(t *testing.T) {
 		t.Fatalf("Unlock with DPAPI: %v", err)
 	}
 	// A DPAPI-wrapped key cannot be opened by a different protector.
-	if _, err := openTestStore(t, dir, newFakeProtector(t)).Unlock(a.ID); !errors.Is(err, ErrUnlock) {
+	if _, err := openTestStore(t, db, dir, newFakeProtector(t)).Unlock(a.ID); !errors.Is(err, ErrUnlock) {
 		t.Fatalf("Unlock with fake protector = %v, want ErrUnlock", err)
 	}
 }

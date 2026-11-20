@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 )
 
 func makeJunction(t *testing.T, link, target string) {
@@ -31,7 +33,7 @@ func TestOpenRejectsJunctionDirectory(t *testing.T) {
 	}
 	link := filepath.Join(t.TempDir(), "accounts")
 	makeJunction(t, link, target)
-	if _, err := Open(link, newFakeProtector(t)); !errors.Is(err, ErrUnsafePath) {
+	if _, err := Open(dbtest.Open(t), link, newFakeProtector(t)); !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("Open(junction) = %v, want ErrUnsafePath", err)
 	}
 }
@@ -52,7 +54,10 @@ func TestStoreRejectsDirectorySwappedForJunction(t *testing.T) {
 	}
 }
 
-func TestSymlinkedRecordIsCorrupt(t *testing.T) {
+// A mirror that was swapped for a link is never deleted through: the link itself
+// is not a file this store wrote, and following it would remove whatever it
+// points at.
+func TestRemoveRejectsSymlinkedMirror(t *testing.T) {
 	s, dir, _ := newTestStore(t)
 	a := mustSave(t, s, "A", sampleSecret(1))
 	outside := filepath.Join(t.TempDir(), "outside.acct")
@@ -62,11 +67,16 @@ func TestSymlinkedRecordIsCorrupt(t *testing.T) {
 	if err := os.Symlink(outside, recordPath(dir, a.ID)); err != nil {
 		t.Skipf("file symlinks need Developer Mode or privilege here: %v", err)
 	}
-	list, corrupt := mustList(t, s)
-	if len(list) != 0 || corrupt != 1 {
-		t.Fatalf("List = %+v corrupt %d, want symlink counted as corrupt", list, corrupt)
+	if err := s.Remove(a.ID); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("Remove(symlink) = %v, want ErrUnsafePath", err)
 	}
-	if _, err := s.Unlock(a.ID); !errors.Is(err, ErrCorrupt) {
-		t.Fatalf("Unlock(symlink) = %v, want ErrCorrupt", err)
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("Remove deleted the link target: %v", err)
+	}
+	if info, err := os.Lstat(recordPath(dir, a.ID)); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("Remove replaced the link: %v", err)
+	}
+	if _, err := s.Unlock(a.ID); err != nil {
+		t.Fatalf("the row was deleted despite the refused mirror: %v", err)
 	}
 }

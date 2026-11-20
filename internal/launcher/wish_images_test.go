@@ -76,8 +76,8 @@ func TestWishImagesKeepOneWorkerAndDiscardOldGeneration(t *testing.T) {
 		t.Fatal("cancelled image worker did not return")
 	}
 	s.syncWishImages()
-	if s.wishIcons.cache["first"] != nil || s.wishIcons.failed["first"] {
-		t.Fatal("stale image must not populate cache or permanent failure set")
+	if s.wishIcons.cache["first"] != nil || s.wishIcons.failures["first"].attempts != 0 {
+		t.Fatal("stale image must not populate cache or the failure backoff")
 	}
 	close(release)
 }

@@ -10,6 +10,7 @@ import (
 	"crypto/cipher"
 	"encoding/binary"
 	"fmt"
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -93,7 +94,7 @@ func TestSystemPreloadSyntheticStageReconcileApply(t *testing.T) {
 	defer srv.Close()
 	delivery = preloadSystemDelivery(t, srv.URL+"/clientRes")
 	manifestZIP = preloadSyntheticArchive(t, delivery.XML.ResList)
-	b := &GameDownloadBackend{StateRoot: t.TempDir(), Client: srv.Client(), roots: []string{delivery.ConfigResponse.Root}, free: func(string) (int64, error) { return 8 << 30, nil }, processes: func(context.Context) (downloadProcesses, error) { return downloadProcesses{}, nil }, preloadQuery: func(context.Context, string, string) (gameDelivery, error) { return delivery, nil }}
+	b := &GameDownloadBackend{DB: dbtest.Open(t), StateRoot: t.TempDir(), Client: srv.Client(), roots: []string{delivery.ConfigResponse.Root}, free: func(string) (int64, error) { return 8 << 30, nil }, processes: func(context.Context) (downloadProcesses, error) { return downloadProcesses{}, nil }, preloadQuery: func(context.Context, string, string) (gameDelivery, error) { return delivery, nil }}
 	root := preloadSystemBase(t, b)
 	request := launcher.DownloadRequest{Root: root, Kind: state.DownloadPreload}
 	request.Effect.Kind = state.EffectDownloadPlan

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/nerv-base/Oddward/internal/database"
 	"github.com/nerv-base/Oddward/internal/gamelocate"
 )
 
@@ -45,7 +46,14 @@ type InstallRecord struct {
 	OfficialDigest   string          `json:"officialDigest,omitempty"`
 	BaselineMismatch bool            `json:"baselineMismatch,omitempty"`
 }
-type Store struct{ stateRoot string }
+
+// Store owns one installation's record. Records live in the database; stateRoot
+// keeps the transaction journals, the verification cache and the legacy mirror a
+// rolled-back build reads.
+type Store struct {
+	db        *database.DB
+	stateRoot string
+}
 type AdoptMetadata struct {
 	ConfigXML, Manifest []byte
 	Branch              string

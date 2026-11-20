@@ -11,12 +11,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nerv-base/Oddward/internal/database"
 	"github.com/nerv-base/Oddward/internal/gameres"
 )
 
 type GCOptions struct {
 	WorkRoot, StateRoot string
-	Lease               *Lease
+	// DB supplies task references; StateRoot only names the legacy mirrors.
+	DB    *database.DB
+	Lease *Lease
 	// Protected includes transaction and Applicable preload references that have
 	// not yet been persisted as download tasks. Objects are protected in all roots.
 	Protected []gameres.Object
@@ -66,7 +69,7 @@ func Collect(ctx context.Context, o GCOptions) (GCResult, error) {
 	if o.Now.IsZero() {
 		o.Now = time.Now()
 	}
-	store, err := NewStore(o.StateRoot)
+	store, err := NewStore(o.DB, o.StateRoot)
 	if err != nil {
 		return result, err
 	}

@@ -15,13 +15,19 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/nerv-base/Oddward/internal/database"
 	"github.com/nerv-base/Oddward/internal/gameres"
 )
 
 const stateMaxBytes = 8 << 20
 
 // NewStore uses a shared installs directory; each canonical root gets its own key.
-func NewStore(stateRoot string) (*Store, error) {
+// Records live in the database, the shared directory keeps the journals, the
+// verification cache and the legacy mirror of every installation.
+func NewStore(db *database.DB, stateRoot string) (*Store, error) {
+	if db == nil {
+		return nil, fmt.Errorf("%w: installation store needs an open database", ErrInvalidState)
+	}
 	if !filepath.IsAbs(stateRoot) {
 		return nil, fmt.Errorf("%w: state root must be absolute", ErrInvalidState)
 	}
@@ -34,7 +40,7 @@ func NewStore(stateRoot string) (*Store, error) {
 		return nil, err
 	}
 	r.Close()
-	return &Store{stateRoot: stateRoot}, nil
+	return &Store{db: db, stateRoot: stateRoot}, nil
 }
 
 // InstallKey identifies a canonical parent-of-Client path without touching disk.
@@ -96,67 +102,6 @@ func stateValidateRecord(r InstallRecord) error {
 		seen[key] = true
 	}
 	return nil
-}
-func (s *Store) ReadInstall(root string) (InstallRecord, error) {
-	key, err := InstallKey(root)
-	if err != nil {
-		return InstallRecord{}, err
-	}
-	r, err := os.OpenRoot(s.stateRoot)
-	if err != nil {
-		return InstallRecord{}, err
-	}
-	defer r.Close()
-	data, err := stateReadBounded(r, key+"/install.json")
-	if err != nil {
-		return InstallRecord{}, err
-	}
-	var record InstallRecord
-	if err := stateDecodeJSON(data, &record); err != nil {
-		return InstallRecord{}, fmt.Errorf("%w: install record: %v", ErrInvalidState, err)
-	}
-	if err := stateValidateRecord(record); err != nil {
-		return InstallRecord{}, err
-	}
-	recordKey, _ := InstallKey(record.Root)
-	if recordKey != key {
-		return InstallRecord{}, ErrStaleState
-	}
-	id, err := installRootFileID(root)
-	if err != nil {
-		return InstallRecord{}, fmt.Errorf("%w: root identity unavailable: %v", ErrStaleState, err)
-	}
-	if record.RootFileID != "" && record.RootFileID != "unknown" && record.RootFileID != id {
-		return InstallRecord{}, ErrStaleState
-	}
-	if record.OfficialDigest != "" {
-		installRoot, err := os.OpenRoot(root)
-		if err != nil {
-			return InstallRecord{}, err
-		}
-		err = verifyCheckOfficial(installRoot, record)
-		installRoot.Close()
-		if err != nil {
-			return InstallRecord{}, err
-		}
-	}
-	return record, nil
-}
-func (s *Store) writeInstall(record InstallRecord) error {
-	return s.writeInstallCheckpoint(record, nil)
-}
-func (s *Store) writeInstallCheckpoint(record InstallRecord, beforeRename func() error) error {
-	if err := stateValidateRecord(record); err != nil {
-		return err
-	}
-	if record.RootFileID == "" {
-		id, err := installRootFileID(record.Root)
-		if err != nil {
-			return err
-		}
-		record.RootFileID = id
-	}
-	return s.stateWrite(record.InstallKey+"/install.json", record, beforeRename)
 }
 func (s *Store) stateWrite(name string, value any, beforeRename func() error) error {
 	data, err := json.Marshal(value)

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 	"github.com/nerv-base/Oddward/internal/game"
 )
 
@@ -88,10 +89,7 @@ func TestTxnScalePhase4FreshResumesAfterOneHundredPlacements(t *testing.T) {
 	if err := os.MkdirAll(work, 0700); err != nil {
 		t.Fatal(err)
 	}
-	store, err := NewStore(stateRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newStore(t, dbtest.Open(t), stateRoot)
 	key, err := InstallKey(root)
 	if err != nil {
 		t.Fatal(err)
@@ -164,10 +162,7 @@ func TestTxnScalePhase4FreshResumesAfterOneHundredPlacements(t *testing.T) {
 	targets := append([]InstallTarget{}, in.Candidate.Targets...)
 	txnID := in.TxnID
 	in = TxnInput{} // Resume uses only persisted evidence, not the original source plan.
-	restarted, err := NewStore(stateRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
+	restarted := newStore(t, store.db, stateRoot)
 	status, err := restarted.Recover(ctx, root, work, guard)
 	if err != nil || status.State != "incomplete" || !status.LaunchBlocked || !status.Resume || status.Published {
 		t.Fatalf("interrupted fresh recovery: %+v %v", status, err)
@@ -203,10 +198,7 @@ func TestTxnScalePhase5ATwentyBaselineFiveModifiedThreeAddedTwoPruned(t *testing
 			if err := os.MkdirAll(work, 0700); err != nil {
 				t.Fatal(err)
 			}
-			store, err := NewStore(stateRoot)
-			if err != nil {
-				t.Fatal(err)
-			}
+			store := newStore(t, dbtest.Open(t), stateRoot)
 			key, err := InstallKey(root)
 			if err != nil {
 				t.Fatal(err)
@@ -219,7 +211,7 @@ func TestTxnScalePhase5ATwentyBaselineFiveModifiedThreeAddedTwoPruned(t *testing
 				old.Targets = append(old.Targets, txnTarget(path, data))
 			}
 			txnPut(t, root, "unknown.bin", "untracked synthetic user file")
-			if err = store.writeInstall(old); err != nil {
+			if err = store.writeInstall(ctx, old); err != nil {
 				t.Fatal(err)
 			}
 			old, err = store.ReadInstall(root)
@@ -274,10 +266,7 @@ func TestTxnScalePhase5ATwentyBaselineFiveModifiedThreeAddedTwoPruned(t *testing
 			} else if !hit || !errors.Is(err, stopped) {
 				t.Fatalf("missing %s interruption: hit=%v err=%v", point, hit, err)
 			}
-			restarted, err := NewStore(stateRoot)
-			if err != nil {
-				t.Fatal(err)
-			}
+			restarted := newStore(t, store.db, stateRoot)
 			status, err = restarted.Recover(ctx, root, work, in.Guard)
 			if err != nil || status.LaunchBlocked {
 				t.Fatalf("scale recovery: %+v %v", status, err)

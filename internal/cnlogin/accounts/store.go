@@ -2,9 +2,15 @@
 
 package accounts
 
+// The database is authoritative. The directory beside it keeps the legacy files
+// an older build reads, see mirror.go; those files are never read as an
+// authority, only mirrored and imported.
+
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -12,186 +18,225 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nerv-base/Oddward/internal/database"
 )
 
 const (
-	// MaxAccounts is the number of distinct accounts a Store keeps.
+	// MaxAccounts bounds how many accounts the store accepts, so the list stays
+	// a picker and not an archive.
 	MaxAccounts = 16
-	// MaxRecordSize is the largest accepted record file in bytes.
+	// MaxRecordSize bounds one stored record, mirror file included.
 	MaxRecordSize = 16 << 10
-	// MaxLabelRunes is the longest accepted label after sanitizing.
+	// MaxLabelRunes bounds a user-chosen label.
 	MaxLabelRunes = 32
 
-	// maxScanCandidates bounds how many record files one scan visits, so a
-	// directory filled with junk cannot stall a login.
-	maxScanCandidates = 64
-	// minPendingBytes is shorter than any complete sealed state, so a shorter
-	// temp file is a torn write of this package.
+	// minPendingBytes is shorter than any complete sealed document, so a shorter
+	// temp file is the torn remainder of an interrupted write.
 	minPendingBytes = 16
-
+	// tempPrefix marks a staged save. Open removes leftovers: nothing outside a
+	// commit may become visible, so a candidate only ever lives until its
+	// Commit or Rollback.
 	tempPrefix = ".pending-"
 	tempSuffix = ".tmp"
 )
 
 var (
-	ErrNotFound        = errors.New("accounts: account not found")
-	ErrCorrupt         = errors.New("accounts: record is corrupt")
-	ErrUnlock          = errors.New("accounts: record cannot be unlocked")
-	ErrInvalidLabel    = errors.New("accounts: invalid label")
-	ErrInvalidSecret   = errors.New("accounts: invalid secret")
-	ErrInvalidPhone    = errors.New("accounts: not a mainland mobile number")
-	ErrInvalidNotice   = errors.New("accounts: invalid notice revision")
-	ErrTooManyAccounts = errors.New("accounts: too many saved accounts")
-	ErrUnsafePath      = errors.New("accounts: unsafe store path")
-	ErrScanSaturated   = errors.New("accounts: store has too many record files")
+	// ErrNotFound reports an account id that is not stored.
+	ErrNotFound = errors.New("accounts: account not found")
+	// ErrCorrupt reports a stored record or attachment that does not validate.
+	ErrCorrupt = errors.New("accounts: corrupt account record")
+	// ErrUnlock reports a record that decrypts to unusable bytes, which is what
+	// a tampered row and a row sealed under a different Windows user look like.
+	ErrUnlock = errors.New("accounts: cannot unlock account")
+	// ErrInvalidLabel reports a label that cannot be stored.
+	ErrInvalidLabel = errors.New("accounts: invalid label")
+	// ErrInvalidSecret reports a secret shaped unlike a game login.
+	ErrInvalidSecret = errors.New("accounts: invalid secret")
+	// ErrInvalidPhone reports a phone number that cannot be masked.
+	ErrInvalidPhone = errors.New("accounts: invalid phone number")
+	// ErrInvalidNotice reports a notice revision that cannot be stored.
+	ErrInvalidNotice = errors.New("accounts: invalid notice revision")
+	// ErrTooManyAccounts reports that MaxAccounts accounts already exist.
+	ErrTooManyAccounts = errors.New("accounts: too many accounts")
+	// ErrUnsafePath reports a path that is not a plain file or directory, or a
+	// mirror file that cannot be touched without following a reparse point.
+	ErrUnsafePath = errors.New("accounts: unsafe path")
 
+	// errNotRegular and errTooLarge are the two failures a mirror file can show
+	// that the importer has to report with the file name attached.
 	errNotRegular = errors.New("not a regular file")
-	errTooLarge   = errors.New("file too large")
+	errTooLarge   = errors.New("file is too large")
 )
 
-// KeyProtector wraps and unwraps per-account data keys. Implementations must
-// be bound to the current user: DPAPI is the production implementation.
+// KeyProtector wraps and unwraps the per-record data keys. The production
+// implementation is DPAPI under the current Windows user (DPAPI).
 type KeyProtector interface {
+	// Protect wraps plain so that only the current user can unwrap it.
 	Protect(plain []byte) ([]byte, error)
+	// Unprotect unwraps a value produced by Protect.
 	Unprotect(wrapped []byte) ([]byte, error)
 }
 
-// Account is the public, unencrypted part of a saved account.
+// Account is the non-secret part of a stored login. The Tajiduo fields are
+// derived from the attachment, never stored inside the record.
 type Account struct {
-	ID      string // 32 lowercase hex chars
-	Label   string // masked phone or user remark, 1..MaxLabelRunes runes
-	SavedAt time.Time
-	// TajiduoLinked reports whether the account has a readable Tajiduo session
-	// attachment (<id>.tjd) beside its record. It is filled in by List; it is
-	// not part of the record, so it is never bound by the record's AAD.
+	ID            string
+	Label         string
+	SavedAt       time.Time
 	TajiduoLinked bool
-	// TajiduoState refines TajiduoLinked for the account list: "linked" when
-	// the attachment decrypts, "needs-relink" when it exists but cannot be
-	// opened (for example after a machine change), and "" when there is no
-	// attachment. Like TajiduoLinked it is derived by List, never stored.
+	// TajiduoState is empty when no attachment is stored, "linked" when one
+	// decrypts under this user, and "needs-relink" when one exists but cannot
+	// be used.
 	TajiduoState string
 }
 
-// Store is a directory of saved accounts. Methods are safe for concurrent use
-// within one process; the directory must not be shared between processes.
+// Store keeps the encrypted accounts in the database and mirrors them into dir
+// for an older build. One process owns it; methods are safe for concurrent use
+// within that process.
 type Store struct {
+	db  *database.DB
 	dir string
 	p   KeyProtector
 
-	mu     sync.Mutex
-	now    func() time.Time
-	rename func(oldpath, newpath string) error
+	mu  sync.Mutex
+	now func() time.Time
+	// pending is the subject key a staged save generated before the database had
+	// one. It is state, not account data, so it is stored by the first Commit
+	// that needs it; a save that is rolled back leaves no row behind.
+	pending []byte
 }
 
-// Open uses dir (absolute) as the store, creating it if needed, gives it a
-// protected private DACL and removes temp files left by an interrupted write.
-func Open(dir string, p KeyProtector) (*Store, error) {
+// Open validates dir and prepares it for the mirrors. db must already be
+// migrated; the launcher runs ImportLegacy before it trusts the rows.
+//
+// The directory is created with a private DACL when missing because it holds the
+// mirror files; the database file protects itself (internal/database).
+func Open(db *database.DB, dir string, p KeyProtector) (*Store, error) {
+	if db == nil {
+		return nil, errors.New("accounts: nil database")
+	}
 	if p == nil {
 		return nil, errors.New("accounts: nil KeyProtector")
 	}
 	if !filepath.IsAbs(dir) {
 		return nil, fmt.Errorf("%w: %q is not absolute", ErrUnsafePath, dir)
 	}
-	s := &Store{dir: filepath.Clean(dir), p: p, now: time.Now, rename: os.Rename}
-	if err := checkAncestors(s.dir); err != nil {
+	s := &Store{
+		db:  db,
+		dir: filepath.Clean(dir),
+		p:   p,
+		now: time.Now,
+	}
+	if err := s.checkAncestors(); err != nil {
 		return nil, err
 	}
+	if err := os.MkdirAll(filepath.Dir(s.dir), 0o700); err != nil {
+		return nil, fmt.Errorf("accounts: create parent directory: %w", err)
+	}
+	// An existing directory is validated by checkDir instead: mkdir with a
+	// private DACL only applies to the one Open creates, and re-running Open on
+	// an existing directory is the normal startup after a restart.
 	if _, err := os.Lstat(s.dir); errors.Is(err, fs.ErrNotExist) {
-		if err := os.MkdirAll(filepath.Dir(s.dir), 0o700); err != nil {
-			return nil, fmt.Errorf("accounts: create store: %w", err)
-		}
 		if err := privateMkdir(s.dir); err != nil {
-			return nil, fmt.Errorf("accounts: create store: %w", err)
+			return nil, fmt.Errorf("accounts: create directory: %w", err)
 		}
 	}
 	if err := s.checkDir(); err != nil {
 		return nil, err
 	}
 	if err := protectDirectory(s.dir); err != nil {
-		return nil, fmt.Errorf("%w: cannot protect %s: %w", ErrUnsafePath, s.dir, err)
+		return nil, fmt.Errorf("accounts: protect directory: %w", err)
 	}
-	s.removeStaleTemps()
+	if err := s.removeStaleTemps(); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
-// checkAncestors rejects a reparse point or non-directory above the store: a
-// junction in the path would redirect every write somewhere else.
-func checkAncestors(path string) error {
-	volume := filepath.VolumeName(path)
-	parts := strings.Split(strings.Trim(path[len(volume):], string(filepath.Separator)), string(filepath.Separator))
-	current := volume
-	for _, part := range parts[:len(parts)-1] {
-		current += string(filepath.Separator) + part
-		fi, err := os.Lstat(current)
-		if errors.Is(err, fs.ErrNotExist) {
+// checkAncestors rejects a directory below a reparse point: a link anywhere on
+// the way in would redirect every mirror write. A parent that does not exist yet
+// is fine, Open creates the chain.
+func (s *Store) checkAncestors() error {
+	dir := s.dir
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
 			return nil
 		}
-		if err != nil {
-			return fmt.Errorf("%w: %w", ErrUnsafePath, err)
+		info, err := os.Lstat(parent)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+		case err != nil:
+			return fmt.Errorf("accounts: inspect path: %w", err)
+		case !info.IsDir() || isReparse(info):
+			return fmt.Errorf("%w: %s is not a plain directory", ErrUnsafePath, parent)
 		}
-		if !fi.IsDir() {
-			return fmt.Errorf("%w: %s is not a directory", ErrUnsafePath, current)
-		}
-		if isReparse(fi) {
-			return fmt.Errorf("%w: %s is a reparse point", ErrUnsafePath, current)
-		}
+		dir = parent
 	}
-	return nil
 }
 
+// checkDir rejects a directory that was swapped for a link or a file after Open.
 func (s *Store) checkDir() error {
-	fi, err := os.Lstat(s.dir)
+	info, err := os.Lstat(s.dir)
 	if err != nil {
-		return fmt.Errorf("%w: %w", ErrUnsafePath, err)
+		return fmt.Errorf("accounts: inspect directory: %w", err)
 	}
-	if !fi.IsDir() || isReparse(fi) {
+	if !info.IsDir() || isReparse(info) {
 		return fmt.Errorf("%w: %s is not a plain directory", ErrUnsafePath, s.dir)
 	}
 	return nil
 }
 
-// removeStaleTemps removes temp files this package provably abandoned. A file
-// that only looks like one of ours is left alone: a crash after the write must
-// not destroy anything that is not a torn or complete candidate of this store.
-func (s *Store) removeStaleTemps() {
+// removeStaleTemps drops candidates an interrupted process left behind. A
+// candidate that already holds a complete sealed record is abandoned too: its
+// save never committed, so dropping it is the same as a rollback.
+func (s *Store) removeStaleTemps() error {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
-		return
+		return fmt.Errorf("accounts: read directory: %w", err)
 	}
 	for _, e := range entries {
-		mid, ok := strings.CutPrefix(e.Name(), tempPrefix)
-		if !ok {
+		name := e.Name()
+		if !strings.HasPrefix(name, tempPrefix) || !strings.HasSuffix(name, tempSuffix) {
 			continue
 		}
-		if mid, ok = strings.CutSuffix(mid, tempSuffix); !ok || !isLowerHex(mid, 16) {
+		info, err := os.Lstat(filepath.Join(s.dir, name))
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("accounts: inspect temp file: %w", err)
+		}
+		if !s.abandonedPending(info) {
+			// Something that merely carries the prefix is not provably ours, so
+			// it is left alone instead of being deleted or refused.
 			continue
 		}
-		path := filepath.Join(s.dir, e.Name())
-		fi, err := os.Lstat(path)
-		if err != nil || !fi.Mode().IsRegular() || isReparse(fi) {
-			continue
+		if err := removeRegular(filepath.Join(s.dir, name), info); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("accounts: remove temp file: %w", err)
 		}
-		if !s.abandonedPending(path, fi.Size()) {
-			continue
-		}
-		_ = removeRegular(path, fi)
 	}
+	return nil
 }
 
-// abandonedPending reports whether path holds a torn or complete write of this
-// package: shorter than any complete sealed state, or a record that parses.
-func (s *Store) abandonedPending(path string, size int64) bool {
-	if size < minPendingBytes {
-		return true
-	}
-	if size > MaxRecordSize {
+// abandonedPending reports whether a temp file is a save this store abandoned: a
+// torn write, or a complete sealed record that was never committed.
+func (s *Store) abandonedPending(info os.FileInfo) bool {
+	if !info.Mode().IsRegular() {
 		return false
 	}
-	raw, err := os.ReadFile(path)
+	if info.Size() < minPendingBytes {
+		// Shorter than any complete document: the remainder of a torn write.
+		return true
+	}
+	if info.Size() > MaxRecordSize {
+		return false
+	}
+	raw, err := s.readFile(info.Name(), MaxRecordSize)
 	if err != nil {
 		return false
 	}
@@ -199,75 +244,168 @@ func (s *Store) abandonedPending(path string, size int64) bool {
 	return err == nil
 }
 
-// List returns the readable accounts, newest first, and how many record
-// files were skipped as corrupt.
+// List returns the readable accounts, newest first, and how many rows hold a
+// record that no longer validates. Those rows are skipped here and can still be
+// removed.
 func (s *Store) List() ([]Account, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	recs, corrupt, _, err := s.scan()
+	ctx := context.Background()
+	if err := s.checkDir(); err != nil {
+		return nil, 0, err
+	}
+	recs, corrupt, err := s.storedRecords(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
-	out := make([]Account, len(recs))
-	for i, r := range recs {
+	attachments, err := s.attachments(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]Account, 0, len(recs))
+	for _, r := range recs {
 		a := r.Account
-		a.TajiduoLinked, a.TajiduoState = s.tajiduoState(a.ID)
-		out[i] = a
+		a.TajiduoLinked, a.TajiduoState = s.tajiduoState(r.ID, attachments[r.ID])
+		out = append(out, a)
 	}
 	return out, corrupt, nil
 }
 
-// Save stores sec: a refresh of a known channel uid replaces that account in
-// place (same id, new SavedAt) and keeps the committed label unless a non-empty
-// one is given; a new identity gets a new id and needs a label. a.ID and
-// a.SavedAt are ignored. Saving publishes the record atomically, so it never
-// leaves a partial record behind; use Prepare to hold the write until delivery.
+// storedRecord is one accounts row: the parsed record and the identity_key
+// column, which is the record's own identity key or a placeholder when the
+// record carries none.
+type storedRecord struct {
+	record
+	identity string
+}
+
+// storedRecords reads every account row, newest first. A row whose record does
+// not parse is counted and skipped.
+func (s *Store) storedRecords(ctx context.Context) ([]storedRecord, int, error) {
+	rows, err := s.db.Query(ctx, `SELECT id, identity_key, record FROM accounts ORDER BY saved_at DESC, id`)
+	if err != nil {
+		return nil, 0, fmt.Errorf("accounts: list: %w", err)
+	}
+	defer rows.Close()
+	var (
+		recs    []storedRecord
+		corrupt int
+	)
+	for rows.Next() {
+		var (
+			id  string
+			key string
+			raw []byte
+		)
+		if err := rows.Scan(&id, &key, &raw); err != nil {
+			return nil, 0, fmt.Errorf("accounts: list: %w", err)
+		}
+		r, err := parseRecord(id, raw)
+		if err != nil {
+			corrupt++
+			continue
+		}
+		recs = append(recs, storedRecord{record: r, identity: key})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("accounts: list: %w", err)
+	}
+	return recs, corrupt, nil
+}
+
+// attachments reads the stored Tajiduo files by account id.
+func (s *Store) attachments(ctx context.Context) (map[string][]byte, error) {
+	rows, err := s.db.Query(ctx, `SELECT account_id, file FROM account_tajiduo`)
+	if err != nil {
+		return nil, fmt.Errorf("accounts: list attachments: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string][]byte)
+	for rows.Next() {
+		var (
+			id  string
+			raw []byte
+		)
+		if err := rows.Scan(&id, &raw); err != nil {
+			return nil, fmt.Errorf("accounts: list attachments: %w", err)
+		}
+		out[id] = raw
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("accounts: list attachments: %w", err)
+	}
+	return out, nil
+}
+
+// Save stores sec and returns the account it belongs to. A save whose identity
+// key is already stored updates that account; a new account needs a label.
 func (s *Store) Save(a Account, sec Secret) (Account, error) {
 	tx, err := s.prepare(a, sec, true)
 	if err != nil {
 		return Account{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback()
 		return Account{}, err
 	}
 	return tx.account, nil
 }
 
+// soleAccount reports the only readable account, or "" when there are none or
+// several.
+func (s *Store) soleAccount(ctx context.Context) (string, error) {
+	recs, _, err := s.storedRecords(ctx)
+	if err != nil {
+		return "", err
+	}
+	if len(recs) != 1 {
+		return "", nil
+	}
+	return recs[0].ID, nil
+}
+
+// sameChannelUID reports whether a stored record belongs to the same channel
+// login. The comparison is constant time so a save does not leak how many bytes
+// of a ChannelUID matched.
 func (s *Store) sameChannelUID(r record, uid string) bool {
-	key, plain, err := s.open(r)
+	_, plain, err := s.open(r)
 	if err != nil {
 		return false
 	}
-	defer wipeBytes(key)
-	defer wipeBytes(plain)
 	sec, err := decodePayload(plain)
+	wipeBytes(plain)
 	if err != nil {
 		return false
 	}
+	defer sec.Wipe()
 	return subtle.ConstantTimeCompare([]byte(sec.ChannelUID), []byte(uid)) == 1
 }
 
-// sealNew encrypts sec under a fresh data key and wraps the key, checking
-// that the protector can unwrap it again before anything is written.
+// sealNew seals sec under a fresh random data key and builds the canonical
+// record bytes. The key exists only inside this call and inside the sealed
+// record, so the database never holds a key the DPAPI wrapper does not protect.
 func (s *Store) sealNew(a Account, identity string, sec Secret) ([]byte, error) {
 	key := make([]byte, dataKeySize)
-	defer wipeBytes(key)
 	if _, err := rand.Read(key); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("accounts: generate data key: %w", err)
 	}
+	defer wipeBytes(key)
 	wrapped, err := s.p.Protect(key)
 	if err != nil {
 		return nil, fmt.Errorf("accounts: protect data key: %w", err)
 	}
 	if len(wrapped) == 0 || len(wrapped) > maxWrappedSize {
-		return nil, fmt.Errorf("accounts: protected key is %d bytes", len(wrapped))
+		return nil, fmt.Errorf("accounts: protect data key: %w: unexpected wrapped size %d", ErrCorrupt, len(wrapped))
 	}
-	check, err := s.p.Unprotect(wrapped)
-	ok := err == nil && subtle.ConstantTimeCompare(check, key) == 1
-	wipeBytes(check)
+	// A protector that cannot unwrap its own output would produce a record
+	// nothing can ever read; refuse before writing anything.
+	back, err := s.p.Unprotect(wrapped)
+	if err != nil {
+		return nil, fmt.Errorf("accounts: verify data key: %w", err)
+	}
+	ok := len(back) == dataKeySize && subtle.ConstantTimeCompare(back, key) == 1
+	wipeBytes(back)
 	if !ok {
-		return nil, fmt.Errorf("accounts: protected key does not unwrap to the original: %v", err)
+		return nil, fmt.Errorf("accounts: verify data key: %w: round trip mismatch", ErrCorrupt)
 	}
 	plain, err := encodePayload(sec)
 	if err != nil {
@@ -281,48 +419,55 @@ func (s *Store) sealNew(a Account, identity string, sec Secret) ([]byte, error) 
 	return encodeRecord(r)
 }
 
-// open unwraps r's key and decrypts its payload. Callers wipe both.
+// open decrypts one record and returns its data key and plaintext.
 func (s *Store) open(r record) (key, plain []byte, err error) {
 	key, err = s.p.Unprotect(r.wrapped)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %w", ErrUnlock, err)
+		return nil, nil, fmt.Errorf("%w: unprotect data key: %w", ErrUnlock, err)
 	}
 	if len(key) != dataKeySize {
 		wipeBytes(key)
-		return nil, nil, fmt.Errorf("%w: data key has wrong size", ErrUnlock)
+		return nil, nil, fmt.Errorf("%w: data key has %d bytes", ErrCorrupt, len(key))
 	}
 	aead, err := newGCM(key)
-	if err == nil {
-		plain, err = aead.Open(nil, r.nonce, r.sealed, recordAAD(r.Account, r.identityKey))
-	}
 	if err != nil {
 		wipeBytes(key)
-		return nil, nil, fmt.Errorf("%w: authentication failed", ErrUnlock)
+		return nil, nil, err
+	}
+	plain, err = aead.Open(nil, r.nonce, r.sealed, recordAAD(r.Account, r.identityKey))
+	if err != nil {
+		wipeBytes(key)
+		return nil, nil, fmt.Errorf("%w: open record: %w", ErrUnlock, err)
 	}
 	return key, plain, nil
 }
 
-// Unlock decrypts the secret of account id.
+// Unlock decrypts the stored secret of one account.
 func (s *Store) Unlock(id string) (Secret, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ctx := context.Background()
 	if err := s.checkDir(); err != nil {
 		return Secret{}, err
 	}
-	r, err := s.load(id)
+	r, err := s.load(ctx, id)
 	if err != nil {
 		return Secret{}, err
 	}
-	key, plain, err := s.open(r)
+	return s.unlock(r)
+}
+
+// unlock decrypts one already-loaded record. The caller holds s.mu.
+func (s *Store) unlock(r record) (Secret, error) {
+	_, plain, err := s.open(r)
 	if err != nil {
 		return Secret{}, err
 	}
-	defer wipeBytes(key)
 	defer wipeBytes(plain)
 	return decodePayload(plain)
 }
 
-// Rename changes the label of account id, keeping its secret and SavedAt.
+// Rename changes the label of a stored account.
 func (s *Store) Rename(id, label string) error {
 	label, err := sanitizeLabel(label)
 	if err != nil {
@@ -330,10 +475,11 @@ func (s *Store) Rename(id, label string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ctx := context.Background()
 	if err := s.checkDir(); err != nil {
 		return err
 	}
-	r, err := s.load(id)
+	r, err := s.load(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -343,6 +489,8 @@ func (s *Store) Rename(id, label string) error {
 	}
 	defer wipeBytes(key)
 	defer wipeBytes(plain)
+	// The label is part of the AAD, so the record has to be sealed again; the
+	// data key stays the same and SavedAt keeps the account's order.
 	r.Label = label
 	if err := seal(&r, key, plain); err != nil {
 		return err
@@ -351,193 +499,159 @@ func (s *Store) Rename(id, label string) error {
 	if err != nil {
 		return err
 	}
-	return s.writeAtomic(r.ID+recordExt, data)
+	return s.writeTx(ctx, func(ctx context.Context, tx *sql.Tx) (mirrorChange, error) {
+		if _, err := tx.ExecContext(ctx, `UPDATE accounts SET label = ?, record = ?, updated_at = ? WHERE id = ?`,
+			r.Label, data, database.Stamp(s.now()), r.ID); err != nil {
+			return mirrorChange{}, fmt.Errorf("accounts: rename: %w", err)
+		}
+		return mirrorChange{write: map[string][]byte{r.ID + recordExt: data}}, nil
+	})
 }
 
-// Remove deletes account id, including a corrupt record, and forgets it as the
-// last used account. A junction or symlink in its place is never followed.
+// Remove deletes a stored account and its mirrors. Removing an account that is
+// not stored reports ErrNotFound; removing its files twice does not fail.
 func (s *Store) Remove(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.checkDir(); err != nil {
-		return err
-	}
+	ctx := context.Background()
 	if !isLowerHex(id, 32) {
 		return ErrNotFound
 	}
-	path := filepath.Join(s.dir, id+recordExt)
-	before, err := os.Lstat(path)
+	if err := s.checkDir(); err != nil {
+		return err
+	}
+	// Refuse before the rows go: a mirror swapped for a reparse point must never
+	// be followed, and the account must stay when its files cannot be cleaned
+	// up. A missing mirror is fine, the database is the authority.
+	path := s.mirrorPath(id + recordExt)
+	fi, err := os.Lstat(path)
 	switch {
+	case err == nil:
+		if !fi.Mode().IsRegular() || isReparse(fi) {
+			return fmt.Errorf("%w: %s is not a plain file", ErrUnsafePath, path)
+		}
 	case errors.Is(err, fs.ErrNotExist):
-		return ErrNotFound
 	case err != nil:
 		return fmt.Errorf("accounts: remove: %w", err)
 	}
-	// The attachment goes first: an interruption between the two removals then
-	// leaves an account without a Tajiduo link, never an orphan attachment.
-	if err := s.removeTajiduoFile(id); err != nil {
-		return fmt.Errorf("accounts: remove tajiduo: %w", err)
-	}
-	if err := removeRegular(path, before); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return ErrNotFound
+	// The attachment goes first: an interruption between the two removals leaves
+	// an account without a Tajiduo link, never an orphan attachment.
+	removed := []string{id + tajiduoExt, id + recordExt}
+	return s.writeTx(ctx, func(ctx context.Context, tx *sql.Tx) (mirrorChange, error) {
+		res, err := tx.ExecContext(ctx, `DELETE FROM accounts WHERE id = ?`, id)
+		if err != nil {
+			return mirrorChange{}, fmt.Errorf("accounts: remove: %w", err)
 		}
-		return fmt.Errorf("accounts: remove: %w", err)
-	}
-	if last, state := s.readLast(); state && last == id {
-		return s.writeLast("")
-	}
-	return nil
+		if n, err := res.RowsAffected(); err != nil {
+			return mirrorChange{}, fmt.Errorf("accounts: remove: %w", err)
+		} else if n == 0 {
+			return mirrorChange{}, ErrNotFound
+		}
+		change := mirrorChange{remove: removed}
+		var last sql.NullString
+		err = tx.QueryRowContext(ctx, `SELECT last_account FROM account_state WHERE id = 1`).Scan(&last)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return change, nil
+		case err != nil:
+			return mirrorChange{}, fmt.Errorf("accounts: remove: %w", err)
+		}
+		if !last.Valid || last.String != id {
+			return change, nil
+		}
+		if err := s.forgetLast(ctx, tx, &change); err != nil {
+			return mirrorChange{}, err
+		}
+		return change, nil
+	})
 }
 
-// Last returns the remembered account id, or "" when none is remembered or
-// the remembered record is gone or corrupt. If nothing was ever remembered
-// and exactly one account exists, that account is returned.
+// Last returns the remembered account, or "" when nothing is remembered. When no
+// choice was ever recorded, the only account is the answer: a lone account needs
+// no picker.
 func (s *Store) Last() (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ctx := context.Background()
 	if err := s.checkDir(); err != nil {
 		return "", err
 	}
-	last, state := s.readLast()
-	if !state {
-		recs, _, saturated, err := s.scan()
-		if err != nil {
-			return "", err
-		}
-		if saturated {
-			return "", ErrScanSaturated
-		}
-		if len(recs) != 1 {
-			return "", nil
-		}
-		return recs[0].ID, nil
+	id, chosen, err := s.readLast(ctx)
+	if err != nil {
+		return "", err
 	}
-	if last == "" {
+	if !chosen {
+		return s.soleAccount(ctx)
+	}
+	if id == "" {
 		return "", nil
 	}
-	if _, err := s.load(last); err != nil {
+	// A remembered account that no longer loads is not a choice any more.
+	if _, err := s.load(ctx, id); err != nil {
 		return "", nil
 	}
-	return last, nil
+	return id, nil
 }
 
-// SetLast remembers id as the last used account; "" remembers none.
+// SetLast remembers the account the launcher starts with. An empty id records
+// "explicitly none", which is not the same as never having chosen.
 func (s *Store) SetLast(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ctx := context.Background()
 	if err := s.checkDir(); err != nil {
 		return err
 	}
 	if id != "" {
-		if _, err := s.load(id); err != nil {
+		if _, err := s.load(ctx, id); err != nil {
 			return err
 		}
 	}
-	return s.writeLast(id)
+	return s.writeLast(ctx, id)
 }
 
-// scan reads up to maxScanCandidates record files, newest first, counting
-// invalid ones. saturated reports that candidates were left unvisited.
-func (s *Store) scan() (recs []record, corrupt int, saturated bool, err error) {
-	if err := s.checkDir(); err != nil {
-		return nil, 0, false, err
-	}
-	entries, err := os.ReadDir(s.dir)
-	if err != nil {
-		return nil, 0, false, fmt.Errorf("accounts: read store: %w", err)
-	}
-	// Record names present on disk, valid or corrupt, decide whether a .tjd has
-	// an owning record. A .tjd beside no .acct is an orphan: the existing
-	// cleanup only counts unusable files and never deletes them, so an orphan is
-	// counted as corrupt and left in place.
-	recordIDs := make(map[string]bool, len(entries))
-	for _, e := range entries {
-		if id, ok := strings.CutSuffix(e.Name(), recordExt); ok && isLowerHex(id, 32) {
-			recordIDs[id] = true
-		}
-	}
-	visited := 0
-	for _, e := range entries {
-		id, ok := strings.CutSuffix(e.Name(), recordExt)
-		if !ok || !isLowerHex(id, 32) {
-			continue
-		}
-		if visited == maxScanCandidates {
-			saturated = true
-			break
-		}
-		visited++
-		r, err := s.load(id)
-		switch {
-		case err == nil:
-			recs = append(recs, r)
-		case errors.Is(err, ErrNotFound):
-		default:
-			corrupt++
-		}
-	}
-	for _, e := range entries {
-		id, ok := strings.CutSuffix(e.Name(), tajiduoExt)
-		if !ok || !isLowerHex(id, 32) {
-			continue
-		}
-		if !recordIDs[id] {
-			corrupt++
-		}
-	}
-	sort.Slice(recs, func(i, j int) bool {
-		if !recs[i].SavedAt.Equal(recs[j].SavedAt) {
-			return recs[i].SavedAt.After(recs[j].SavedAt)
-		}
-		return recs[i].ID < recs[j].ID
-	})
-	return recs, corrupt, saturated, nil
-}
-
-func (s *Store) load(id string) (record, error) {
+// load reads one record row by id.
+func (s *Store) load(ctx context.Context, id string) (record, error) {
 	if !isLowerHex(id, 32) {
 		return record{}, ErrNotFound
 	}
-	raw, err := s.readFile(id+recordExt, MaxRecordSize)
+	var raw []byte
+	err := s.db.QueryRow(ctx, `SELECT record FROM accounts WHERE id = ?`, id).Scan(&raw)
 	switch {
-	case errors.Is(err, fs.ErrNotExist):
+	case errors.Is(err, sql.ErrNoRows):
 		return record{}, ErrNotFound
-	case errors.Is(err, errNotRegular), errors.Is(err, errTooLarge):
-		return record{}, fmt.Errorf("%w: %w", ErrCorrupt, err)
 	case err != nil:
-		return record{}, err
+		return record{}, fmt.Errorf("accounts: load: %w", err)
 	}
 	return parseRecord(id, raw)
 }
 
-// readFile reads a regular, non-reparse file of at most limit bytes and
-// re-applies the private DACL on the way in.
+// readFile reads one mirror file without following a reparse point and without
+// trusting its size.
 func (s *Store) readFile(name string, limit int) ([]byte, error) {
-	path := filepath.Join(s.dir, name)
-	before, err := os.Lstat(path)
+	path := s.mirrorPath(name)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
 	}
-	if !before.Mode().IsRegular() || isReparse(before) {
+	if !info.Mode().IsRegular() || isReparse(info) {
 		return nil, errNotRegular
 	}
-	if before.Size() > int64(limit) {
+	if info.Size() > int64(limit) {
 		return nil, errTooLarge
 	}
 	f, err := openRegular(path)
 	if err != nil {
-		if errors.Is(err, ErrUnsafePath) {
-			return nil, errNotRegular
-		}
 		return nil, err
 	}
 	defer f.Close()
+	// The file may have been swapped between Lstat and open; compare the
+	// identity before reading any content.
 	opened, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
-	if !os.SameFile(before, opened) {
+	if !os.SameFile(info, opened) {
 		return nil, errNotRegular
 	}
 	raw, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
@@ -550,64 +664,45 @@ func (s *Store) readFile(name string, limit int) ([]byte, error) {
 	return raw, nil
 }
 
-// writeAtomic writes data to a fresh private temp file, fsyncs it and renames
-// it over name. On any failure the temp file is removed and name is unchanged.
-func (s *Store) writeAtomic(name string, data []byte) error {
-	tmp, err := s.tempPath()
-	if err != nil {
-		return err
-	}
-	if err := writePrivateFile(tmp, data); err != nil {
-		return err
-	}
-	if err := s.rename(tmp, filepath.Join(s.dir, name)); err != nil {
-		_ = removeRegular(tmp, nil)
-		return fmt.Errorf("accounts: commit %s: %w", name, err)
-	}
-	return nil
-}
-
-// writePending writes data to a durable, private candidate file and returns its
-// path. The candidate stays invisible to List and Unlock until Commit renames
-// it into place.
+// writePending stages a sealed record in the directory. It stays invisible to
+// every reader until Commit replaces the target with it.
 func (s *Store) writePending(data []byte) (string, error) {
-	tmp, err := s.tempPath()
+	path, err := s.tempPath()
 	if err != nil {
 		return "", err
 	}
-	if err := writePrivateFile(tmp, data); err != nil {
-		return "", err
+	if err := writePrivateFile(path, data); err != nil {
+		return "", fmt.Errorf("accounts: stage record: %w", err)
 	}
-	return tmp, nil
+	return path, nil
 }
 
 func (s *Store) tempPath() (string, error) {
-	var suffix [8]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		return "", err
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("accounts: temp name: %w", err)
 	}
-	return filepath.Join(s.dir, tempPrefix+hex.EncodeToString(suffix[:])+tempSuffix), nil
+	return filepath.Join(s.dir, tempPrefix+hex.EncodeToString(b[:])+tempSuffix), nil
 }
 
-// writePrivateFile creates path with the private DACL, writes data and flushes
-// it to disk. On failure the partial file is removed.
+// writePrivateFile creates path with a private DACL and flushes it, so a crash
+// cannot leave a file whose content is shorter than its size.
 func writePrivateFile(path string, data []byte) error {
 	f, err := createPrivate(path)
 	if err != nil {
-		return fmt.Errorf("accounts: create temp file: %w", err)
+		return err
 	}
-	_, err = f.Write(data)
-	if err == nil {
-		err = f.Sync()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(path)
+		return err
 	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(path)
+		return err
 	}
-	if err != nil {
-		_ = removeRegular(path, nil)
-		return fmt.Errorf("accounts: write temp file: %w", err)
-	}
-	return nil
+	return f.Close()
 }
 
 func newID() (string, error) {

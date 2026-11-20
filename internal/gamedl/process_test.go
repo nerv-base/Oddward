@@ -41,7 +41,7 @@ func TestCrashWorker(t *testing.T) {
 	roots := x509.NewCertPool()
 	roots.AddCert(parsed)
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}}}
-	e, err := gamedl.New(gamedl.Options{WorkRoot: os.Getenv("ODDWARD_GAMEDL_WORK"), StateRoot: os.Getenv("ODDWARD_GAMEDL_STATE"), Client: client, Resolve: func(context.Context, gameres.Source) ([]string, error) {
+	e, err := gamedl.New(gamedl.Options{DB: testDBAt(t, os.Getenv("ODDWARD_GAMEDL_STATE")), WorkRoot: os.Getenv("ODDWARD_GAMEDL_WORK"), StateRoot: os.Getenv("ODDWARD_GAMEDL_STATE"), Client: client, Resolve: func(context.Context, gameres.Source) ([]string, error) {
 		return []string{os.Getenv("ODDWARD_GAMEDL_URL")}, nil
 	}, Parameters: gamedl.Parameters{ChunkSize: 1 << 20, ConnectionsPerFile: 1}})
 	if err != nil {
@@ -116,7 +116,7 @@ func TestKilledProcessReleasesLockAndResumesDurableChunk(t *testing.T) {
 	}
 	cmd.Wait()
 	killed = true
-	e, err := gamedl.New(gamedl.Options{WorkRoot: work, StateRoot: state, Client: server.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) { return []string{server.URL}, nil }, Parameters: gamedl.Parameters{ChunkSize: 1 << 20, ConnectionsPerFile: 1}})
+	e, err := gamedl.New(gamedl.Options{DB: testDBAt(t, state), WorkRoot: work, StateRoot: state, Client: server.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) { return []string{server.URL}, nil }, Parameters: gamedl.Parameters{ChunkSize: 1 << 20, ConnectionsPerFile: 1}})
 	if err != nil {
 		t.Fatalf("kernel lock survived process death: %v", err)
 	}

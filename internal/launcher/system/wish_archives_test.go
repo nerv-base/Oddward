@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/nerv-base/Oddward/internal/bwiki"
+	"github.com/nerv-base/Oddward/internal/database"
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 	"github.com/nerv-base/Oddward/internal/gacha"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
 )
@@ -22,12 +24,21 @@ import (
 // directory and returns it together with the concrete gacha archive directory.
 func newTestWishArchives(t *testing.T) (*WishArchives, string) {
 	t.Helper()
+	w, _, gachaDir := newTestWishArchivesDB(t)
+	return w, gachaDir
+}
+
+// newTestWishArchivesDB is newTestWishArchives with the database exposed, for
+// tests that inspect migration state or mirrors.
+func newTestWishArchivesDB(t *testing.T) (*WishArchives, *database.DB, string) {
+	t.Helper()
 	dataDir := t.TempDir()
-	w, err := NewWishArchives(dataDir)
+	db := dbtest.Open(t)
+	w, err := NewWishArchives(db, dataDir)
 	if err != nil {
 		t.Fatalf("NewWishArchives: %v", err)
 	}
-	return w, filepath.Join(dataDir, "gacha")
+	return w, db, filepath.Join(dataDir, "gacha")
 }
 
 // sampleArchive builds a deterministic, valid archive. Records share the same
@@ -144,8 +155,11 @@ func TestWishArchivesCatalogIgnoresWikiFailure(t *testing.T) {
 }
 
 func TestNewWishArchivesRejectsRelativePath(t *testing.T) {
-	if _, err := NewWishArchives("relative/data"); err == nil {
+	if _, err := NewWishArchives(dbtest.Open(t), "relative/data"); err == nil {
 		t.Fatal("NewWishArchives accepted a relative data directory")
+	}
+	if _, err := NewWishArchives(nil, t.TempDir()); err == nil {
+		t.Fatal("NewWishArchives accepted a nil database")
 	}
 }
 
@@ -476,5 +490,64 @@ func TestWishArchivesCanceledContext(t *testing.T) {
 	}
 	if err := w.Export(ctx, filepath.Join(t.TempDir(), "x.json"), "100000001", state.WishOddward); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Export err = %v, want context.Canceled", err)
+	}
+	if err := w.ImportLegacy(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ImportLegacy err = %v, want context.Canceled", err)
+	}
+}
+
+// fakeWikiImporter records whether WishArchives delegated the wiki migration.
+type fakeWikiImporter struct {
+	imported *bool
+	err      error
+}
+
+func (f fakeWikiImporter) Catalog(context.Context) (bwiki.Catalog, error) {
+	return bwiki.Catalog{}, f.err
+}
+
+func (f fakeWikiImporter) ImportLegacy(context.Context) error {
+	*f.imported = true
+	return f.err
+}
+
+func TestWishArchivesImportLegacyAdoptsFilesAndWiki(t *testing.T) {
+	ctx := context.Background()
+	w, db, gachaDir := newTestWishArchivesDB(t)
+	const role = "100000011"
+	archive := sampleArchive(role, 2)
+	data, err := gacha.ExportOddward(archive, time.UnixMilli(1700000000000).UTC())
+	if err != nil {
+		t.Fatalf("ExportOddward: %v", err)
+	}
+	mustWriteFile(t, gachaDir, role+".json", data)
+
+	imported := false
+	w.wiki = fakeWikiImporter{imported: &imported}
+	if err := w.ImportLegacy(ctx); err != nil {
+		t.Fatalf("ImportLegacy: %v", err)
+	}
+	if !imported {
+		t.Fatal("ImportLegacy did not delegate to the wiki store")
+	}
+	got, err := w.Load(ctx, role)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.RoleID != role || len(got.Records) != 2 {
+		t.Fatalf("Load = role %q with %d records, want %s with 2", got.RoleID, len(got.Records), role)
+	}
+	state, found, err := db.MigrationState(ctx, gacha.Domain)
+	if err != nil || !found || state.Status != database.MigrationDone {
+		t.Fatalf("migration = %+v, found %v, %v, want done", state, found, err)
+	}
+
+	// A second start reconciles nothing and a wiki-less instance still imports.
+	if err := w.ImportLegacy(ctx); err != nil {
+		t.Fatalf("second ImportLegacy: %v", err)
+	}
+	w.wiki = nil
+	if err := w.ImportLegacy(ctx); err != nil {
+		t.Fatalf("ImportLegacy without a wiki: %v", err)
 	}
 }

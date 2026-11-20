@@ -35,7 +35,7 @@ func (b *GameDownloadBackend) collectDownloadCache(ctx context.Context, p *downl
 		}
 	}
 	options := gamedl.GCOptions{
-		WorkRoot: downloadWork(p.root), StateRoot: b.taskRoot(p.key), Lease: lease,
+		DB: b.DB, WorkRoot: downloadWork(p.root), StateRoot: b.taskRoot(p.key), Lease: lease,
 		Protected: protected, MaxBlobBytes: 0, MaxAge: 14 * 24 * time.Hour,
 	}
 	_, _ = gamedl.Collect(ctx, options)

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 )
 
 func TestTxnFreshOnlyCreatesVerifiedTargetsAndExplicitBootstrap(t *testing.T) {
@@ -21,10 +23,7 @@ func TestTxnFreshOnlyCreatesVerifiedTargetsAndExplicitBootstrap(t *testing.T) {
 			if e := os.MkdirAll(work, 0700); e != nil {
 				t.Fatal(e)
 			}
-			s, e := NewStore(t.TempDir())
-			if e != nil {
-				t.Fatal(e)
-			}
+			s := newStore(t, dbtest.Open(t), t.TempDir())
 			key, _ := InstallKey(root)
 			target := txnTarget("data.bin", "new-data")
 			candidate := InstallRecord{Schema: 2, Root: root, InstallKey: key, Mode: "fresh", State: "installing", Branch: "PC_150", Version: "1.0", ListHash: fmt.Sprintf("%x", md5.Sum([]byte("list"))), VerifyCoverage: "none", CreatedAt: time.Now().UTC(), Targets: []InstallTarget{target}}
@@ -44,7 +43,7 @@ func TestTxnFreshOnlyCreatesVerifiedTargetsAndExplicitBootstrap(t *testing.T) {
 					return nil
 				}
 			}
-			_, e = s.Commit(context.Background(), in)
+			_, e := s.Commit(context.Background(), in)
 			if interrupt {
 				if e == nil {
 					t.Fatal("missing stop")

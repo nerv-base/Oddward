@@ -25,7 +25,7 @@ func verifyOwnedFixture(t *testing.T) (*Store, InstallRecord) {
 	now := time.Now().UTC()
 	record := InstallRecord{Schema: 2, InstallKey: key, Root: root, Mode: "oddward", State: "ready", Branch: "PC_150", Version: "1.2.3", ListHash: adoptDigest([]byte("owned manifest")), ManifestDigest: adoptDigest([]byte("owned manifest")), TxnID: "published-native-transaction", BaseVersion: "1.2.2", VerifyCoverage: "full", VerifiedTargets: 2, CreatedAt: now.Add(-time.Hour), PublishedAt: now,
 		Targets: []InstallTarget{{Path: "Client/WindowsNoEditor/HT/Content/Paks/a.pak", MD5: adoptDigest([]byte("correct first")), Size: 13}, {Path: "Client/WindowsNoEditor/HT/Content/Paks/b.pak", MD5: adoptDigest([]byte("correct second")), Size: 14}}}
-	if err := s.writeInstall(record); err != nil {
+	if err := s.writeInstall(context.Background(), record); err != nil {
 		t.Fatal(err)
 	}
 	record, err = s.ReadInstall(root)

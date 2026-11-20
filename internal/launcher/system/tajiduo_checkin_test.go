@@ -15,6 +15,8 @@ import (
 
 	"github.com/nerv-base/Oddward/internal/checkin"
 	"github.com/nerv-base/Oddward/internal/cnlogin/accounts"
+	"github.com/nerv-base/Oddward/internal/database"
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
 	"github.com/nerv-base/Oddward/internal/tajiduo"
 )
@@ -41,6 +43,7 @@ type checkInWorld struct {
 	communityDone bool
 
 	backend   *TajiduoBackend
+	db        *database.DB
 	store     *accounts.Store
 	accountID string
 	dir       string
@@ -147,7 +150,8 @@ func newCheckInWorld(t *testing.T, linked bool) *checkInWorld {
 	t.Cleanup(server.Close)
 
 	dir := t.TempDir()
-	store, err := accounts.Open(filepath.Join(dir, "accounts"), tajiduoTestProtector{})
+	db := dbtest.OpenAt(t, dir)
+	store, err := accounts.Open(db, filepath.Join(dir, "accounts"), tajiduoTestProtector{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +176,7 @@ func newCheckInWorld(t *testing.T, linked bool) *checkInWorld {
 	if err := store.SetLast(account.ID); err != nil {
 		t.Fatal(err)
 	}
-	records, err := checkin.Open(filepath.Join(dir, "checkin"))
+	records, err := checkin.Open(db, filepath.Join(dir, "checkin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,18 +184,18 @@ func newCheckInWorld(t *testing.T, linked bool) *checkInWorld {
 	if err != nil {
 		t.Fatal(err)
 	}
-	archives, err := NewWishArchives(dir)
+	archives, err := NewWishArchives(db, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	world.backend = NewTajiduoBackend(store, client, archives, records)
-	world.store, world.accountID, world.dir = store, account.ID, dir
+	world.db, world.store, world.accountID, world.dir = db, store, account.ID, dir
 	return world
 }
 
 func (w *checkInWorld) ledger(t *testing.T, kind state.CheckInKind, roleScoped bool) (checkin.Record, bool) {
 	t.Helper()
-	records, err := checkin.Open(filepath.Join(w.dir, "checkin"))
+	records, err := checkin.Open(w.db, filepath.Join(w.dir, "checkin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +298,7 @@ func TestCheckInGameSignWritesOnceAndRecordsTheReward(t *testing.T) {
 
 func TestCheckInSignRefusesWhenAnotherLauncherHoldsTheLease(t *testing.T) {
 	world := newCheckInWorld(t, true)
-	other, err := checkin.Open(filepath.Join(world.dir, "checkin"))
+	other, err := checkin.Open(world.db, filepath.Join(world.dir, "checkin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -549,7 +553,7 @@ func TestCheckInExpiredCredentialAsksForRelink(t *testing.T) {
 // recordStore opens the same ledger the backend uses.
 func (w *checkInWorld) recordStore(t *testing.T) *checkin.Store {
 	t.Helper()
-	records, err := checkin.Open(filepath.Join(w.dir, "checkin"))
+	records, err := checkin.Open(w.db, filepath.Join(w.dir, "checkin"))
 	if err != nil {
 		t.Fatal(err)
 	}

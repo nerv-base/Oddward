@@ -47,7 +47,7 @@ func admissionFixture(t *testing.T) (*gamedl.Engine, gamedl.Task, <-chan request
 		http.ServeContent(w, r, "fixture", zeroTime, bytes.NewReader(objects[key]))
 	}))
 	t.Cleanup(server.Close)
-	e, err := gamedl.New(gamedl.Options{WorkRoot: t.TempDir(), StateRoot: t.TempDir(), Client: server.Client(), Resolve: func(_ context.Context, s gameres.Source) ([]string, error) {
+	e, err := gamedl.New(gamedl.Options{DB: testDB(t), WorkRoot: t.TempDir(), StateRoot: t.TempDir(), Client: server.Client(), Resolve: func(_ context.Context, s gameres.Source) ([]string, error) {
 		return []string{server.URL + "/" + s.Object.MD5}, nil
 	}, Parameters: gamedl.Parameters{ChunkSize: 1 << 20, FilesInFlight: 4, ConnectionsPerFile: 4}})
 	if err != nil {

@@ -8,6 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/nerv-base/Oddward/internal/database"
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 )
 
 func adoptPut(t *testing.T, root, name string, data []byte) {
@@ -45,7 +48,24 @@ func adoptConfig(manifest []byte) []byte {
 }
 func adoptStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := NewStore(t.TempDir())
+	return newStore(t, dbtest.Open(t), t.TempDir())
+}
+
+// newStore opens a store over an explicit database, so a test can restart the
+// launcher against the records a previous store committed.
+func newStore(t *testing.T, db *database.DB, stateRoot string) *Store {
+	t.Helper()
+	s, err := NewStore(db, stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// preloadStateStore opens the database-backed preload store over fresh roots.
+func preloadStateStore(t *testing.T, engineCache bool) PreloadStore {
+	t.Helper()
+	s, err := NewPreloadStore(dbtest.Open(t), t.TempDir(), t.TempDir(), engineCache)
 	if err != nil {
 		t.Fatal(err)
 	}

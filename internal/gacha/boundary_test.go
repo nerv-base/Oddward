@@ -14,15 +14,15 @@ import (
 	"time"
 )
 
-func TestStoreFailedReplacementCleansStage(t *testing.T) {
+func TestStoreFailedMirrorRefusesTheSave(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	s, err := NewStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s, _, dir := newTestStore(t)
 	a := fixtureArchive()
 	if err := s.Save(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := s.Load(ctx, a.RoleID)
+	if err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, a.RoleID+".json")
@@ -30,25 +30,37 @@ func TestStoreFailedReplacementCleansStage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0444); err != nil {
+	if err := os.Chmod(path, 0o444); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := os.Chmod(path, 0600); err != nil {
+		if err := os.Chmod(path, 0o600); err != nil {
 			t.Error(err)
 		}
 	})
+	// The mirror is written before the rows, so a mirror that cannot be replaced
+	// refuses the save instead of leaving rows a later start would revert: the
+	// archive on disk and the archive in the database both stay as they were.
 	a.Records[0].Pity = 20
 	if err := s.Save(ctx, a); err == nil {
-		t.Fatal("replaced a read-only target")
+		t.Fatal("replaced a read-only mirror")
+	} else if !strings.Contains(err.Error(), "write gacha/"+a.RoleID+" mirror") {
+		t.Fatalf("Save = %v, want the mirror write error", err)
 	}
 	after, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(before, after) {
-		t.Fatal("failed replacement changed archive", err)
+		t.Fatal("failed mirror write changed the archive", err)
 	}
-	stages, err := filepath.Glob(filepath.Join(dir, ".gacha-*.tmp"))
+	again, err := s.Load(ctx, a.RoleID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(stored, again) {
+		t.Fatalf("refused save changed the rows:\n%+v\n%+v", stored, again)
+	}
+	stages, err := filepath.Glob(filepath.Join(dir, ".mirror-*.tmp"))
 	if err != nil || len(stages) != 0 {
-		t.Fatal("failed replacement left stages", stages, err)
+		t.Fatal("failed mirror write left stages", stages, err)
 	}
 }
 
@@ -66,13 +78,12 @@ func TestStoredSchemaAndSizeBoundaries(t *testing.T) {
 	}
 	for name, data := range cases {
 		t.Run(name, func(t *testing.T) {
-			dir := t.TempDir()
-			s, err := NewStore(dir)
-			if err != nil {
+			s, _, dir := newTestStore(t)
+			if err := os.MkdirAll(dir, 0o700); err != nil {
 				t.Fatal(err)
 			}
 			path := filepath.Join(dir, "123456.json")
-			if err := os.WriteFile(path, data, 0600); err != nil {
+			if err := os.WriteFile(path, data, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := s.Load(context.Background(), "123456"); !errors.Is(err, ErrCorrupt) {
@@ -96,7 +107,8 @@ func TestStoreRejectsSymlinkAncestors(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Skipf("Windows symlink privilege unavailable: %v", err)
 	}
-	s, err := NewStore(filepath.Join(link, "gacha"))
+	_, db, _ := newTestStore(t)
+	s, err := NewStore(db, filepath.Join(link, "gacha"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +185,8 @@ func TestExportSizeAndPityRepresentability(t *testing.T) {
 		t.Fatal("export exceeded maximum")
 	}
 	dir := filepath.Join(t.TempDir(), "not-created")
-	store, err := NewStore(dir)
+	_, db, _ := newTestStore(t)
+	store, err := NewStore(db, dir)
 	if err != nil {
 		t.Fatal(err)
 	}

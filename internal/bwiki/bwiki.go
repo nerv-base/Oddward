@@ -7,6 +7,7 @@ package bwiki
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nerv-base/Oddward/internal/database"
 	"github.com/nerv-base/Oddward/internal/pinyin"
 )
 
@@ -36,6 +38,13 @@ const (
 	maxName         = 64
 	maxRarity       = 8
 	maxKey          = 64
+
+	// Domain is this package's migration_state and mirror domain. The arc
+	// catalog is one legacy file, so one domain row describes it.
+	Domain = "bwiki"
+
+	// ImportVersion is the importer generation recorded for Domain.
+	ImportVersion = 1
 )
 
 // Entry is the only metadata Oddward caches for an arc.
@@ -174,22 +183,42 @@ func normalRarity(v string) string {
 	return v
 }
 
-// Store keeps the cache under one launcher-owned directory.
+// Store keeps the arc catalog in the database and its icon files under one
+// launcher-owned directory. The legacy arcs.json is written as a mirror because
+// the updater can roll the launcher back to a build that reads only files. Icon
+// bytes stay plain files: a lookup already costs one os.ReadFile, so an
+// asset_cache row would only duplicate size and digest without saving a read.
 type Store struct {
+	db      *database.DB
 	dir     string
 	fetcher *Fetcher
 	now     func() time.Time
 	mu      sync.Mutex
 }
 
-func Open(dir string, client *http.Client) (*Store, error) {
+// Open binds the catalog to db and the icon cache to dir, which must be
+// absolute.
+func Open(db *database.DB, dir string, client *http.Client) (*Store, error) {
+	if db == nil {
+		return nil, errors.New("bwiki cache requires an open database")
+	}
 	if !filepath.IsAbs(dir) {
 		return nil, errors.New("bwiki cache directory must be absolute")
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	return &Store{dir: dir, fetcher: NewFetcher(client), now: time.Now}, nil
+	return &Store{db: db, dir: dir, fetcher: NewFetcher(client), now: time.Now}, nil
+}
+
+// ImportLegacy imports the legacy cache file once and leaves the rows alone when
+// the file is absent. A later start re-runs the import only when that mirror no
+// longer matches the digest this build recorded.
+func (s *Store) ImportLegacy(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.RunImport(ctx, Domain, ImportVersion, s.importLegacy)
+	return err
 }
 
 func (s *Store) Catalog(ctx context.Context) (Catalog, error) {
@@ -199,7 +228,7 @@ func (s *Store) Catalog(ctx context.Context) (Catalog, error) {
 }
 
 func (s *Store) catalog(ctx context.Context) (Catalog, error) {
-	cached, cacheErr := s.load()
+	cached, cacheErr := s.load(ctx)
 	if cacheErr == nil && s.now().Sub(cached.FetchedAt) < cacheTTL {
 		return cached, nil
 	}
@@ -210,7 +239,7 @@ func (s *Store) catalog(ctx context.Context) (Catalog, error) {
 		}
 		return Catalog{}, err
 	}
-	if err := s.save(fresh); err != nil {
+	if err := s.save(ctx, fresh); err != nil {
 		return fresh, err
 	}
 	return fresh, nil
@@ -223,7 +252,7 @@ func (s *Store) Refresh(ctx context.Context) (Catalog, error) {
 	if err != nil {
 		return Catalog{}, err
 	}
-	if err := s.save(fresh); err != nil {
+	if err := s.save(ctx, fresh); err != nil {
 		return fresh, err
 	}
 	return fresh, nil
@@ -307,19 +336,110 @@ type diskCatalog struct {
 	Items     map[string]diskEntry `json:"items"`
 }
 
-func (s *Store) load() (Catalog, error) {
-	file := filepath.Join(s.dir, cacheFile)
-	info, err := os.Stat(file)
+// load reads the catalog and the time it was fetched from the database. A
+// database without a cache row is a cache miss, not an empty catalog, because
+// the caller must not treat an unfetched catalog as fresh.
+func (s *Store) load(ctx context.Context) (Catalog, error) {
+	var fetchedAt int64
+	if err := s.db.QueryRow(ctx, `SELECT fetched_at FROM gacha_arcs_meta WHERE id = 1`).Scan(&fetchedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Catalog{}, fmt.Errorf("%w: bwiki arc cache", os.ErrNotExist)
+		}
+		return Catalog{}, err
+	}
+	c := Catalog{FetchedAt: database.StampInt(fetchedAt), Items: make(map[string]Entry)}
+	rows, err := s.db.Query(ctx, `SELECT item_id, name, rarity FROM gacha_arcs`)
 	if err != nil {
 		return Catalog{}, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > maxCatalogSize {
-		return Catalog{}, errors.New("bwiki: cache has an unusable shape")
+	defer rows.Close()
+	for rows.Next() {
+		var id, name, rarity string
+		if err := rows.Scan(&id, &name, &rarity); err != nil {
+			return Catalog{}, err
+		}
+		// The table stores the game identifier; the catalog is keyed by the
+		// effect key after the fork_ prefix, which is how the wiki names it.
+		if !validID(id) || len(name) > maxName || len(rarity) > maxRarity {
+			return Catalog{}, errors.New("bwiki: invalid cache entry")
+		}
+		c.Items[id[5:]] = Entry{Name: name, Rarity: rarity}
 	}
-	data, err := os.ReadFile(file)
-	if err != nil {
+	if err := rows.Err(); err != nil {
 		return Catalog{}, err
 	}
+	return c, nil
+}
+
+// save replaces the catalog rows and their fetch time in one transaction and
+// writes the legacy cache file as a mirror afterwards.
+func (s *Store) save(ctx context.Context, c Catalog) error {
+	if len(c.Items) == 0 || len(c.Items) > maxItems || c.FetchedAt.IsZero() {
+		return errors.New("bwiki: refusing to save an empty cache")
+	}
+	data, err := encodeCache(c)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(s.dir, cacheFile)
+	err = s.db.Tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if err := putArcs(ctx, tx, c); err != nil {
+			return err
+		}
+		return s.db.RecordMirror(ctx, tx, Domain, path, database.Digest(data))
+	})
+	if err != nil {
+		return err
+	}
+	if err := database.WriteMirror(path, data); err != nil {
+		return fmt.Errorf("bwiki: arc cache is committed, legacy mirror not written: %w", err)
+	}
+	return nil
+}
+
+// putArcs replaces the stored catalog and its fetch time inside tx.
+func putArcs(ctx context.Context, tx *sql.Tx, c Catalog) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM gacha_arcs`); err != nil {
+		return fmt.Errorf("bwiki: replace arc cache: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM gacha_arcs_meta`); err != nil {
+		return fmt.Errorf("bwiki: replace arc cache time: %w", err)
+	}
+	for key, item := range c.Items {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO gacha_arcs(item_id, name, rarity, updated_at) VALUES(?, ?, ?, ?)`,
+			"fork_"+key, item.Name, item.Rarity, database.Stamp(c.FetchedAt)); err != nil {
+			return fmt.Errorf("bwiki: store arc: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO gacha_arcs_meta(id, fetched_at) VALUES(1, ?)`,
+		database.Stamp(c.FetchedAt)); err != nil {
+		return fmt.Errorf("bwiki: store arc cache time: %w", err)
+	}
+	return nil
+}
+
+// encodeCache validates the catalog and returns the legacy file bytes.
+func encodeCache(c Catalog) ([]byte, error) {
+	d := diskCatalog{Format: cacheFormat, Version: cacheVersion, FetchedAt: c.FetchedAt.UnixMilli(), Items: make(map[string]diskEntry, len(c.Items))}
+	for key, item := range c.Items {
+		if key == "" || len(key) > maxKey || item.Name == "" || len(item.Name) > maxName || len(item.Rarity) > maxRarity {
+			return nil, errors.New("bwiki: invalid cache entry")
+		}
+		d.Items[key] = diskEntry(item)
+	}
+	data, err := json.Marshal(d)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxCatalogSize {
+		return nil, errors.New("bwiki: cache exceeds its size limit")
+	}
+	return data, nil
+}
+
+func decodeCache(data []byte) (Catalog, error) {
 	var d diskCatalog
 	if err := json.Unmarshal(data, &d); err != nil {
 		return Catalog{}, err
@@ -332,30 +452,47 @@ func (s *Store) load() (Catalog, error) {
 		if key == "" || len(key) > maxKey || item.Name == "" || len(item.Name) > maxName || len(item.Rarity) > maxRarity {
 			return Catalog{}, errors.New("bwiki: invalid cache entry")
 		}
-		c.Items[key] = Entry{Name: item.Name, Rarity: item.Rarity}
+		c.Items[key] = Entry(item)
 	}
 	return c, nil
 }
 
-func (s *Store) save(c Catalog) error {
-	if len(c.Items) == 0 || len(c.Items) > maxItems || c.FetchedAt.IsZero() {
-		return errors.New("bwiki: refusing to save an empty cache")
+// importLegacy replaces the stored catalog with the legacy cache file, which is
+// the database.ImportFunc for Domain. The file is never rewritten, and one
+// unreadable file leaves the rows untouched.
+func (s *Store) importLegacy(ctx context.Context) (source, detail string, err error) {
+	path := filepath.Join(s.dir, cacheFile)
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return path, "no legacy arc cache", nil
 	}
-	d := diskCatalog{Format: cacheFormat, Version: cacheVersion, FetchedAt: c.FetchedAt.UnixMilli(), Items: make(map[string]diskEntry, len(c.Items))}
-	for key, item := range c.Items {
-		if key == "" || len(key) > maxKey || item.Name == "" || len(item.Name) > maxName || len(item.Rarity) > maxRarity {
-			return errors.New("bwiki: invalid cache entry")
-		}
-		d.Items[key] = diskEntry{Name: item.Name, Rarity: item.Rarity}
-	}
-	data, err := json.Marshal(d)
 	if err != nil {
-		return err
+		return path, "", err
 	}
-	if len(data) > maxCatalogSize {
-		return errors.New("bwiki: cache exceeds its size limit")
+	if !info.Mode().IsRegular() || info.Size() > maxCatalogSize {
+		return path, "", fmt.Errorf("%s: bwiki cache has an unusable shape", path)
 	}
-	return writeAtomic(filepath.Join(s.dir, cacheFile), data)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return path, "", err
+	}
+	c, err := decodeCache(data)
+	if err != nil {
+		return path, "", fmt.Errorf("%s: %w", path, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return path, "", err
+	}
+	err = s.db.Tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if err := putArcs(ctx, tx, c); err != nil {
+			return err
+		}
+		return s.db.RecordMirror(ctx, tx, Domain, path, database.Digest(data))
+	})
+	if err != nil {
+		return path, "", err
+	}
+	return path, fmt.Sprintf("%d arcs", len(c.Items)), nil
 }
 
 func writeAtomic(name string, data []byte) (err error) {

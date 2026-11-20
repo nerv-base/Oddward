@@ -4,7 +4,6 @@ package launchsettings_test
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,50 +11,63 @@ import (
 	"github.com/nerv-base/Oddward/internal/launchsettings"
 )
 
-func TestLauncherUIChoicesDefaultOnAndPersist(t *testing.T) {
+func TestLegacyUIChoicesDefaultOnAndImport(t *testing.T) {
 	ctx := context.Background()
-	file := filepath.Join(t.TempDir(), "launch.json")
-	store, _ := launchsettings.NewStore(file)
-	prefix := `,"gameRoot":"","riskVersion":"","skippedVersion":"","network":{},"downloads":{"rateLimitKiB":0}`
-	write := func(s string) {
+	store, db, file := newStore(t)
+	prefix := `,"gameRoot":` + quoteGameRoot(t, filepath.Join(t.TempDir(), "game")) + `,"riskVersion":"","skippedVersion":"","network":{},"downloads":{"rateLimitKiB":0}`
+	importDocument := func(document string) {
 		t.Helper()
-		if err := os.WriteFile(file, []byte(s), 0600); err != nil {
-			t.Fatal(err)
+		writeLegacy(t, file, []byte(document))
+		if ran := importLegacy(t, db, store); !ran {
+			t.Fatalf("import of %s did not run", document)
 		}
 	}
-	write(`{"version":4` + prefix + `}`)
-	got, err := store.Load(ctx)
-	if err != nil || got.UI != launchsettings.DefaultUI() {
-		t.Fatalf("v4 must inherit launcher UI defaults: %+v, %v", got.UI, err)
+	// A v4 document has no ui block at all, so every switch keeps its default.
+	importDocument(`{"version":4` + prefix + `}`)
+	if got := mustLoad(t, store).UI; got != launchsettings.DefaultUI() {
+		t.Fatalf("v4 ui = %+v, want the launcher defaults", got)
 	}
+	// v5 knew two switches and defaulted the update check on.
+	importDocument(`{"version":5` + prefix + `,"ui":{"closeToTray":false,"accentFollow":false}}`)
+	if got := mustLoad(t, store).UI; got != (launchsettings.UI{CloseToTray: false, AccentFollow: false, CheckUpdates: true}) {
+		t.Fatalf("v5 ui = %+v, want the update check defaulted on", got)
+	}
+	// A switch that the user turned off must stay off, and the mirror must be a
+	// version 6 document that a rolled-back build can read.
 	want := launchsettings.UI{CloseToTray: false, AccentFollow: false, CheckUpdates: false}
 	if err := store.Update(ctx, func(s *launchsettings.Settings) { s.UI = want }); err != nil {
 		t.Fatal(err)
 	}
-	reloaded, err := store.Load(ctx)
-	if err != nil || reloaded.UI != want {
-		t.Fatalf("ui choices = %+v, %v", reloaded.UI, err)
+	if got := mustLoad(t, store).UI; got != want {
+		t.Fatalf("ui choices = %+v, want %+v", got, want)
 	}
-	raw, err := os.ReadFile(file)
-	if err != nil {
-		t.Fatal(err)
+	raw := string(readFile(t, file))
+	if !strings.Contains(raw, `"version":6`) || !strings.Contains(raw, `"closeToTray":false`) ||
+		!strings.Contains(raw, `"accentFollow":false`) || !strings.Contains(raw, `"checkUpdates":false`) {
+		t.Fatalf("mirror must carry the version 6 ui choices: %s", raw)
 	}
-	if !strings.Contains(string(raw), `"version":6`) || !strings.Contains(string(raw), `"closeToTray":false`) || !strings.Contains(string(raw), `"accentFollow":false`) || !strings.Contains(string(raw), `"checkUpdates":false`) {
-		t.Fatalf("saved document must carry version 5 ui choices: %s", raw)
+}
+
+func TestMalformedUIBlocksAreRejected(t *testing.T) {
+	ctx := context.Background()
+	store, db, file := newStore(t)
+	prefix := `,"gameRoot":` + quoteGameRoot(t, filepath.Join(t.TempDir(), "game")) + `,"riskVersion":"","skippedVersion":"","network":{},"downloads":{"rateLimitKiB":0}`
+	writeLegacy(t, file, []byte(`{"version":6`+prefix+`,"ui":{"closeToTray":true,"accentFollow":true,"checkUpdates":true}}`))
+	if ran := importLegacy(t, db, store); !ran {
+		t.Fatal("the first import did not run")
 	}
-	write(`{"version":5` + prefix + `,"ui":{"closeToTray":false,"accentFollow":false}}`)
-	legacy, err := store.Load(ctx)
-	if err != nil || legacy.UI != (launchsettings.UI{CloseToTray: false, AccentFollow: false, CheckUpdates: true}) {
-		t.Fatalf("v5 must default the update check on: %+v, %v", legacy.UI, err)
-	}
+	previous := mustLoad(t, store)
 	for _, block := range []string{
 		`,"ui":null`, `,"ui":{}`, `,"ui":{"closeToTray":true,"accentFollow":true}`,
-		`,"ui":{"closeToTray":true,"accentFollow":true,"unknown":true}`,
+		`,"ui":{"closeToTray":true,"accentFollow":true,"checkUpdates":true,"unknown":true}`,
 		`,"ui":{"closeToTray":true,"closeToTray":false,"accentFollow":true,"checkUpdates":true}`,
 	} {
-		write(`{"version":6` + prefix + block + `}`)
-		if _, err := store.Load(ctx); err == nil {
-			t.Fatalf("accepted malformed ui block %s", block)
+		document := []byte(`{"version":6` + prefix + block + `}`)
+		writeLegacy(t, file, document)
+		if _, err := db.RunImport(ctx, launchsettings.Domain, launchsettings.ImportVersion, store.ImportLegacy); err == nil {
+			t.Errorf("accepted malformed ui block %s", block)
 		}
+		requireFile(t, file, document)
+		requireSettings(t, previous, mustLoad(t, store))
 	}
 }

@@ -4,26 +4,28 @@ package accounts
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/nerv-base/Oddward/internal/database"
 )
 
-// The Tajiduo attachment is a separate AES-GCM envelope beside <id>.acct. It
-// reuses the store's KeyProtector and AES-256-GCM scheme but has its own
-// version and AAD domain, and it binds the owning account id and center uid so
-// an attachment cannot be transplanted to another account.
+// The Tajiduo attachment is a separate AES-GCM envelope beside the account
+// record. It reuses the store's KeyProtector and AES-256-GCM scheme but has its
+// own version and AAD domain, and it binds the owning account id and center uid
+// so an attachment cannot be transplanted to another account. The database keeps
+// it in account_tajiduo; the mirrored <id>.tjd file exists for a rollback build.
 const (
 	tajiduoVersion    = 1
 	tajiduoExt        = ".tjd"
@@ -49,8 +51,8 @@ var (
 	ErrTajiduoImmutable = errors.New("accounts: Tajiduo update cannot change device id, center uid or laohu user id")
 )
 
-// TajiduoGrant is the encrypted Tajiduo session stored in <id>.tjd. It never
-// holds a plaintext phone, SMS code or access token; only these fields are
+// TajiduoGrant is the encrypted Tajiduo session stored in account_tajiduo. It
+// never holds a plaintext phone, SMS code or access token; only these fields are
 // persisted, always encrypted.
 type TajiduoGrant struct {
 	DeviceID     string // 32 uppercase hex chars, generated for this link
@@ -196,15 +198,15 @@ func parseTajiduoBytes(raw []byte) (tajiduoFile, error) {
 	return f, nil
 }
 
-// parseTajiduo additionally requires the attachment to belong to the file it
-// was read from.
+// parseTajiduo additionally requires the attachment to belong to the account row
+// it was read from.
 func parseTajiduo(id string, raw []byte) (tajiduoFile, error) {
 	f, err := parseTajiduoBytes(raw)
 	if err != nil {
 		return tajiduoFile{}, err
 	}
 	if f.ID != id {
-		return tajiduoFile{}, fmt.Errorf("%w: id does not match file name", ErrCorrupt)
+		return tajiduoFile{}, fmt.Errorf("%w: id does not match its account row", ErrCorrupt)
 	}
 	return f, nil
 }
@@ -318,19 +320,18 @@ func (s *Store) openTajiduo(f tajiduoFile) (TajiduoGrant, error) {
 	return g, nil
 }
 
-// loadTajiduo reads and decrypts the attachment for id. Callers hold s.mu.
-func (s *Store) loadTajiduo(id string) (TajiduoGrant, error) {
+// loadTajiduo reads and decrypts the attachment of id. Callers hold s.mu.
+func (s *Store) loadTajiduo(ctx context.Context, id string) (TajiduoGrant, error) {
 	if !isLowerHex(id, 32) {
 		return TajiduoGrant{}, ErrNoTajiduo
 	}
-	raw, err := s.readFile(id+tajiduoExt, MaxRecordSize)
+	var raw []byte
+	err := s.db.QueryRow(ctx, `SELECT file FROM account_tajiduo WHERE account_id = ?`, id).Scan(&raw)
 	switch {
-	case errors.Is(err, fs.ErrNotExist):
+	case errors.Is(err, sql.ErrNoRows):
 		return TajiduoGrant{}, ErrNoTajiduo
-	case errors.Is(err, errNotRegular), errors.Is(err, errTooLarge):
-		return TajiduoGrant{}, fmt.Errorf("%w: %w", ErrCorrupt, err)
 	case err != nil:
-		return TajiduoGrant{}, err
+		return TajiduoGrant{}, fmt.Errorf("accounts: load Tajiduo attachment: %w", err)
 	}
 	f, err := parseTajiduo(id, raw)
 	if err != nil {
@@ -339,40 +340,21 @@ func (s *Store) loadTajiduo(id string) (TajiduoGrant, error) {
 	return s.openTajiduo(f)
 }
 
-// tajiduoExists reports whether id has a plain attachment file. Callers hold s.mu.
-func (s *Store) tajiduoExists(id string) bool {
-	fi, err := os.Lstat(filepath.Join(s.dir, id+tajiduoExt))
-	return err == nil && fi.Mode().IsRegular() && !isReparse(fi)
-}
-
 // tajiduoState distinguishes a readable attachment from one that needs a new
-// link. A corrupt or undecryptable file must not be presented as usable.
-// Callers hold s.mu.
-func (s *Store) tajiduoState(id string) (bool, string) {
-	if !s.tajiduoExists(id) {
+// link. An attachment that does not parse or decrypt must not be presented as
+// usable.
+func (s *Store) tajiduoState(id string, raw []byte) (bool, string) {
+	if raw == nil {
 		return false, ""
 	}
-	if _, err := s.loadTajiduo(id); err != nil {
+	f, err := parseTajiduo(id, raw)
+	if err != nil {
+		return false, "needs-relink"
+	}
+	if _, err := s.openTajiduo(f); err != nil {
 		return false, "needs-relink"
 	}
 	return true, "linked"
-}
-
-// removeTajiduoFile deletes the attachment for id if present; a missing file is
-// not an error, so callers stay idempotent. Callers hold s.mu.
-func (s *Store) removeTajiduoFile(id string) error {
-	path := filepath.Join(s.dir, id+tajiduoExt)
-	fi, err := os.Lstat(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if err := removeRegular(path, fi); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	return nil
 }
 
 // LinkTajiduo stores g as the encrypted Tajiduo attachment for account id. The
@@ -385,10 +367,11 @@ func (s *Store) LinkTajiduo(id string, g TajiduoGrant) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ctx := context.Background()
 	if err := s.checkDir(); err != nil {
 		return err
 	}
-	r, err := s.load(id)
+	r, err := s.load(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -402,6 +385,7 @@ func (s *Store) LinkTajiduo(id string, g TajiduoGrant) error {
 	if decErr != nil {
 		return decErr
 	}
+	defer sec.Wipe()
 	if subtle.ConstantTimeCompare([]byte(g.LaohuUserID), []byte(sec.ChannelUID)) != 1 {
 		return ErrTajiduoMismatch
 	}
@@ -409,7 +393,19 @@ func (s *Store) LinkTajiduo(id string, g TajiduoGrant) error {
 	if err != nil {
 		return err
 	}
-	return s.writeAtomic(id+tajiduoExt, data)
+	return s.writeTx(ctx, func(ctx context.Context, tx *sql.Tx) (mirrorChange, error) {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO account_tajiduo(account_id, center_uid, file, updated_at)
+			VALUES(?, ?, ?, ?)
+			ON CONFLICT(account_id) DO UPDATE SET
+				center_uid = excluded.center_uid,
+				file = excluded.file,
+				updated_at = excluded.updated_at`,
+			id, g.CenterUID, data, database.Stamp(s.now())); err != nil {
+			return mirrorChange{}, fmt.Errorf("accounts: link Tajiduo: %w", err)
+		}
+		return mirrorChange{write: map[string][]byte{id + tajiduoExt: data}}, nil
+	})
 }
 
 // UnlockTajiduo returns the decrypted Tajiduo attachment for id. It returns
@@ -417,10 +413,11 @@ func (s *Store) LinkTajiduo(id string, g TajiduoGrant) error {
 func (s *Store) UnlockTajiduo(id string) (TajiduoGrant, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ctx := context.Background()
 	if err := s.checkDir(); err != nil {
 		return TajiduoGrant{}, err
 	}
-	return s.loadTajiduo(id)
+	return s.loadTajiduo(ctx, id)
 }
 
 // UpdateTajiduo persists a refreshed grant. The attachment must already exist
@@ -432,10 +429,11 @@ func (s *Store) UpdateTajiduo(id string, g TajiduoGrant) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ctx := context.Background()
 	if err := s.checkDir(); err != nil {
 		return err
 	}
-	existing, err := s.loadTajiduo(id)
+	existing, err := s.loadTajiduo(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -446,7 +444,13 @@ func (s *Store) UpdateTajiduo(id string, g TajiduoGrant) error {
 	if err != nil {
 		return err
 	}
-	return s.writeAtomic(id+tajiduoExt, data)
+	return s.writeTx(ctx, func(ctx context.Context, tx *sql.Tx) (mirrorChange, error) {
+		if _, err := tx.ExecContext(ctx, `UPDATE account_tajiduo SET center_uid = ?, file = ?, updated_at = ? WHERE account_id = ?`,
+			g.CenterUID, data, database.Stamp(s.now()), id); err != nil {
+			return mirrorChange{}, fmt.Errorf("accounts: update Tajiduo: %w", err)
+		}
+		return mirrorChange{write: map[string][]byte{id + tajiduoExt: data}}, nil
+	})
 }
 
 // UnlinkTajiduo deletes the Tajiduo attachment for id. It is idempotent: a
@@ -454,11 +458,17 @@ func (s *Store) UpdateTajiduo(id string, g TajiduoGrant) error {
 func (s *Store) UnlinkTajiduo(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ctx := context.Background()
 	if err := s.checkDir(); err != nil {
 		return err
 	}
 	if !isLowerHex(id, 32) {
 		return nil
 	}
-	return s.removeTajiduoFile(id)
+	return s.writeTx(ctx, func(ctx context.Context, tx *sql.Tx) (mirrorChange, error) {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM account_tajiduo WHERE account_id = ?`, id); err != nil {
+			return mirrorChange{}, fmt.Errorf("accounts: unlink Tajiduo: %w", err)
+		}
+		return mirrorChange{remove: []string{id + tajiduoExt}}, nil
+	})
 }

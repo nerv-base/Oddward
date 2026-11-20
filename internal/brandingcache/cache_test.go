@@ -1,276 +1,474 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+
 package brandingcache
 
 import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"image"
+	"image/color"
 	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nerv-base/Oddward/internal/database"
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 )
 
-func sloganFixture(t *testing.T, width, height int) []byte {
-	return sloganFixtureColor(t, width, height, 0)
-}
-
-func sloganFixtureColor(t *testing.T, width, height int, color uint8) []byte {
+// sloganFixture encodes a solid-colour PNG of the given size.
+func sloganFixture(t *testing.T, width, height int, shade uint8) []byte {
 	t.Helper()
-	picture := image.NewRGBA(image.Rect(0, 0, width, height))
-	for i := range picture.Pix {
-		picture.Pix[i] = color
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	fill := color.RGBA{R: shade, G: shade, B: shade, A: 0xff}
+	for y := range height {
+		for x := range width {
+			img.SetRGBA(x, y, fill)
+		}
 	}
-	var b bytes.Buffer
-	if err := png.Encode(&b, picture); err != nil {
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
 		t.Fatal(err)
 	}
-	return b.Bytes()
+	return buf.Bytes()
 }
 
-func validRecord(t *testing.T, imageBytes []byte) Record {
+// recordFor is the record that describes image exactly: the metadata has to agree
+// with the pixels or Save refuses it.
+func recordFor(t *testing.T, image []byte, width, height int) Record {
 	t.Helper()
-	sum := md5.Sum(imageBytes)
+	sum := md5.Sum(image)
 	return Record{
-		Image: imageBytes,
+		Image: image,
 		Metadata: Metadata{
 			CoverCode:     "cover123456",
 			URL:           "https://yh.wanmei.com/images/cover123456/slogan.png",
-			ETag:          "\"v1\"",
+			ETag:          `"v1"`,
 			MD5:           hex.EncodeToString(sum[:]),
-			Bytes:         len(imageBytes),
-			Width:         8,
-			Height:        6,
-			LastModified:  time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC),
+			Bytes:         len(image),
+			Width:         width,
+			Height:        height,
+			LastModified:  time.Unix(0, 1700000000000000000).UTC(),
 			VersionNumber: "1.2",
 			VersionName:   "星海回响",
-			ArticleURL:    "https://yh.wanmei.com/notice/1",
-			FetchedAt:     time.Date(2026, 11, 18, 12, 1, 0, 0, time.UTC),
+			ArticleURL:    "https://yh.wanmei.com/news/gamebroad/20261119/slogan.html",
+			FetchedAt:     time.Unix(0, 1700000001000000000).UTC(),
 		},
 	}
 }
 
-func openCache(t *testing.T) (*Cache, string) {
+func openCache(t *testing.T) (*Cache, *database.DB, string) {
 	t.Helper()
+	db := dbtest.Open(t)
 	dir := filepath.Join(t.TempDir(), "branding")
-	c, err := Open(dir)
+	cache, err := Open(db, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return c, dir
+	return cache, db, dir
 }
 
-func TestRoundTrip(t *testing.T) {
-	c, dir := openCache(t)
-	data := sloganFixture(t, 8, 6)
-	want := validRecord(t, data)
-	if err := c.Save(context.Background(), want); err != nil {
-		t.Fatal(err)
-	}
-	got, err := c.Load(context.Background())
+func sameMetadata(a, b Metadata) bool {
+	return a.CoverCode == b.CoverCode && a.URL == b.URL && a.ETag == b.ETag && a.MD5 == b.MD5 &&
+		a.Bytes == b.Bytes && a.Width == b.Width && a.Height == b.Height &&
+		a.VersionNumber == b.VersionNumber && a.VersionName == b.VersionName &&
+		a.ArticleURL == b.ArticleURL && a.LastModified.Equal(b.LastModified) && a.FetchedAt.Equal(b.FetchedAt)
+}
+
+func requireRecord(t *testing.T, got Record, err error, want Record) {
+	t.Helper()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("load = %v", err)
 	}
-	if !bytes.Equal(got.Image, want.Image) || got.Metadata != want.Metadata {
-		t.Fatalf("round trip changed record: got %+v", got.Metadata)
-	}
-	for _, name := range []string{"slogan.png", "metadata.json"} {
-		info, err := os.Stat(filepath.Join(dir, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !info.Mode().IsRegular() {
-			t.Fatalf("%s is not a regular file", name)
-		}
+	if !bytes.Equal(got.Image, want.Image) || !sameMetadata(got.Metadata, want.Metadata) {
+		t.Fatalf("loaded record differs from the saved one: %+v", got.Metadata)
 	}
 }
 
-func TestOpenRequiresAbsoluteDirectory(t *testing.T) {
-	if _, err := Open("relative"); err == nil {
-		t.Fatal("relative cache directory accepted")
+func metadataJSON(t *testing.T, metadata Metadata) []byte {
+	t.Helper()
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestSaveThenLoadReturnsTheSameRecord(t *testing.T) {
+	cache, db, dir := openCache(t)
+	ctx := context.Background()
+	want := recordFor(t, sloganFixture(t, 8, 6, 0x40), 8, 6)
+	if err := cache.Save(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(db, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := reopened.Load(ctx)
+	requireRecord(t, got, err, want)
+
+	name := imageName(want.Metadata.MD5)
+	if info, err := os.Lstat(filepath.Join(dir, name)); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("the image must live in the content-addressed file: %v", err)
+	}
+	// The mirror is the pair a rolled-back build reads, so it has to be exact.
+	mirror := filepath.Join(dir, metadataMirror)
+	if data, err := os.ReadFile(mirror); err != nil || !bytes.Equal(data, metadataJSON(t, want.Metadata)) {
+		t.Fatalf("metadata mirror = %v", err)
+	}
+	if stale, err := db.MirrorStale(ctx, Domain); err != nil || stale {
+		t.Fatalf("the written mirror must be recorded: stale=%v, %v", stale, err)
 	}
 }
 
-func TestMissingAndPartialPair(t *testing.T) {
-	c, dir := openCache(t)
-	if _, err := c.Load(context.Background()); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("missing pair error = %v", err)
+func TestOpenRequiresADatabaseAndAnAbsoluteDirectory(t *testing.T) {
+	db := dbtest.Open(t)
+	if _, err := Open(nil, filepath.Join(t.TempDir(), "branding")); err == nil {
+		t.Fatal("a cache without a database must not open")
 	}
-	if err := os.WriteFile(filepath.Join(dir, "slogan.png"), []byte("x"), 0o600); err != nil {
+	if _, err := Open(db, filepath.Join("relative", "branding")); err == nil {
+		t.Fatal("a relative directory must not open")
+	}
+	blocked := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Load(context.Background()); err == nil || errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("partial pair accepted or reported missing: %v", err)
+	if _, err := Open(db, blocked); err == nil {
+		t.Fatal("a regular file must not be used as the cache directory")
 	}
 }
 
-func TestLoadRejectsCorruptOversizedAndMismatchedRecords(t *testing.T) {
-	data := sloganFixture(t, 8, 6)
-	cases := []struct {
-		name string
-		make func(t *testing.T, dir string, record Record)
-	}{
-		{"corrupt image", func(t *testing.T, dir string, record Record) {
-			if err := os.WriteFile(filepath.Join(dir, "slogan.png"), []byte("broken"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{"oversized image", func(t *testing.T, dir string, record Record) {
-			if err := os.WriteFile(filepath.Join(dir, "slogan.png"), bytes.Repeat([]byte("x"), 4<<20+1), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{"checksum mismatch", func(t *testing.T, dir string, record Record) {
-			record.Metadata.MD5 = strings.Repeat("0", 32)
-			writeMetadata(t, dir, record.Metadata)
-		}},
-		{"oversized metadata", func(t *testing.T, dir string, record Record) {
-			writeMetadata(t, dir, record.Metadata)
-			if err := os.WriteFile(filepath.Join(dir, "metadata.json"), bytes.Repeat([]byte("x"), 64<<10+1), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}},
+func TestLoadWithoutARowReportsNoCache(t *testing.T) {
+	cache, _, dir := openCache(t)
+	ctx := context.Background()
+	if _, err := cache.Load(ctx); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("empty cache = %v, want os.ErrNotExist", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			c, dir := openCache(t)
-			want := validRecord(t, data)
-			if err := os.WriteFile(filepath.Join(dir, "slogan.png"), data, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			writeMetadata(t, dir, want.Metadata)
-			tc.make(t, dir, want)
-			if _, err := c.Load(context.Background()); err == nil {
-				t.Fatal("invalid pair accepted")
-			}
-		})
+	// A legacy slogan.png on its own describes nothing; it is not a record.
+	if err := os.WriteFile(filepath.Join(dir, legacyImage), sloganFixture(t, 4, 4, 0x10), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cache.Load(ctx); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an unadopted legacy image = %v, want os.ErrNotExist", err)
 	}
 }
 
-func TestLoadRecoversInterruptedTransaction(t *testing.T) {
-	c, dir := openCache(t)
-	oldData := sloganFixture(t, 8, 6)
-	old := validRecord(t, oldData)
-	newData := sloganFixtureColor(t, 8, 6, 0x7f)
-	new := validRecord(t, newData)
-	if err := os.WriteFile(filepath.Join(dir, "slogan.png"), new.Image, 0o600); err != nil {
+func TestLoadTreatsAMissingImageAsNoCache(t *testing.T) {
+	cache, db, dir := openCache(t)
+	ctx := context.Background()
+	want := recordFor(t, sloganFixture(t, 8, 6, 0x22), 8, 6)
+	if err := cache.Save(ctx, want); err != nil {
 		t.Fatal(err)
 	}
-	writeMetadata(t, dir, new.Metadata)
-	oldMetadata, err := json.Marshal(old.Metadata)
-	if err != nil {
+	name := imageName(want.Metadata.MD5)
+	if err := os.Remove(filepath.Join(dir, name)); err != nil {
 		t.Fatal(err)
 	}
-	journal, err := json.Marshal(map[string]any{
-		"image":           old.Image,
-		"image_exists":    true,
-		"metadata":        oldMetadata,
-		"metadata_exists": true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "transaction.json"), journal, 0o600); err != nil {
-		t.Fatal(err)
+	// The launcher draws its built-in artwork instead of describing an image that
+	// is not there.
+	if _, err := cache.Load(ctx); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a row whose image is gone = %v, want os.ErrNotExist", err)
 	}
 
-	got, err := c.Load(context.Background())
-	if err != nil {
+	// A file that does not match the record is reported, not served.
+	other := sloganFixture(t, 8, 6, 0x33)
+	if err := os.WriteFile(filepath.Join(dir, name), other, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got.Image, old.Image) || got.Metadata != old.Metadata {
-		t.Fatalf("recovered pair = %+v, want old record", got.Metadata)
+	if _, err := cache.Load(ctx); !errors.Is(err, errInvalidRecord) {
+		t.Fatalf("mismatched pixels = %v, want an invalid record", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "transaction.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("transaction journal remains: %v", err)
-	}
-	imageData, err := os.ReadFile(filepath.Join(dir, "slogan.png"))
-	if err != nil {
+
+	// A row that names a file outside the naming scheme is not trusted either.
+	if _, err := db.Exec(ctx, `UPDATE branding_record SET image_path = 'slogan.png'`); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(imageData, old.Image) {
-		t.Fatal("recovery did not restore old image bytes")
+	if _, err := cache.Load(ctx); !errors.Is(err, errInvalidRecord) {
+		t.Fatalf("a row naming an unchecked file = %v, want an invalid record", err)
 	}
 }
 
-func TestStrictMetadataSchema(t *testing.T) {
-	c, dir := openCache(t)
-	data := sloganFixture(t, 8, 6)
-	want := validRecord(t, data)
-	if err := os.WriteFile(filepath.Join(dir, "slogan.png"), data, 0o600); err != nil {
+func TestInterruptedSaveLeavesThePreviousRecordLoadable(t *testing.T) {
+	cache, db, dir := openCache(t)
+	ctx := context.Background()
+	previous := recordFor(t, sloganFixture(t, 8, 6, 0x44), 8, 6)
+	if err := cache.Save(ctx, previous); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := json.Marshal(want.Metadata)
+
+	// A read-only handle can publish the image but cannot commit the row, which is
+	// exactly the window between the two steps of a save.
+	readOnly, err := database.Open(ctx, database.Options{Path: db.Path(), ReadOnly: true, NoBackup: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range []string{
-		strings.TrimSuffix(string(raw), "}") + `,"unknown":1}`,
-		strings.TrimSuffix(string(raw), "}") + `,"md5":"x"}`,
-	} {
-		if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(bad), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := c.Load(context.Background()); err == nil {
-			t.Fatal("invalid metadata accepted")
-		}
+	t.Cleanup(func() { readOnly.Close() })
+	broken, err := Open(readOnly, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := recordFor(t, sloganFixture(t, 4, 4, 0x55), 4, 4)
+	if err := broken.Save(ctx, next); err == nil {
+		t.Fatal("a save that cannot commit must fail")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, imageName(next.Metadata.MD5))); err != nil {
+		t.Fatalf("the published image should be on disk before the commit: %v", err)
+	}
+	got, err := cache.Load(ctx)
+	requireRecord(t, got, err, previous)
+
+	// The unreferenced image is swept once a row that does not name it is read.
+	if _, err := os.Lstat(filepath.Join(dir, imageName(next.Metadata.MD5))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the orphaned image should be swept: %v", err)
 	}
 }
 
 func TestCancellationDoesNotWrite(t *testing.T) {
-	c, dir := openCache(t)
-	data := sloganFixture(t, 8, 6)
+	cache, db, dir := openCache(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := c.Save(ctx, validRecord(t, data)); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Save cancellation = %v", err)
+	record := recordFor(t, sloganFixture(t, 8, 6, 0x66), 8, 6)
+	if err := cache.Save(ctx, record); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled save = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "slogan.png")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("canceled Save wrote image: %v", err)
+	if _, err := cache.Load(context.Background()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a canceled save stored a record: %v", err)
 	}
-	if _, err := c.Load(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Load cancellation = %v", err)
+	var rows int
+	if err := db.QueryRow(context.Background(), `SELECT COUNT(*) FROM branding_record`).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("rows = %d, %v", rows, err)
 	}
-}
-
-func TestInvalidReplacementPreservesOldRecord(t *testing.T) {
-	c, _ := openCache(t)
-	oldData := sloganFixture(t, 8, 6)
-	old := validRecord(t, oldData)
-	if err := c.Save(context.Background(), old); err != nil {
-		t.Fatal(err)
-	}
-	bad := old
-	bad.Image = sloganFixture(t, 2, 2)
-	bad.Metadata.Bytes = len(bad.Image)
-	bad.Metadata.Width = 2
-	bad.Metadata.Height = 2
-	bad.Metadata.MD5 = strings.Repeat("0", 32)
-	if err := c.Save(context.Background(), bad); err == nil {
-		t.Fatal("invalid replacement accepted")
-	}
-	got, err := c.Load(context.Background())
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got.Image, old.Image) || got.Metadata != old.Metadata {
-		t.Fatal("invalid replacement damaged old record")
+	if len(entries) != 0 {
+		t.Fatalf("a canceled save left %d files", len(entries))
 	}
 }
 
-func writeMetadata(t *testing.T, dir string, metadata Metadata) {
-	t.Helper()
-	raw, err := json.Marshal(metadata)
+func TestInvalidReplacementPreservesTheOldRecord(t *testing.T) {
+	cache, _, _ := openCache(t)
+	ctx := context.Background()
+	previous := recordFor(t, sloganFixture(t, 8, 6, 0x77), 8, 6)
+	if err := cache.Save(ctx, previous); err != nil {
+		t.Fatal(err)
+	}
+	image := sloganFixture(t, 8, 6, 0x88)
+	cases := map[string]func() Record{
+		"wrong checksum": func() Record {
+			r := recordFor(t, image, 8, 6)
+			r.Metadata.MD5 = strings.Repeat("0", 32)
+			return r
+		},
+		"wrong byte count": func() Record {
+			r := recordFor(t, image, 8, 6)
+			r.Metadata.Bytes++
+			return r
+		},
+		"wrong dimensions": func() Record {
+			r := recordFor(t, image, 8, 6)
+			r.Metadata.Width, r.Metadata.Height = 9, 6
+			return r
+		},
+		"incomplete metadata": func() Record {
+			r := recordFor(t, image, 8, 6)
+			r.Metadata.VersionName = ""
+			return r
+		},
+		"not an image": func() Record {
+			r := recordFor(t, image, 8, 6)
+			r.Image = []byte("not an image at all")
+			r.Metadata.Bytes = len(r.Image)
+			return r
+		},
+	}
+	for label, build := range cases {
+		t.Run(label, func(t *testing.T) {
+			if err := cache.Save(ctx, build()); !errors.Is(err, errInvalidRecord) {
+				t.Fatalf("invalid record = %v, want an invalid record", err)
+			}
+			got, err := cache.Load(ctx)
+			requireRecord(t, got, err, previous)
+		})
+	}
+}
+
+func TestSweepRemovesOnlyUnreferencedImages(t *testing.T) {
+	cache, _, dir := openCache(t)
+	ctx := context.Background()
+	kept := recordFor(t, sloganFixture(t, 8, 6, 0x99), 8, 6)
+	if err := cache.Save(ctx, kept); err != nil {
+		t.Fatal(err)
+	}
+	// The leftovers an interrupted save can leave behind, plus the files a
+	// rolled-back build owns.
+	orphan := filepath.Join(dir, imageName(strings.Repeat("ab", 16)))
+	stage := filepath.Join(dir, stagePrefix+"orphan")
+	legacy := []string{
+		filepath.Join(dir, legacyImage),
+		filepath.Join(dir, metadataMirror),
+		filepath.Join(dir, "transaction.json"),
+	}
+	for _, path := range append([]string{orphan, stage}, legacy...) {
+		if err := os.WriteFile(path, []byte("left behind"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := cache.Load(ctx)
+	requireRecord(t, got, err, kept)
+	for _, path := range []string{orphan, stage} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s should be swept: %v", filepath.Base(path), err)
+		}
+	}
+	for _, path := range append([]string{filepath.Join(dir, imageName(kept.Metadata.MD5))}, legacy...) {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("%s must survive the sweep: %v", filepath.Base(path), err)
+		}
+	}
+}
+
+func TestImportLegacyAdoptsThePair(t *testing.T) {
+	cache, db, dir := openCache(t)
+	ctx := context.Background()
+	want := recordFor(t, sloganFixture(t, 8, 6, 0xAA), 8, 6)
+	if err := os.WriteFile(filepath.Join(dir, legacyImage), want.Image, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, metadataMirror), metadataJSON(t, want.Metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ran, err := db.RunImport(ctx, Domain, ImportVersion, cache.ImportLegacy)
+	if err != nil || !ran {
+		t.Fatalf("import = %v, %v", ran, err)
+	}
+	got, err := cache.Load(ctx)
+	requireRecord(t, got, err, want)
+	if stale, err := db.MirrorStale(ctx, Domain); err != nil || stale {
+		t.Fatalf("the adopted mirror must be recorded: stale=%v, %v", stale, err)
+	}
+	if ran, err := db.RunImport(ctx, Domain, ImportVersion, cache.ImportLegacy); err != nil || ran {
+		t.Fatalf("second import = %v, %v; want a no-op", ran, err)
+	}
+}
+
+func TestImportLegacyRejectsCorruptSources(t *testing.T) {
+	cache, db, dir := openCache(t)
+	ctx := context.Background()
+	kept := recordFor(t, sloganFixture(t, 8, 6, 0xBB), 8, 6)
+	if err := cache.Save(ctx, kept); err != nil {
+		t.Fatal(err)
+	}
+	image := sloganFixture(t, 8, 6, 0xCC)
+	valid := recordFor(t, image, 8, 6)
+	validJSON := metadataJSON(t, valid.Metadata)
+	duplicate := []byte(`{"cover_code":"cover123456","md5":"` + valid.Metadata.MD5 + `","md5":"` + valid.Metadata.MD5 + `"}`)
+	unknown := append(validJSON[:len(validJSON)-1], []byte(`,"extra":1}`)...)
+	mismatched := recordFor(t, image, 8, 6)
+	mismatched.Metadata.MD5 = strings.Repeat("d", 32)
+
+	cases := map[string]struct {
+		metadata []byte
+		image    []byte
+		wantFile string
+	}{
+		"unknown field":     {unknown, image, metadataMirror},
+		"duplicate field":   {duplicate, image, metadataMirror},
+		"checksum mismatch": {metadataJSON(t, mismatched.Metadata), image, metadataMirror},
+		"missing image":     {validJSON, nil, legacyImage},
+	}
+	for label, tc := range cases {
+		t.Run(label, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(dir, metadataMirror), tc.metadata, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			imagePath := filepath.Join(dir, legacyImage)
+			if tc.image != nil {
+				if err := os.WriteFile(imagePath, tc.image, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				_ = os.Remove(imagePath)
+			}
+			_, err := db.RunImport(ctx, Domain, ImportVersion, cache.ImportLegacy)
+			if err == nil || !strings.Contains(err.Error(), tc.wantFile) {
+				t.Fatalf("corrupt source = %v, want an error naming %s", err, tc.wantFile)
+			}
+			if after, err := os.ReadFile(filepath.Join(dir, metadataMirror)); err != nil || !bytes.Equal(after, tc.metadata) {
+				t.Fatalf("a rejected import must not rewrite the metadata: %v", err)
+			}
+			got, err := cache.Load(ctx)
+			requireRecord(t, got, err, kept)
+		})
+	}
+}
+
+func TestImportLegacyWithoutASourceIsANoOp(t *testing.T) {
+	ctx := context.Background()
+	absent := filepath.Join(t.TempDir(), "branding")
+	db := dbtest.Open(t)
+	cache, err := Open(db, absent)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), raw, 0o600); err != nil {
+	if ran, err := db.RunImport(ctx, Domain, ImportVersion, cache.ImportLegacy); err != nil || !ran {
+		t.Fatalf("import without a directory = %v, %v", ran, err)
+	}
+	if _, err := cache.Load(ctx); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("import without a source stored a record: %v", err)
+	}
+
+	// An image without its metadata is a half pair from an interrupted write; it is
+	// reported as no cache rather than adopted on its own.
+	orphan, db2, dir := openCache(t)
+	if err := os.WriteFile(filepath.Join(dir, legacyImage), sloganFixture(t, 8, 6, 0xDD), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	if ran, err := db2.RunImport(ctx, Domain, ImportVersion, orphan.ImportLegacy); err != nil || !ran {
+		t.Fatalf("import of a lone image = %v, %v", ran, err)
+	}
+	if _, err := orphan.Load(ctx); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a lone legacy image = %v, want no cache", err)
+	}
+	var rows int
+	if err := db2.QueryRow(ctx, `SELECT COUNT(*) FROM branding_record`).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("rows = %d, %v", rows, err)
+	}
+}
+
+// decodeRowName guards the assumption the cache relies on: the row names the file
+// by the digest it also stores.
+func TestRowNamesTheFileItDescribes(t *testing.T) {
+	cache, db, _ := openCache(t)
+	ctx := context.Background()
+	record := recordFor(t, sloganFixture(t, 8, 6, 0xEE), 8, 6)
+	if err := cache.Save(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	var name, digest string
+	var stored sql.NullInt64
+	err := db.QueryRow(ctx, `SELECT image_path, md5, last_modified FROM branding_record WHERE id = 1`).
+		Scan(&name, &digest, &stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, ok := parseImageName(name)
+	if !ok || parsed != strings.ToLower(digest) {
+		t.Fatalf("row names %q for md5 %q", name, digest)
+	}
+	if got := database.StampTime(stored); !got.Equal(record.Metadata.LastModified) {
+		t.Fatalf("last modified = %v, want %v", got, record.Metadata.LastModified)
 	}
 }

@@ -17,6 +17,7 @@ import (
 
 func TestGCScansWithoutDeletingDuringActiveWriter(t *testing.T) {
 	work, state := t.TempDir(), t.TempDir()
+	db := testDB(t)
 	lease, err := gamedl.Acquire(work)
 	if err != nil {
 		t.Fatal(err)
@@ -28,7 +29,7 @@ func TestGCScansWithoutDeletingDuringActiveWriter(t *testing.T) {
 		w.Write([]byte("data"))
 	}))
 	defer server.Close()
-	e, err := gamedl.New(gamedl.Options{WorkRoot: work, StateRoot: state, Lease: lease, Client: server.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) { return []string{server.URL}, nil }})
+	e, err := gamedl.New(gamedl.Options{DB: db, WorkRoot: work, StateRoot: state, Lease: lease, Client: server.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) { return []string{server.URL}, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +43,7 @@ func TestGCScansWithoutDeletingDuringActiveWriter(t *testing.T) {
 		done <- e.Run(context.Background(), task, func(gamedl.Progress) { once.Do(func() { close(entered); <-release }) })
 	}()
 	<-entered
-	_, gcErr := gamedl.Collect(context.Background(), gamedl.GCOptions{WorkRoot: work, StateRoot: state, Lease: lease, MaxBlobBytes: 1})
+	_, gcErr := gamedl.Collect(context.Background(), gamedl.GCOptions{DB: db, WorkRoot: work, StateRoot: state, Lease: lease, MaxBlobBytes: 1})
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -58,6 +59,7 @@ func TestGCRequiresCallerLease(t *testing.T) {
 }
 func TestGCProtectsAllTaskReferencesAcrossVersionRoots(t *testing.T) {
 	work, state := t.TempDir(), t.TempDir()
+	db := testDB(t)
 	lease, err := gamedl.Acquire(work)
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +79,7 @@ func TestGCProtectsAllTaskReferencesAcrossVersionRoots(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	store, err := gamedl.NewStore(state)
+	store, err := gamedl.NewStore(db, state)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +88,7 @@ func TestGCProtectsAllTaskReferencesAcrossVersionRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.Close()
-	opts := gamedl.GCOptions{WorkRoot: work, StateRoot: state, Lease: lease, Protected: []gameres.Object{active}, MaxBlobBytes: 1}
+	opts := gamedl.GCOptions{DB: db, WorkRoot: work, StateRoot: state, Lease: lease, Protected: []gameres.Object{active}, MaxBlobBytes: 1}
 	result, err := gamedl.Collect(context.Background(), opts)
 	if err != nil {
 		t.Fatal(err)
@@ -107,6 +109,7 @@ func TestGCProtectsAllTaskReferencesAcrossVersionRoots(t *testing.T) {
 }
 func TestGCRejectsCorruptReferencesBeforeAnyDeletion(t *testing.T) {
 	work, state := t.TempDir(), t.TempDir()
+	db := testDB(t)
 	lease, err := gamedl.Acquire(work)
 	if err != nil {
 		t.Fatal(err)
@@ -116,12 +119,60 @@ func TestGCRejectsCorruptReferencesBeforeAnyDeletion(t *testing.T) {
 	dir := filepath.Join(work, "cache", "blobs")
 	os.MkdirAll(dir, 0700)
 	os.WriteFile(filepath.Join(dir, obj.String()), []byte("keep"), 0600)
-	os.MkdirAll(filepath.Join(state, "tasks"), 0700)
-	os.WriteFile(filepath.Join(state, "tasks", "broken.json"), []byte("truncated"), 0600)
-	_, err = gamedl.Collect(context.Background(), gamedl.GCOptions{WorkRoot: work, StateRoot: state, Lease: lease, MaxBlobBytes: 1})
+	task := gamedl.Task{ID: "broken", Kind: gamedl.TaskPreloadFiles, ListHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Transfers: []gamedl.Transfer{{Object: obj, Source: gameres.Source{Kind: gameres.SourceCAS, Object: obj}}}}
+	store, err := gamedl.NewStore(db, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Save(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	// Mirror files are not authoritative any more, so damage the row instead.
+	if _, err = db.Exec(context.Background(), `UPDATE download_transfers SET blocks = 'truncated' WHERE task_id = ?`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = gamedl.Collect(context.Background(), gamedl.GCOptions{DB: db, WorkRoot: work, StateRoot: state, Lease: lease, MaxBlobBytes: 1})
 	requireKind(t, err, gamedl.ErrRecoveryRequired)
 	if _, err = os.Stat(filepath.Join(dir, obj.String())); err != nil {
 		t.Fatal("GC deleted before validating references")
+	}
+}
+
+func TestGCProtectsReferencesOnlyVisibleToPreloadOrRecovery(t *testing.T) {
+	work, state := t.TempDir(), t.TempDir()
+	db := testDB(t)
+	lease, err := gamedl.Acquire(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	preload, recovery, unreferenced := identity([]byte("preload")), identity([]byte("recovery")), identity([]byte("unused"))
+	dir := filepath.Join(work, "cache", "blobs")
+	if err = os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, obj := range []gameres.Object{preload, recovery, unreferenced} {
+		if err = os.WriteFile(filepath.Join(dir, obj.String()), make([]byte, obj.Size), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Before a preload or an install transaction becomes a task row, its blobs
+	// reach GC only through Protected; a scan must still refuse to delete them.
+	result, err := gamedl.Collect(context.Background(), gamedl.GCOptions{DB: db, WorkRoot: work, StateRoot: state, Lease: lease, Protected: []gameres.Object{preload, recovery}, MaxBlobBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Deleted) != 1 || result.DeletedBytes != unreferenced.Size {
+		t.Fatalf("GC result=%+v", result)
+	}
+	for _, obj := range []gameres.Object{preload, recovery} {
+		if _, err = os.Stat(filepath.Join(dir, obj.String())); err != nil {
+			t.Fatalf("protected blob %s missing: %v", obj, err)
+		}
+	}
+	if _, err = os.Stat(filepath.Join(dir, unreferenced.String())); !os.IsNotExist(err) {
+		t.Fatalf("unreferenced blob survives: %v", err)
 	}
 }
 func TestGCExpiryAndReadOnlyUsage(t *testing.T) {
@@ -139,7 +190,7 @@ func TestGCExpiryAndReadOnlyUsage(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, obj.String()), make([]byte, obj.Size), 0600)
 	}
 	os.Chtimes(filepath.Join(dir, old.String()), now.Add(-48*time.Hour), now.Add(-48*time.Hour))
-	opts := gamedl.GCOptions{WorkRoot: work, StateRoot: state, Lease: lease, Now: now}
+	opts := gamedl.GCOptions{DB: testDB(t), WorkRoot: work, StateRoot: state, Lease: lease, Now: now}
 	result, err := gamedl.Collect(context.Background(), opts)
 	if err != nil {
 		t.Fatal(err)

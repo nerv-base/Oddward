@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/nerv-base/Oddward/internal/database"
 	"github.com/nerv-base/Oddward/internal/gameres"
 )
 
@@ -21,10 +22,13 @@ type Parameters struct {
 
 type Options struct {
 	WorkRoot, StateRoot string
-	Client              *http.Client
-	Resolve             ResolveURLs
-	Parameters          Parameters
-	UserAgent           string
+	// DB is the authoritative task store. StateRoot still holds the legacy task
+	// mirrors and receives the caller's lease.
+	DB         *database.DB
+	Client     *http.Client
+	Resolve    ResolveURLs
+	Parameters Parameters
+	UserAgent  string
 	// Lease lets an orchestrator hold one installation lock across download,
 	// rebuild and commit. Close the engine before releasing the caller's lease.
 	Lease *Lease

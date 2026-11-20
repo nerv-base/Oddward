@@ -53,13 +53,13 @@ Oddward 支持 **Windows 10 / 11 x64**。在[最新发行页](https://github.com
 
 ## 账号数据与权限
 
-启动游戏时，UAC 授权用于启动专用的游戏与登录 SDK 宿主。Oddward 主界面、登录窗口和账号处理均以普通权限运行。已保存的账号凭据和塔吉多续期凭据使用 Windows DPAPI 加密，短信验证码仅在内存中使用。
+已保存的账号凭据和塔吉多续期凭据使用 Windows DPAPI 加 AES-256-GCM 加密后再写入本地数据库，短信验证码仅在内存中使用。启动游戏时，UAC 授权用于启动专用的游戏与登录 SDK 宿主；Oddward 主界面、登录窗口和账号处理均以普通权限运行。设置、抽卡档案、签到记录、下载与安装状态、缓存索引都存放在同一个 SQLite 数据库里；旧版 JSON 文件仍会作为镜像同时更新，便于回退到旧版本时继续读到数据。
 
 | 默认目录 | 内容 |
 |---|---|
-| `%APPDATA%\Oddward` | 启动器设置 |
-| `%LOCALAPPDATA%\Oddward` | 账号、抽卡档案和缓存 |
-| `%LOCALAPPDATA%\Oddward\checkin` | 签到结果和每日签到开关 |
+| `%APPDATA%\Oddward` | 启动器设置的 JSON 镜像（权威数据在数据库） |
+| `%LOCALAPPDATA%\Oddward` | `oddward.db`、账号加密记录及其镜像、抽卡档案和缓存 |
+| `%LOCALAPPDATA%\Oddward\checkin` | 签到记录的 JSON 镜像（权威数据在数据库） |
 
 ## 公告与外观
 

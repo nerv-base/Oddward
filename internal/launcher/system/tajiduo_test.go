@@ -9,6 +9,8 @@ import (
 
 	"github.com/nerv-base/Oddward/internal/checkin"
 	"github.com/nerv-base/Oddward/internal/cnlogin/accounts"
+	"github.com/nerv-base/Oddward/internal/database"
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 	"github.com/nerv-base/Oddward/internal/launcher"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
 	"github.com/nerv-base/Oddward/internal/tajiduo"
@@ -34,7 +36,8 @@ func testTajiduoBackend(t *testing.T, uid string, namesFail ...bool) (*TajiduoBa
 func testTajiduoBackendInDir(t *testing.T, dir, uid string, namesFail ...bool) (*TajiduoBackend, *accounts.Store, string, *int) {
 	t.Helper()
 	namesDown := len(namesFail) > 0 && namesFail[0]
-	store, err := accounts.Open(filepath.Join(dir, "accounts"), tajiduoTestProtector{})
+	db := dbtest.OpenAt(t, dir)
+	store, err := accounts.Open(db, filepath.Join(dir, "accounts"), tajiduoTestProtector{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,11 +85,11 @@ func testTajiduoBackendInDir(t *testing.T, dir, uid string, namesFail ...bool) (
 	if err != nil {
 		t.Fatal(err)
 	}
-	archives, err := NewWishArchives(dir)
+	archives, err := NewWishArchives(db, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	records, err := checkin.Open(filepath.Join(dir, "checkin"))
+	records, err := checkin.Open(db, filepath.Join(dir, "checkin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,8 +250,22 @@ func TestTajiduoStatusOffersRelinkForCorruptAttachment(t *testing.T) {
 	if err := b.Complete(ctx, id, "123"); err != nil {
 		t.Fatal(err)
 	}
+	// The attachment file is the rollback mirror now, so damaging it must not
+	// unlink an account whose stored credential is intact.
 	path := filepath.Join(dir, "accounts", id+".tjd")
 	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if status, err := b.Status(ctx); err != nil || !status.Linked || status.NeedsRelink {
+		t.Fatalf("a damaged mirror must not unlink the account: %+v %v", status, err)
+	}
+	// A credential the database itself cannot read is what a relink repairs.
+	tamper, err := database.Open(ctx, database.Options{Path: filepath.Join(dir, database.FileName)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tamper.Close()
+	if _, err := tamper.Exec(ctx, `UPDATE account_tajiduo SET file = x'7B' WHERE account_id = ?`, id); err != nil {
 		t.Fatal(err)
 	}
 	status, err := b.Status(ctx)

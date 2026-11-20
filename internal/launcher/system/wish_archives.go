@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nerv-base/Oddward/internal/bwiki"
+	"github.com/nerv-base/Oddward/internal/database"
 	"github.com/nerv-base/Oddward/internal/gacha"
 	"github.com/nerv-base/Oddward/internal/launcher"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
@@ -23,10 +24,16 @@ type arcWiki interface {
 	Catalog(context.Context) (bwiki.Catalog, error)
 }
 
-// WishArchives implements launcher.WishArchiveBackend over a local, launcher-
-// owned gacha store. Mutating operations (Import, Delete, Export) are serialized
-// by a cancelable capacity-one lock so a load-merge-save cannot interleave with
-// a delete. List and Load delegate to the store.
+// wikiImporter is implemented by a wiki store that keeps a legacy cache file.
+// Migration is optional so the catalog fake in tests needs only Catalog.
+type wikiImporter interface {
+	ImportLegacy(context.Context) error
+}
+
+// WishArchives implements launcher.WishArchiveBackend over the gacha repository.
+// Mutating operations (Import, Delete, Export) are serialized by a cancelable
+// capacity-one lock so a load-merge-save cannot interleave with a delete. List
+// and Load delegate to the store.
 type WishArchives struct {
 	store *gacha.Store
 	wiki  arcWiki
@@ -36,19 +43,42 @@ type WishArchives struct {
 
 var _ launcher.WishArchiveBackend = (*WishArchives)(nil)
 
-// NewWishArchives opens the archive directory under dataDir, which must be an
-// absolute path, and prepares the serializing lock.
-func NewWishArchives(dataDir string) (*WishArchives, error) {
+// NewWishArchives binds the archive repository to db and its mirror directory
+// under dataDir, which must be an absolute path, and prepares the serializing
+// lock.
+func NewWishArchives(db *database.DB, dataDir string) (*WishArchives, error) {
 	if !filepath.IsAbs(dataDir) {
 		return nil, errors.New("wish archive data directory must be an absolute path")
 	}
-	store, err := gacha.NewStore(filepath.Join(dataDir, "gacha"))
+	store, err := gacha.NewStore(db, filepath.Join(dataDir, "gacha"))
 	if err != nil {
 		return nil, err
 	}
 	w := &WishArchives{store: store, now: time.Now, ops: make(chan struct{}, 1)}
 	w.ops <- struct{}{}
 	return w, nil
+}
+
+// ImportLegacy reconciles the legacy archive files and both catalogs into the
+// database before the UI reads them. It is safe on every start: each import runs
+// once and repeats only when a mirror file no longer matches what this build
+// wrote, which is how data an older build changed after a rollback is adopted.
+func (w *WishArchives) ImportLegacy(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	release, err := w.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err := w.store.ImportLegacy(ctx); err != nil {
+		return err
+	}
+	if importer, ok := w.wiki.(wikiImporter); ok {
+		return importer.ImportLegacy(ctx)
+	}
+	return nil
 }
 
 // acquire takes the serializing lock, honoring ctx cancellation while waiting.

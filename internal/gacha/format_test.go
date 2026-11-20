@@ -118,6 +118,19 @@ func TestUTCPrecisionAndValidation(t *testing.T) {
 	}
 }
 
+// The literal is the bytes the file-backed build exported for the same fixture,
+// kept so a format change cannot slip in with the storage move.
+func TestExportOddwardGoldenBytes(t *testing.T) {
+	const golden = `{"format":"oddward-gacha","version":1,"role_id":"123456","exported_at":1794659696789,"records":[{"pool":"limited","item_id":"1001","time_ms":1794659696789,"pity":71,"luck":2},{"pool":"weapon","item_id":"fork_test","time_ms":1794656096789,"pity":60,"luck":-1}],"snapshots":[]}`
+	got, err := ExportOddward(fixtureArchive(), fixtureTime())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != golden {
+		t.Fatalf("export bytes changed:\n got %s\nwant %s", got, golden)
+	}
+}
+
 func TestStrictDecode(t *testing.T) {
 	base := `{"format":"nteuid-gacha","version":1,"uid":"123456","source":"tajiduo","updated_at":0,"pools":{"limited":{"records":[{"item_id":"1001","time_ms":1,"pity":1}]}}}`
 	cases := map[string][]byte{

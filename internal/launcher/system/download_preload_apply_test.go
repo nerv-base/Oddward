@@ -3,6 +3,7 @@ package system
 
 import (
 	"context"
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 	"testing"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 
 func TestSystemPreloadApplyRequiresPublicationProofAndHandlesSetupFailure(t *testing.T) {
 	ctx := context.Background()
-	b := &GameDownloadBackend{StateRoot: t.TempDir()}
+	b := &GameDownloadBackend{DB: dbtest.Open(t), StateRoot: t.TempDir()}
 	root := preloadSystemBase(t, b)
 	d := preloadSystemDelivery(t, "https://synthetic.invalid/clientRes")
 	_, snapshot, err := downloadPreloadEvidence(d, []string{d.ConfigResponse.Root}, true)

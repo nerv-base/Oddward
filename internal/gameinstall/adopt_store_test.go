@@ -8,15 +8,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 )
 
 func TestAdoptStoreRejectsMalformedRecordAndCheckpointPreservesPublished(t *testing.T) {
 	root, _ := adoptFixture(t)
 	stateRoot := t.TempDir()
-	s, err := NewStore(stateRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newStore(t, dbtest.Open(t), stateRoot)
 	got, err := s.AdoptQuick(context.Background(), root, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -24,13 +23,15 @@ func TestAdoptStoreRejectsMalformedRecordAndCheckpointPreservesPublished(t *test
 	sentinel := errors.New("checkpoint interrupted")
 	next := got.Record
 	next.Version = "next"
-	if err := s.writeInstallCheckpoint(next, func() error { return sentinel }); !errors.Is(err, sentinel) {
+	if err := s.writeInstallCheckpoint(context.Background(), next, func() error { return sentinel }); !errors.Is(err, sentinel) {
 		t.Fatalf("checkpoint: %v", err)
 	}
 	current, err := s.ReadInstall(root)
 	if err != nil || current.Version != got.Record.Version {
 		t.Fatalf("interrupted write published: %+v %v", current, err)
 	}
+	// The record is the authority now, so a damaged mirror can neither publish
+	// itself nor hide the record that is still committed.
 	path := filepath.Join(stateRoot, got.Record.InstallKey, "install.json")
 	original, err := os.ReadFile(path)
 	if err != nil {
@@ -40,8 +41,14 @@ func TestAdoptStoreRejectsMalformedRecordAndCheckpointPreservesPublished(t *test
 		if err := os.WriteFile(path, []byte(bad), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.ReadInstall(root); !errors.Is(err, ErrInvalidState) {
-			t.Fatalf("malformed record accepted: %v", err)
+		if again, err := s.ReadInstall(root); err != nil || again.Version != got.Record.Version {
+			t.Fatalf("damaged mirror disturbed the record: %+v %v", again, err)
+		}
+		if _, _, err := s.ImportLegacy(context.Background()); !errors.Is(err, ErrInvalidState) || !strings.Contains(err.Error(), path) {
+			t.Fatalf("malformed mirror accepted: %v", err)
+		}
+		if again, err := s.ReadInstall(root); err != nil || again.Version != got.Record.Version {
+			t.Fatalf("rejected import changed the record: %+v %v", again, err)
 		}
 	}
 }

@@ -157,7 +157,7 @@ func TestConfiguredGlobalRateLimitHasNoInitialBurst(t *testing.T) {
 		http.ServeContent(w, r, "fixture", zeroTime, bytes.NewReader(data))
 	}))
 	defer server.Close()
-	e, err := gamedl.New(gamedl.Options{WorkRoot: t.TempDir(), StateRoot: t.TempDir(), Client: server.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) { return []string{server.URL}, nil }, Parameters: gamedl.Parameters{RateLimitKiB: 512}})
+	e, err := gamedl.New(gamedl.Options{DB: testDB(t), WorkRoot: t.TempDir(), StateRoot: t.TempDir(), Client: server.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) { return []string{server.URL}, nil }, Parameters: gamedl.Parameters{RateLimitKiB: 512}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestKernelLeaseExcludesOtherWritersAndCanBeSharedWithEngine(t *testing.T) {
 	} else {
 		requireKind(t, err, gamedl.ErrLocked)
 	}
-	opts := gamedl.Options{WorkRoot: work, StateRoot: state, Lease: lease, Client: &http.Client{}, Resolve: func(context.Context, gameres.Source) ([]string, error) { return nil, nil }}
+	opts := gamedl.Options{DB: testDB(t), WorkRoot: work, StateRoot: state, Lease: lease, Client: &http.Client{}, Resolve: func(context.Context, gameres.Source) ([]string, error) { return nil, nil }}
 	e, err := gamedl.New(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -234,7 +234,7 @@ func TestReopeningTamperedBlobRejectsSameSizeBytes(t *testing.T) {
 		http.ServeContent(w, r, "fixture", zeroTime, bytes.NewReader(data))
 	}))
 	defer server.Close()
-	e, err := gamedl.New(gamedl.Options{WorkRoot: work, StateRoot: state, Client: server.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) { return []string{server.URL}, nil }})
+	e, err := gamedl.New(gamedl.Options{DB: testDB(t), WorkRoot: work, StateRoot: state, Client: server.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) { return []string{server.URL}, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}

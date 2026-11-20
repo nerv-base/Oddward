@@ -122,7 +122,7 @@ func (s *Store) AdoptQuick(ctx context.Context, selected string, remote *AdoptMe
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	if err := s.writeInstall(record); err != nil {
+	if err := s.writeInstall(ctx, record); err != nil {
 		return result, err
 	}
 	result.Record = record

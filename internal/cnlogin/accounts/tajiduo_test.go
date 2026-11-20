@@ -8,24 +8,53 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/nerv-base/Oddward/internal/database"
 )
 
 func tajiduoPath(dir, id string) string { return filepath.Join(dir, id+".tjd") }
 
-// sampleGrant returns a grant whose LaohuUserID matches sampleSecret(n)'s
-// ChannelUID, so it can be linked to that account.
+// sampleGrant matches sampleSecret(n): the grant belongs to that game account.
 func sampleGrant(n int) TajiduoGrant {
 	return TajiduoGrant{
-		DeviceID:     strings.ToUpper(fmt.Sprintf("%032x", 0xdef000+n)),
+		DeviceID:     fmt.Sprintf("%032X", 0xdef000+n),
 		CenterUID:    fmt.Sprintf("center-%d", n),
 		RefreshToken: fmt.Sprintf("refresh-%d-SECRETVALUE", n),
 		LaohuUserID:  fmt.Sprintf("uid-%d-7788", n),
 		RoleID:       fmt.Sprintf("role-%d", n),
+	}
+}
+
+// tajiduoRowBytes reads the stored attachment of id.
+func tajiduoRowBytes(t *testing.T, s *Store, id string) []byte {
+	t.Helper()
+	var raw []byte
+	if err := s.db.QueryRow(t.Context(), `SELECT file FROM account_tajiduo WHERE account_id = ?`, id).Scan(&raw); err != nil {
+		t.Fatalf("read Tajiduo row %s: %v", id, err)
+	}
+	return raw
+}
+
+// tamperTajiduo rewrites the stored attachment, which is what editing the file
+// used to be: the ciphertext no longer matches its AAD.
+func tamperTajiduo(t *testing.T, s *Store, id string, edit func(map[string]any)) {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal(tajiduoRowBytes(t, s, id), &m); err != nil {
+		t.Fatal(err)
+	}
+	edit(m)
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(t.Context(), `UPDATE account_tajiduo SET file = ? WHERE account_id = ?`, out, id); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -39,145 +68,127 @@ func mustLink(t *testing.T, s *Store, id string, g TajiduoGrant) {
 func TestTajiduoLinkUnlockRoundTrip(t *testing.T) {
 	s, dir, _ := newTestStore(t)
 	a := mustSave(t, s, "A", sampleSecret(1))
-	if a.TajiduoLinked {
-		t.Fatal("fresh account reports Tajiduo linked")
-	}
 	g := sampleGrant(1)
 	mustLink(t, s, a.ID, g)
-
+	raw, err := os.ReadFile(tajiduoPath(dir, a.ID))
+	if err != nil {
+		t.Fatalf("mirror file: %v", err)
+	}
+	// The center uid is public metadata (it names the row and is bound into the
+	// AAD in clear), but the refresh token never leaves the ciphertext.
+	for _, plain := range []string{g.RefreshToken, "SECRETVALUE"} {
+		if bytes.Contains(raw, []byte(plain)) {
+			t.Fatalf("attachment mirror leaks %q", plain)
+		}
+	}
+	if !bytes.Equal(raw, tajiduoRowBytes(t, s, a.ID)) {
+		t.Fatal("attachment mirror differs from the stored bytes")
+	}
 	got, err := s.UnlockTajiduo(a.ID)
 	if err != nil {
 		t.Fatalf("UnlockTajiduo: %v", err)
 	}
 	if got != g {
-		t.Fatalf("UnlockTajiduo = %+v, want %+v", got, g)
-	}
-	raw, err := os.ReadFile(tajiduoPath(dir, a.ID))
-	if err != nil {
-		t.Fatalf("attachment file: %v", err)
-	}
-	if bytes.Contains(raw, []byte(g.RefreshToken)) {
-		t.Fatalf("attachment stores refresh token in clear: %s", raw)
+		t.Fatalf("UnlockTajiduo = %+v, want the linked grant", got)
 	}
 	if _, err := s.UnlockTajiduo(strings.Repeat("0", 32)); !errors.Is(err, ErrNoTajiduo) {
-		t.Fatalf("Unlock unknown attachment = %v, want ErrNoTajiduo", err)
+		t.Fatalf("UnlockTajiduo of an unknown account = %v, want ErrNoTajiduo", err)
 	}
 }
 
 func TestTajiduoLinkRejectsMismatchedLaohuUserID(t *testing.T) {
 	s, dir, _ := newTestStore(t)
 	a := mustSave(t, s, "A", sampleSecret(1))
-	g := sampleGrant(1)
-	g.LaohuUserID = "some-other-tiger-account"
+	g := sampleGrant(2) // belongs to another game account
 	if err := s.LinkTajiduo(a.ID, g); !errors.Is(err, ErrTajiduoMismatch) {
-		t.Fatalf("LinkTajiduo mismatched = %v, want ErrTajiduoMismatch", err)
+		t.Fatalf("LinkTajiduo with a foreign grant = %v, want ErrTajiduoMismatch", err)
 	}
 	if _, err := os.Stat(tajiduoPath(dir, a.ID)); !os.IsNotExist(err) {
-		t.Fatalf("mismatched link wrote an attachment: %v", err)
+		t.Fatalf("a rejected link wrote a mirror: %v", err)
 	}
-	if _, err := s.UnlockTajiduo(a.ID); !errors.Is(err, ErrNoTajiduo) {
-		t.Fatalf("Unlock after rejected link = %v, want ErrNoTajiduo", err)
+	if n := countRows(t, s, `SELECT count(*) FROM account_tajiduo`); n != 0 {
+		t.Fatalf("a rejected link wrote %d rows", n)
 	}
 }
 
 func TestTajiduoLinkNeedsExistingAccount(t *testing.T) {
 	s, dir, _ := newTestStore(t)
-	if err := s.LinkTajiduo(strings.Repeat("0", 32), sampleGrant(1)); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("LinkTajiduo missing account = %v, want ErrNotFound", err)
+	id := strings.Repeat("a", 32)
+	if err := s.LinkTajiduo(id, sampleGrant(1)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("LinkTajiduo for a missing account = %v, want ErrNotFound", err)
 	}
-	if _, err := os.Stat(tajiduoPath(dir, strings.Repeat("0", 32))); !os.IsNotExist(err) {
-		t.Fatal("link to a missing account wrote a file")
+	if _, err := os.Stat(tajiduoPath(dir, id)); !os.IsNotExist(err) {
+		t.Fatalf("a rejected link wrote a mirror: %v", err)
 	}
 }
 
 func TestTajiduoAADBindsAccountID(t *testing.T) {
-	s, dir, _ := newTestStore(t)
+	s, _, _ := newTestStore(t)
 	a := mustSave(t, s, "A", sampleSecret(1))
 	b := mustSave(t, s, "B", sampleSecret(2))
 	mustLink(t, s, a.ID, sampleGrant(1))
-
-	// Copy A's sealed attachment to B and rewrite only the public id so the file
-	// name, the header id and the record id all agree. The AAD still carries A's
-	// id, so decryption under B must fail.
-	raw, err := os.ReadFile(tajiduoPath(dir, a.ID))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Move A's attachment onto B, rewriting only the id it claims to belong to.
+	raw := tajiduoRowBytes(t, s, a.ID)
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
 	}
 	m["id"] = b.ID
-	moved, err := json.Marshal(m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(tajiduoPath(dir, b.ID), moved, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.UnlockTajiduo(b.ID); !errors.Is(err, ErrCorrupt) {
-		t.Fatalf("Unlock of transplanted attachment = %v, want ErrCorrupt", err)
-	}
-	// A's own attachment is untouched.
-	if got, err := s.UnlockTajiduo(a.ID); err != nil || got != sampleGrant(1) {
-		t.Fatalf("A attachment broken by transplant: %v", err)
-	}
-}
-
-func TestTajiduoAADBindsCenterUID(t *testing.T) {
-	s, dir, _ := newTestStore(t)
-	a := mustSave(t, s, "A", sampleSecret(1))
-	mustLink(t, s, a.ID, sampleGrant(1))
-	edit := func(m map[string]any) {
-		m["centerUid"] = "center-hijacked"
-	}
-	path := tajiduoPath(dir, a.ID)
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatal(err)
-	}
-	edit(m)
 	out, err := json.Marshal(m)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, out, 0o600); err != nil {
+	if _, err := s.db.Exec(t.Context(), `INSERT INTO account_tajiduo (account_id, center_uid, file, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(account_id) DO UPDATE SET file = excluded.file`,
+		b.ID, "center-1", out, database.Stamp(time.Unix(0, 0))); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.UnlockTajiduo(b.ID); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("UnlockTajiduo of a transplanted attachment = %v, want ErrCorrupt", err)
+	}
+	if _, err := s.UnlockTajiduo(a.ID); err != nil {
+		t.Fatalf("the original attachment broke: %v", err)
+	}
+}
+
+func TestTajiduoAADBindsCenterUID(t *testing.T) {
+	s, _, _ := newTestStore(t)
+	a := mustSave(t, s, "A", sampleSecret(1))
+	mustLink(t, s, a.ID, sampleGrant(1))
+	tamperTajiduo(t, s, a.ID, func(m map[string]any) { m["centerUid"] = "center-other" })
 	if _, err := s.UnlockTajiduo(a.ID); !errors.Is(err, ErrCorrupt) {
-		t.Fatalf("Unlock after centerUid tamper = %v, want ErrCorrupt", err)
+		t.Fatalf("UnlockTajiduo after a center uid change = %v, want ErrCorrupt", err)
+	}
+	list, _ := mustList(t, s)
+	if len(list) != 1 || list[0].TajiduoLinked || list[0].TajiduoState != "needs-relink" {
+		t.Fatalf("List = %+v, want needs-relink", list)
 	}
 }
 
 func TestTajiduoUpdateRotatesToken(t *testing.T) {
 	s, dir, _ := newTestStore(t)
 	a := mustSave(t, s, "A", sampleSecret(1))
+	before := rowBytes(t, s, a.ID)
 	g := sampleGrant(1)
 	mustLink(t, s, a.ID, g)
-	before, err := os.ReadFile(recordPath(dir, a.ID))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	rotated := g
-	rotated.RefreshToken = "refresh-rotated-2-SECRETVALUE"
-	if err := s.UpdateTajiduo(a.ID, rotated); err != nil {
+	g.RefreshToken = "refresh-rotated-SECRETVALUE"
+	if err := s.UpdateTajiduo(a.ID, g); err != nil {
 		t.Fatalf("UpdateTajiduo: %v", err)
 	}
 	got, err := s.UnlockTajiduo(a.ID)
-	if err != nil || got != rotated {
-		t.Fatalf("Unlock after update = %+v %v, want %+v", got, err, rotated)
-	}
-	after, err := os.ReadFile(recordPath(dir, a.ID))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("UnlockTajiduo: %v", err)
 	}
-	if !bytes.Equal(before, after) {
-		t.Fatal("UpdateTajiduo changed the .acct bytes")
+	if got != g {
+		t.Fatalf("stored grant = %+v, want the rotated one", got)
+	}
+	if !bytes.Equal(before, rowBytes(t, s, a.ID)) {
+		t.Fatal("updating the attachment changed the account record")
+	}
+	mirror, err := os.ReadFile(recordPath(dir, a.ID))
+	if err != nil || !bytes.Equal(mirror, before) {
+		t.Fatalf("updating the attachment changed the account mirror: %v", err)
 	}
 }
 
@@ -186,30 +197,25 @@ func TestTajiduoUpdateRejectsImmutableFields(t *testing.T) {
 	a := mustSave(t, s, "A", sampleSecret(1))
 	g := sampleGrant(1)
 	mustLink(t, s, a.ID, g)
-
-	changedCenter := g
-	changedCenter.CenterUID = "center-moved"
-	if err := s.UpdateTajiduo(a.ID, changedCenter); !errors.Is(err, ErrTajiduoImmutable) {
-		t.Fatalf("Update centerUid = %v, want ErrTajiduoImmutable", err)
+	cases := map[string]func(*TajiduoGrant){
+		"center uid": func(g *TajiduoGrant) { g.CenterUID = "center-other" },
+		"laohu user": func(g *TajiduoGrant) { g.LaohuUserID = "uid-other" },
+		"device id":  func(g *TajiduoGrant) { g.DeviceID = fmt.Sprintf("%032X", 0x123456) },
 	}
-	changedLaohu := g
-	changedLaohu.LaohuUserID = "uid-moved"
-	if err := s.UpdateTajiduo(a.ID, changedLaohu); !errors.Is(err, ErrTajiduoImmutable) {
-		t.Fatalf("Update laohuUserID = %v, want ErrTajiduoImmutable", err)
-	}
-	changedDevice := g
-	changedDevice.DeviceID = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
-	if err := s.UpdateTajiduo(a.ID, changedDevice); !errors.Is(err, ErrTajiduoImmutable) {
-		t.Fatalf("Update deviceID = %v, want ErrTajiduoImmutable", err)
+	for name, edit := range cases {
+		next := g
+		edit(&next)
+		if err := s.UpdateTajiduo(a.ID, next); !errors.Is(err, ErrTajiduoImmutable) {
+			t.Fatalf("UpdateTajiduo with a new %s = %v, want ErrTajiduoImmutable", name, err)
+		}
 	}
 	if got, err := s.UnlockTajiduo(a.ID); err != nil || got != g {
-		t.Fatalf("rejected updates changed the grant: %+v %v", got, err)
+		t.Fatalf("a rejected update changed the grant: %+v, %v", got, err)
 	}
-
-	// A grant with no attachment cannot be updated.
+	// An account without an attachment cannot be updated into one.
 	b := mustSave(t, s, "B", sampleSecret(2))
 	if err := s.UpdateTajiduo(b.ID, sampleGrant(2)); !errors.Is(err, ErrNoTajiduo) {
-		t.Fatalf("Update without attachment = %v, want ErrNoTajiduo", err)
+		t.Fatalf("UpdateTajiduo without an attachment = %v, want ErrNoTajiduo", err)
 	}
 }
 
@@ -221,18 +227,16 @@ func TestTajiduoUnlinkIdempotent(t *testing.T) {
 		t.Fatalf("UnlinkTajiduo: %v", err)
 	}
 	if _, err := os.Stat(tajiduoPath(dir, a.ID)); !os.IsNotExist(err) {
-		t.Fatalf("attachment survived unlink: %v", err)
+		t.Fatalf("UnlinkTajiduo left the mirror: %v", err)
+	}
+	if _, err := s.UnlockTajiduo(a.ID); !errors.Is(err, ErrNoTajiduo) {
+		t.Fatalf("UnlockTajiduo after unlink = %v, want ErrNoTajiduo", err)
 	}
 	if err := s.UnlinkTajiduo(a.ID); err != nil {
 		t.Fatalf("second UnlinkTajiduo = %v, want nil", err)
 	}
-	if _, err := s.UnlockTajiduo(a.ID); !errors.Is(err, ErrNoTajiduo) {
-		t.Fatalf("Unlock after unlink = %v, want ErrNoTajiduo", err)
-	}
-	// Unlinking an account that never had an attachment is a no-op.
-	b := mustSave(t, s, "B", sampleSecret(2))
-	if err := s.UnlinkTajiduo(b.ID); err != nil {
-		t.Fatalf("Unlink never-linked = %v, want nil", err)
+	if err := s.UnlinkTajiduo("not an id"); err != nil {
+		t.Fatalf("UnlinkTajiduo of an invalid id = %v, want nil", err)
 	}
 }
 
@@ -243,175 +247,98 @@ func TestTajiduoRemoveDeletesAttachment(t *testing.T) {
 	if err := s.Remove(a.ID); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	if _, err := os.Stat(tajiduoPath(dir, a.ID)); !os.IsNotExist(err) {
-		t.Fatalf("Remove left the attachment behind: %v", err)
+	for _, name := range []string{recordPath(dir, a.ID), tajiduoPath(dir, a.ID)} {
+		if _, err := os.Stat(name); !os.IsNotExist(err) {
+			t.Fatalf("Remove left %s: %v", filepath.Base(name), err)
+		}
 	}
-	if _, err := os.Stat(recordPath(dir, a.ID)); !os.IsNotExist(err) {
-		t.Fatalf("Remove left the record behind: %v", err)
-	}
-}
-
-func TestTajiduoOrphanAttachmentHandledLikeExistingCleanup(t *testing.T) {
-	s, dir, _ := newTestStore(t)
-	orphan := strings.Repeat("ab", 16)
-	if err := os.WriteFile(tajiduoPath(dir, orphan), []byte("orphan"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	list, corrupt := mustList(t, s)
-	if len(list) != 0 {
-		t.Fatalf("orphan attachment appeared as an account: %+v", list)
-	}
-	// Existing record cleanup only counts unusable files; it never deletes them,
-	// so the orphan is counted here too and left on disk.
-	if corrupt != 1 {
-		t.Fatalf("orphan attachment corrupt count = %d, want 1", corrupt)
-	}
-	if _, err := os.Stat(tajiduoPath(dir, orphan)); err != nil {
-		t.Fatalf("orphan attachment was deleted; existing cleanup only counts: %v", err)
-	}
-	// It is still cleanable through the idempotent unlink.
-	if err := s.UnlinkTajiduo(orphan); err != nil {
-		t.Fatalf("Unlink orphan = %v", err)
-	}
-	if _, err := os.Stat(tajiduoPath(dir, orphan)); !os.IsNotExist(err) {
-		t.Fatal("Unlink did not remove the orphan")
+	if n := countRows(t, s, `SELECT count(*) FROM account_tajiduo`); n != 0 {
+		t.Fatalf("Remove left %d attachments", n)
 	}
 }
 
 func TestTajiduoListReflectsLinked(t *testing.T) {
 	s, _, _ := newTestStore(t)
 	a := mustSave(t, s, "A", sampleSecret(1))
-	_ = a
-	list, _ := mustList(t, s)
-	if len(list) != 1 || list[0].TajiduoLinked || list[0].TajiduoState != "" {
-		t.Fatalf("before link List = %+v, want no Tajiduo state", list)
+	if list, _ := mustList(t, s); list[0].TajiduoLinked || list[0].TajiduoState != "" {
+		t.Fatalf("unlinked account reported %+v", list[0])
 	}
-	mustLink(t, s, list[0].ID, sampleGrant(1))
-	list, _ = mustList(t, s)
-	if len(list) != 1 || !list[0].TajiduoLinked || list[0].TajiduoState != "linked" {
-		t.Fatalf("after link List = %+v, want a linked Tajiduo state", list)
+	mustLink(t, s, a.ID, sampleGrant(1))
+	if list, _ := mustList(t, s); !list[0].TajiduoLinked || list[0].TajiduoState != "linked" {
+		t.Fatalf("linked account reported %+v", list[0])
 	}
-	if err := s.UnlinkTajiduo(list[0].ID); err != nil {
+	if err := s.UnlinkTajiduo(a.ID); err != nil {
 		t.Fatal(err)
 	}
-	list, _ = mustList(t, s)
-	if len(list) != 1 || list[0].TajiduoLinked || list[0].TajiduoState != "" {
-		t.Fatalf("after unlink List = %+v, want no Tajiduo state", list)
+	if list, _ := mustList(t, s); list[0].TajiduoLinked || list[0].TajiduoState != "" {
+		t.Fatalf("unlinked account reported %+v", list[0])
 	}
 }
 
 func TestTajiduoListReportsNeedsRelinkForCorruptAttachment(t *testing.T) {
-	s, dir, _ := newTestStore(t)
+	s, _, _ := newTestStore(t)
 	a := mustSave(t, s, "A", sampleSecret(1))
-	if err := os.WriteFile(tajiduoPath(dir, a.ID), []byte("{not a sealed grant"), 0o600); err != nil {
+	mustLink(t, s, a.ID, sampleGrant(1))
+	if _, err := s.db.Exec(t.Context(), `UPDATE account_tajiduo SET file = ? WHERE account_id = ?`, []byte("garbage"), a.ID); err != nil {
 		t.Fatal(err)
 	}
 	list, _ := mustList(t, s)
 	if len(list) != 1 || list[0].TajiduoLinked || list[0].TajiduoState != "needs-relink" {
-		t.Fatalf("List = %+v, want needs-relink", list)
+		t.Fatalf("List = %+v, want a damaged attachment to need a relink", list)
+	}
+	if _, err := s.UnlockTajiduo(a.ID); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("UnlockTajiduo of a damaged attachment = %v, want ErrCorrupt", err)
 	}
 }
 
 func TestTajiduoAttachmentOpsLeaveAccountBytesUnchanged(t *testing.T) {
 	s, dir, _ := newTestStore(t)
 	a := mustSave(t, s, "A", sampleSecret(1))
-	original, err := os.ReadFile(recordPath(dir, a.ID))
+	stored := rowBytes(t, s, a.ID)
+	mirrorBefore, err := os.ReadFile(recordPath(dir, a.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
-	compare := func(stage string) {
-		t.Helper()
-		now, err := os.ReadFile(recordPath(dir, a.ID))
-		if err != nil {
-			t.Fatalf("%s: %v", stage, err)
-		}
-		if !bytes.Equal(original, now) {
-			t.Fatalf("%s changed the .acct bytes", stage)
-		}
-	}
 	g := sampleGrant(1)
 	mustLink(t, s, a.ID, g)
-	compare("Link")
-	g.RefreshToken = "refresh-after-link"
 	if err := s.UpdateTajiduo(a.ID, g); err != nil {
 		t.Fatal(err)
 	}
-	compare("Update")
 	if err := s.UnlinkTajiduo(a.ID); err != nil {
 		t.Fatal(err)
 	}
-	compare("Unlink")
+	if !bytes.Equal(stored, rowBytes(t, s, a.ID)) {
+		t.Fatal("an attachment operation rewrote the account record")
+	}
+	if mirror, err := os.ReadFile(recordPath(dir, a.ID)); err != nil || !bytes.Equal(mirror, mirrorBefore) {
+		t.Fatalf("an attachment operation rewrote the account mirror: %v", err)
+	}
 }
 
 func TestTajiduoCorruptAttachment(t *testing.T) {
-	cases := map[string]func(t *testing.T, path string){
-		"garbage": func(t *testing.T, path string) {
-			if err := os.WriteFile(path, []byte("not json at all"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+	cases := map[string]func(map[string]any){
+		"garbage": func(m map[string]any) { m["version"] = "nope" },
+		"truncated secret": func(m map[string]any) {
+			m["secret"] = base64.StdEncoding.EncodeToString([]byte("AAAA"))
 		},
-		"truncated secret": func(t *testing.T, path string) {
-			raw, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var m map[string]any
-			if err := json.Unmarshal(raw, &m); err != nil {
-				t.Fatal(err)
-			}
-			m["secret"] = "AAAA"
-			out, _ := json.Marshal(m)
-			if err := os.WriteFile(path, out, 0o600); err != nil {
-				t.Fatal(err)
-			}
-		},
-		"tampered ciphertext": func(t *testing.T, path string) {
-			raw, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var m map[string]any
-			if err := json.Unmarshal(raw, &m); err != nil {
-				t.Fatal(err)
-			}
-			// Flip a bit of the decoded ciphertext. Flipping a base64 character
-			// can leave the decoded bytes unchanged when it only touches
-			// padding bits, which would test nothing.
-			b, err := base64.StdEncoding.DecodeString(m["secret"].(string))
-			if err != nil || len(b) < 8 {
+		"flipped ciphertext": func(m map[string]any) {
+			raw, err := base64.StdEncoding.DecodeString(m["secret"].(string))
+			if err != nil || len(raw) < 8 {
 				t.Fatalf("secret is not base64 ciphertext: %v", err)
 			}
-			b[len(b)/2] ^= 0x01
-			m["secret"] = base64.StdEncoding.EncodeToString(b)
-			out, _ := json.Marshal(m)
-			if err := os.WriteFile(path, out, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			raw[len(raw)/2] ^= 0x01
+			m["secret"] = base64.StdEncoding.EncodeToString(raw)
 		},
-		"wrong version": func(t *testing.T, path string) {
-			raw, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var m map[string]any
-			if err := json.Unmarshal(raw, &m); err != nil {
-				t.Fatal(err)
-			}
-			m["version"] = 99
-			out, _ := json.Marshal(m)
-			if err := os.WriteFile(path, out, 0o600); err != nil {
-				t.Fatal(err)
-			}
-		},
+		"wrong version": func(m map[string]any) { m["version"] = 99 },
 	}
-	for name, corrupt := range cases {
+	for name, edit := range cases {
 		t.Run(name, func(t *testing.T) {
-			s, dir, _ := newTestStore(t)
+			s, _, _ := newTestStore(t)
 			a := mustSave(t, s, "A", sampleSecret(1))
 			mustLink(t, s, a.ID, sampleGrant(1))
-			corrupt(t, tajiduoPath(dir, a.ID))
+			tamperTajiduo(t, s, a.ID, edit)
 			if _, err := s.UnlockTajiduo(a.ID); !errors.Is(err, ErrCorrupt) {
-				t.Fatalf("Unlock corrupt attachment = %v, want ErrCorrupt", err)
+				t.Fatalf("UnlockTajiduo after %s = %v, want ErrCorrupt", name, err)
 			}
 		})
 	}
@@ -419,76 +346,70 @@ func TestTajiduoCorruptAttachment(t *testing.T) {
 
 func TestTajiduoGrantFormattingRedacts(t *testing.T) {
 	g := sampleGrant(1)
-	var logged strings.Builder
-	slog.New(slog.NewTextHandler(&logged, nil)).Info("link", "grant", g)
-	outputs := []string{
-		g.String(),
-		fmt.Sprint(g),
-		fmt.Sprintf("%v %+v %#v %s", g, g, g, g),
-		fmt.Sprintf("%v", &g),
-		fmt.Sprintf("%x %X %q", g, g, g),
-		fmt.Sprintf("%+v", struct{ G TajiduoGrant }{g}),
-		logged.String(),
+	for _, format := range []func() string{
+		func() string { return g.String() },
+		func() string { return fmt.Sprintf("%v", g) },
+		func() string { return fmt.Sprintf("%+v", g) },
+		func() string { return fmt.Sprintf("%#v", g) },
+		func() string { return fmt.Sprintf("%s", g) },
+		func() string { return g.GoString() },
+	} {
+		out := format()
+		if strings.Contains(out, g.RefreshToken) || strings.Contains(out, g.CenterUID) || strings.Contains(out, "refresh-1") {
+			t.Fatalf("grant formatting leaks the credential: %s", out)
+		}
 	}
-	for _, out := range outputs {
-		for _, plain := range []string{g.RefreshToken, g.DeviceID, g.CenterUID, g.LaohuUserID, "SECRETVALUE"} {
-			if strings.Contains(out, plain) {
-				t.Fatalf("formatted grant leaks %q: %s", plain, out)
-			}
-		}
-		if !strings.Contains(out, "redacted") {
-			t.Fatalf("formatted grant does not say it is redacted: %s", out)
-		}
+	if out, ok := g.LogValue().Any().(string); !ok || strings.Contains(out, g.RefreshToken) {
+		t.Fatalf("LogValue leaks the credential: %v", out)
 	}
 }
 
 func TestTajiduoGrantWipe(t *testing.T) {
 	g := sampleGrant(1)
 	g.Wipe()
-	if g != (TajiduoGrant{}) {
-		t.Fatalf("Wipe left a non-empty grant: %+v", g)
+	if g.RefreshToken != "" || g.CenterUID != "" || g.LaohuUserID != "" || g.DeviceID != "" || g.RoleID != "" {
+		t.Fatalf("Wipe left %+v", g)
 	}
 }
 
 func TestNewTajiduoDeviceID(t *testing.T) {
-	a, err := NewTajiduoDeviceID()
-	if err != nil {
-		t.Fatalf("NewTajiduoDeviceID: %v", err)
-	}
-	if !isUpperHex(a, 32) {
-		t.Fatalf("device id = %q, want 32 uppercase hex chars", a)
-	}
-	b, err := NewTajiduoDeviceID()
-	if err != nil {
-		t.Fatalf("NewTajiduoDeviceID: %v", err)
-	}
-	if a == b {
-		t.Fatal("two device ids are identical")
+	seen := map[string]bool{}
+	for i := 0; i < 8; i++ {
+		id, err := NewTajiduoDeviceID()
+		if err != nil {
+			t.Fatalf("NewTajiduoDeviceID: %v", err)
+		}
+		if !isUpperHex(id, 32) {
+			t.Fatalf("device id = %q, want 32 uppercase hex chars", id)
+		}
+		if seen[id] {
+			t.Fatalf("device id repeated: %s", id)
+		}
+		seen[id] = true
 	}
 }
 
 func TestTajiduoGrantValidation(t *testing.T) {
-	base := sampleGrant(1)
-	bad := map[string]func(*TajiduoGrant){
+	cases := map[string]func(*TajiduoGrant){
 		"short device id":    func(g *TajiduoGrant) { g.DeviceID = "abc" },
 		"lowercase device":   func(g *TajiduoGrant) { g.DeviceID = strings.ToLower(g.DeviceID) },
-		"empty center uid":   func(g *TajiduoGrant) { g.CenterUID = "" },
-		"empty refresh":      func(g *TajiduoGrant) { g.RefreshToken = "" },
+		"blank center uid":   func(g *TajiduoGrant) { g.CenterUID = "" },
+		"blank refresh":      func(g *TajiduoGrant) { g.RefreshToken = "" },
 		"control in refresh": func(g *TajiduoGrant) { g.RefreshToken = "a\nb" },
-		"blank laohu":        func(g *TajiduoGrant) { g.LaohuUserID = "   " },
-		"control in role":    func(g *TajiduoGrant) { g.RoleID = "role\tx" },
+		"blank laohu":        func(g *TajiduoGrant) { g.LaohuUserID = "" },
+		"control in role":    func(g *TajiduoGrant) { g.RoleID = "a\x00b" },
 	}
-	for name, mutate := range bad {
-		g := base
-		mutate(&g)
+	for name, edit := range cases {
+		g := sampleGrant(1)
+		edit(&g)
 		if err := g.validate(); !errors.Is(err, ErrInvalidSecret) {
-			t.Fatalf("%s: validate = %v, want ErrInvalidSecret", name, err)
+			t.Fatalf("validate with a %s = %v, want ErrInvalidSecret", name, err)
 		}
 	}
-	ok := base
+	ok := sampleGrant(1)
 	ok.RoleID = ""
 	if err := ok.validate(); err != nil {
-		t.Fatalf("empty roleId must be valid: %v", err)
+		t.Fatalf("an empty role id must be valid: %v", err)
 	}
 }
 
@@ -496,11 +417,11 @@ func TestTajiduoLinkRejectsInvalidGrant(t *testing.T) {
 	s, dir, _ := newTestStore(t)
 	a := mustSave(t, s, "A", sampleSecret(1))
 	g := sampleGrant(1)
-	g.DeviceID = strings.ToLower(g.DeviceID)
+	g.RefreshToken = ""
 	if err := s.LinkTajiduo(a.ID, g); !errors.Is(err, ErrInvalidSecret) {
-		t.Fatalf("Link invalid grant = %v, want ErrInvalidSecret", err)
+		t.Fatalf("LinkTajiduo with an invalid grant = %v, want ErrInvalidSecret", err)
 	}
 	if _, err := os.Stat(tajiduoPath(dir, a.ID)); !os.IsNotExist(err) {
-		t.Fatal("invalid grant wrote an attachment")
+		t.Fatalf("a rejected grant wrote a mirror: %v", err)
 	}
 }

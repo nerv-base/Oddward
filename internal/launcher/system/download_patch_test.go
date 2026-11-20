@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 	"github.com/nerv-base/Oddward/internal/gamedl"
 	"github.com/nerv-base/Oddward/internal/gameres"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
@@ -59,9 +60,10 @@ func newPatchAdapterHarness(t *testing.T) *patchAdapterHarness {
 	h.p.delivery.Branch = "fixture"
 	h.p.delivery.Config.ResVersion = "next"
 	h.p.delivery.Config.ListHash = strings.Repeat("b", 32)
-	h.b = &GameDownloadBackend{free: func(string) (int64, error) { return math.MaxInt64, nil }}
+	db := dbtest.Open(t)
+	h.b = &GameDownloadBackend{DB: db, free: func(string) (int64, error) { return math.MaxInt64, nil }}
 	var err error
-	h.e, err = gamedl.New(gamedl.Options{WorkRoot: h.p.engineRoot(), StateRoot: t.TempDir(), Client: server.Client(), Resolve: func(_ context.Context, s gameres.Source) ([]string, error) {
+	h.e, err = gamedl.New(gamedl.Options{DB: db, WorkRoot: h.p.engineRoot(), StateRoot: t.TempDir(), Client: server.Client(), Resolve: func(_ context.Context, s gameres.Source) ([]string, error) {
 		return []string{server.URL + "/" + s.Object.MD5}, nil
 	}})
 	if err != nil {

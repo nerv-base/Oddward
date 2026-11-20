@@ -264,7 +264,7 @@ func (s *Store) Commit(ctx context.Context, in TxnInput) (RecoveryStatus, error)
 		base.VerifyCoverage = "none"
 		base.VerifiedTargets = 0
 		base.PublishedAt = time.Time{}
-		if err := s.writeInstall(base); err != nil {
+		if err := s.writeInstall(ctx, base); err != nil {
 			return RecoveryStatus{}, err
 		}
 		base, err = s.ReadInstall(in.Root)
@@ -641,7 +641,7 @@ func (s *Store) txnCommit(ctx context.Context, r *txnRoots, j *txnJournal, in Tx
 		return blocked, err
 	}
 	j.Candidate.PublishedAt = time.Now().UTC()
-	if err := s.writeInstallCheckpoint(j.Candidate, func() error { return txnCheckpoint(in, "before-install-rename") }); err != nil {
+	if err := s.writeInstallCheckpoint(ctx, j.Candidate, func() error { return txnCheckpoint(in, "before-install-rename") }); err != nil {
 		return blocked, err
 	}
 	published := RecoveryStatus{State: "ready", TxnID: j.TxnID, Published: true, Action: "published"}

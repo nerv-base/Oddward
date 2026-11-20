@@ -8,21 +8,21 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 )
 
 func TestVerifyPromotesOnlyWholeMD5AndResumesAcrossStore(t *testing.T) {
 	root, _ := adoptFixture(t)
 	stateRoot := t.TempDir()
-	s, err := NewStore(stateRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
+	db := dbtest.Open(t)
+	s := newStore(t, db, stateRoot)
 	if _, err := s.AdoptQuick(context.Background(), root, nil); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	reports := 0
-	_, err = s.VerifyInstallation(ctx, root, func(r VerifyReport) {
+	_, err := s.VerifyInstallation(ctx, root, func(r VerifyReport) {
 		reports++
 		if r.FilesDone == 1 {
 			cancel()
@@ -35,10 +35,7 @@ func TestVerifyPromotesOnlyWholeMD5AndResumesAcrossStore(t *testing.T) {
 	if err != nil || record.State == Verified {
 		t.Fatalf("canceled verify promoted: %+v %v", record, err)
 	}
-	s, err = NewStore(stateRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s = newStore(t, db, stateRoot)
 	got, err := s.VerifyInstallation(context.Background(), root, nil)
 	if err != nil || got.Record.State != Verified || got.Verified != 2 || got.Reused != 1 {
 		t.Fatalf("resumed verify: %+v %v", got, err)

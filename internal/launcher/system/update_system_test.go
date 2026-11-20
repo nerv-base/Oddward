@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 	"github.com/nerv-base/Oddward/internal/launcher"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
 	"github.com/nerv-base/Oddward/internal/launchsettings"
@@ -15,7 +16,7 @@ import (
 
 func tempStore(t *testing.T) *launchsettings.Store {
 	t.Helper()
-	s, err := launchsettings.NewStore(filepath.Join(t.TempDir(), "launcher-v1.json"))
+	s, err := launchsettings.NewStore(dbtest.Open(t), filepath.Join(t.TempDir(), "launcher-v1.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

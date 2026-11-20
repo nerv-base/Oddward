@@ -26,7 +26,8 @@ func TestPauseReopenResumesOnlyDurableChunks(t *testing.T) {
 	}))
 	defer server.Close()
 	work, state := t.TempDir(), t.TempDir()
-	opts := gamedl.Options{WorkRoot: work, StateRoot: state, Client: server.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) { return []string{server.URL}, nil }, Parameters: gamedl.Parameters{ChunkSize: 1 << 20, ConnectionsPerFile: 1, FilesInFlight: 1}}
+	db := testDB(t)
+	opts := gamedl.Options{DB: db, WorkRoot: work, StateRoot: state, Client: server.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) { return []string{server.URL}, nil }, Parameters: gamedl.Parameters{ChunkSize: 1 << 20, ConnectionsPerFile: 1, FilesInFlight: 1}}
 	task := gamedl.Task{ID: "resume", Kind: gamedl.TaskPreloadFiles, ListHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Transfers: []gamedl.Transfer{{Object: obj, Source: gameres.Source{Kind: gameres.SourceCAS, Object: obj}}}}
 	e, err := gamedl.New(opts)
 	if err != nil {

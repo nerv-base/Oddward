@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/nerv-base/Oddward/internal/bwiki"
+	"github.com/nerv-base/Oddward/internal/database"
 	"github.com/nerv-base/Oddward/internal/gacha"
 	"github.com/nerv-base/Oddward/internal/gamemedia"
 )
@@ -29,8 +30,10 @@ type WishImages struct {
 	wiki  arcIcons
 }
 
-func NewWishImages(dir string, client *http.Client) (*WishImages, error) {
-	cache, err := gamemedia.New(dir, gamemedia.Options{HTTP: client})
+// NewWishImages opens the game-icon cache for dir and indexes it in db. Both are
+// owned by the launcher process; nil handlers are rejected by gamemedia.
+func NewWishImages(db *database.DB, dir string, client *http.Client) (*WishImages, error) {
+	cache, err := gamemedia.New(db, dir, gamemedia.Options{HTTP: client})
 	if err != nil {
 		return nil, err
 	}

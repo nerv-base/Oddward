@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/nerv-base/Oddward/internal/database"
 	"github.com/nerv-base/Oddward/internal/gamedl"
 	"github.com/nerv-base/Oddward/internal/gameinstall"
 	"github.com/nerv-base/Oddward/internal/gamelocate"
@@ -22,6 +23,7 @@ import (
 
 // GameDownloadBackend connects the native launcher to verified game-resource storage.
 type GameDownloadBackend struct {
+	DB             *database.DB
 	StateRoot      string
 	Settings       *launchsettings.Store
 	Client         *http.Client
@@ -37,10 +39,12 @@ type GameDownloadBackend struct {
 }
 
 // NewGameDownloadBackend creates the production backend and wires the official
-// pre-release delivery query. Tests that build a backend literal keep the
-// query nil and therefore fail closed until they inject a verified route.
-func NewGameDownloadBackend(stateRoot string, settings *launchsettings.Store, client *http.Client, version string) *GameDownloadBackend {
-	backend := &GameDownloadBackend{StateRoot: stateRoot, Settings: settings, Client: client, Version: version}
+// pre-release delivery query. The database is authoritative for download tasks;
+// the state root still holds their compatibility mirrors and the lease. Tests
+// that build a backend literal keep the query nil and therefore fail closed
+// until they inject a verified route.
+func NewGameDownloadBackend(db *database.DB, stateRoot string, settings *launchsettings.Store, client *http.Client, version string) *GameDownloadBackend {
+	backend := &GameDownloadBackend{DB: db, StateRoot: stateRoot, Settings: settings, Client: client, Version: version}
 	backend.preloadQuery = func(ctx context.Context, branch, version string) (gameDelivery, error) {
 		return backend.metadata().delivery(ctx, branch, version)
 	}
@@ -221,7 +225,7 @@ func (b *GameDownloadBackend) handleDownloadOperation(ctx context.Context, req l
 	case state.EffectPreloadCheck, state.EffectPreloadDiscard:
 		return b.preloadCommand(ctx, req, event, report)
 	}
-	store, err := gameinstall.NewStore(filepath.Join(b.StateRoot, "installs"))
+	store, err := gameinstall.NewStore(b.DB, filepath.Join(b.StateRoot, "installs"))
 	switch req.Effect.Kind {
 	case state.EffectInstallAdopt:
 		event.Kind = state.InstallAdoptFailed

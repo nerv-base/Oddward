@@ -2,6 +2,8 @@
 
 // Package gamemedia caches public game-record PNG icons. Use one Cache per
 // directory in the launcher process; it does not provide a cross-process lock.
+// The index of cached files is asset_cache in the launcher database, so a second
+// Cache over the same directory and database sees the same entries.
 package gamemedia
 
 import (
@@ -14,11 +16,18 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/nerv-base/Oddward/internal/database"
 )
 
 const defaultBaseURL = "https://webstatic.tajiduo.com/bbs/yh-game-records-web-source"
 const maxIconBytes = 1 << 20
+
+// defaultMaxEntries bounds the number of indexed icons; the byte budget in
+// Options bounds their size. Unindexed files on disk are outside both budgets.
+const defaultMaxEntries = 4096
 
 var avatarID = regexp.MustCompile(`^[0-9]{1,10}$`)
 var forkID = regexp.MustCompile(`^fork_[a-z0-9_]{1,48}$`)
@@ -63,8 +72,9 @@ type Options struct {
 	MaxBytes int64
 }
 
-// Cache owns its directory's index and known icon files. Path guards are
-// conservative snapshots, not a defense against hostile concurrent path swaps.
+// Cache owns its directory's icon files and their asset_cache rows. Path guards
+// are conservative snapshots, not a defense against hostile concurrent path
+// swaps.
 type Cache struct {
 	dir        string
 	base       string
@@ -72,21 +82,45 @@ type Cache struct {
 	http       *http.Client
 	now        func() time.Time
 	maxBytes   int64
-	operations chan struct{}
-	loaded     bool
-	entries    map[string]entry
-	flightsMu  sync.Mutex
-	flights    map[string]*flight
+	maxEntries int
+	db         *database.DB
+
+	dirMu    sync.Mutex
+	dirReady bool
+
+	evictMu sync.Mutex
+
+	flightsMu sync.Mutex
+	flights   map[string]*flight
+
+	// The hit path records uses here and flushUsage writes them as one batch.
+	// usageBatches and usageUpdates count committed writes; tests use them to
+	// prove that a screenful of hits is batched and never rewritten wholesale.
+	usageMu      sync.Mutex
+	usage        map[Key]time.Time
+	usageTimer   *time.Timer
+	usageBatches atomic.Int64
+	usageUpdates atomic.Int64
+
+	// Expired entries are revalidated in the background. One flight per file and
+	// a bounded retry keep a dead source from being asked once per frame.
+	revalidateMu    sync.Mutex
+	revalidating    map[string]bool
+	revalidateAfter map[string]time.Time
 }
+
 type flight struct {
 	done chan struct{}
 	data []byte
 	err  error
 }
 
-// New selects an absolute local Windows cache directory. It creates no files;
-// directory checks and bounded index loading also run on the first Get.
-func New(dir string, o Options) (*Cache, error) {
+// New selects an absolute local Windows cache directory and its index database.
+// It creates no files; directory checks also run on the first Get.
+func New(db *database.DB, dir string, o Options) (*Cache, error) {
+	if db == nil {
+		return nil, errors.New("gamemedia: nil database")
+	}
 	if err := validPathSyntax(dir); err != nil {
 		return nil, err
 	}
@@ -122,28 +156,25 @@ func New(dir string, o Options) (*Cache, error) {
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	client.Jar = nil
-	c := &Cache{dir: dir, base: strings.TrimRight(o.BaseURL, "/"), hosts: hosts, http: &client, now: o.Now, maxBytes: o.MaxBytes, operations: make(chan struct{}, 1), entries: make(map[string]entry), flights: make(map[string]*flight)}
-	c.operations <- struct{}{}
-	return c, nil
-}
-func (c *Cache) acquire(ctx context.Context) (func(), error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-c.operations:
-	}
-	if err := ctx.Err(); err != nil {
-		c.operations <- struct{}{}
-		return nil, err
-	}
-	return func() { c.operations <- struct{}{} }, nil
+	return &Cache{
+		dir:             dir,
+		base:            strings.TrimRight(o.BaseURL, "/"),
+		hosts:           hosts,
+		http:            &client,
+		now:             o.Now,
+		maxBytes:        o.MaxBytes,
+		maxEntries:      defaultMaxEntries,
+		db:              db,
+		flights:         make(map[string]*flight),
+		usage:           make(map[Key]time.Time),
+		revalidating:    make(map[string]bool),
+		revalidateAfter: make(map[string]time.Time),
+	}, nil
 }
 
-// Get returns a private copy of validated PNG bytes. Calls for the same key
-// share one 30-second operation independent of any caller's cancellation.
+// Get returns a private copy of validated PNG bytes. Concurrent calls for the
+// same key share one fetch; a validated file on disk is delivered without
+// waiting for the network.
 func (c *Cache) Get(ctx context.Context, itemID string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -152,6 +183,74 @@ func (c *Cache) Get(ctx context.Context, itemID string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := c.ensureDir(ctx); err != nil {
+		return nil, err
+	}
+	data, handled, err := c.serve(ctx, key)
+	if handled {
+		return data, err
+	}
+	if err != nil {
+		return nil, err
+	}
+	return c.fetch(ctx, key)
+}
+
+// serve answers from disk when it can. handled reports that no request is
+// needed: either valid bytes are returned or err is ErrNotFound from the
+// negative cache.
+func (c *Cache) serve(ctx context.Context, key Key) (data []byte, handled bool, err error) {
+	now := c.now().UTC()
+	row, found := c.lookup(ctx, key)
+	if found && row.missing && now.Before(row.expiresAt) {
+		c.touch(key, now)
+		return nil, true, ErrNotFound
+	}
+	name := key.filename()
+	data, err = c.readIcon(ctx, name)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		// The row outlived its file. Drop the row; the caller refetches and a
+		// missing file never becomes a caller-visible failure.
+		if found {
+			_ = c.deleteRow(ctx, key)
+		}
+		return nil, false, nil
+	case errors.Is(err, errInvalidIcon):
+		// The bytes cannot be trusted. Forget both the file and its row; a failed
+		// cleanup must not turn a refetch into an error.
+		_ = c.removeIcon(ctx, name)
+		if found {
+			_ = c.deleteRow(ctx, key)
+		}
+		return nil, false, nil
+	case err != nil:
+		return nil, false, err
+	}
+	switch {
+	case found && !row.missing && now.Before(row.expiresAt):
+		c.touch(key, now)
+		return data, true, nil
+	case found && !row.missing:
+		// Expired but still verified: deliver now and confirm freshness in the
+		// background. Delivery never waits for the network.
+		c.touch(key, now)
+		c.revalidate(key, row)
+		return data, true, nil
+	}
+	// A valid file without a row (an interrupted commit, a lost or replaced
+	// database) is adopted instead of deleted. It starts with the default
+	// freshness and no validators, so it revalidates like any other entry.
+	adopted := cachedIcon{size: int64(len(data)), fetchedAt: now, expiresAt: now.Add(freshness(nil)), lastUsed: now}
+	// Delivery must not depend on the index; the next use adopts it again.
+	_ = c.store(ctx, key, adopted)
+	return data, true, nil
+}
+
+// fetch joins or starts the single flight for one key. The flight runs on its
+// own 30-second context so one caller's cancellation does not cancel the shared
+// work; each caller still observes its own cancellation.
+func (c *Cache) fetch(ctx context.Context, key Key) ([]byte, error) {
 	name := key.filename()
 	c.flightsMu.Lock()
 	f, ok := c.flights[name]
@@ -161,7 +260,7 @@ func (c *Cache) Get(ctx context.Context, itemID string) ([]byte, error) {
 		go func() {
 			shared, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			f.data, f.err = c.get(shared, key)
+			f.data, f.err = c.fetchOnce(shared, key)
 			c.flightsMu.Lock()
 			delete(c.flights, name)
 			close(f.done)
@@ -180,126 +279,129 @@ func (c *Cache) Get(ctx context.Context, itemID string) ([]byte, error) {
 	return append([]byte(nil), f.data...), f.err
 }
 
-func (c *Cache) get(ctx context.Context, key Key) ([]byte, error) {
-	release, err := c.acquire(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err = c.load(ctx); err != nil {
-		release()
-		return nil, err
-	}
-	name := key.filename()
-	previous, exists := c.entries[name]
+func (c *Cache) fetchOnce(ctx context.Context, key Key) ([]byte, error) {
 	now := c.now().UTC()
-	if exists && previous.Size == 0 && now.Before(previous.ExpiresAt) {
-		previous.LastUsed = now
-		c.entries[name] = previous
-		err = c.saveIndex(ctx)
-		release()
-		if err != nil {
+	previous, found := c.lookup(ctx, key)
+	var old []byte
+	hasOld := false
+	if found && !previous.missing {
+		data, err := c.readIcon(ctx, key.filename())
+		switch {
+		case err == nil:
+			old, hasOld = data, true
+		case errors.Is(err, os.ErrNotExist):
+		case errors.Is(err, errInvalidIcon):
+			_ = c.removeIcon(ctx, key.filename())
+		default:
 			return nil, err
 		}
-		return nil, ErrNotFound
 	}
-	var old []byte
-	if exists && previous.Size > 0 {
-		old, err = c.readIcon(ctx, name)
-		if err != nil {
-			if !errors.Is(err, errInvalidIcon) && !errors.Is(err, os.ErrNotExist) {
-				release()
-				return nil, err
-			}
-			if errors.Is(err, errInvalidIcon) {
-				if err = c.removeIcon(ctx, name); err != nil {
-					release()
-					return nil, err
-				}
-			}
-			delete(c.entries, name)
-			exists = false
-			previous = entry{}
-		}
-	}
-	if len(old) > 0 && now.Before(previous.ExpiresAt) {
-		previous.LastUsed = now
-		previous.Size = int64(len(old))
-		c.entries[name] = previous
-		err = c.evict(ctx)
-		if err == nil {
-			err = c.saveIndex(ctx)
-		}
-		release()
-		return old, err
-	}
-	release()
-	result, networkError, err := c.download(ctx, key, previous, len(old) > 0)
+	result, networkError, err := c.download(ctx, key, previous, hasOld)
 	if err != nil {
-		if networkError && len(old) > 0 {
-			// The offline hit is still a use for LRU, without extending its
-			// freshness. Another key may have evicted the disk entry meanwhile.
-			release, lockErr := c.acquire(ctx)
-			if lockErr != nil {
-				return nil, lockErr
-			}
-			if current, present := c.entries[name]; present && current.Size > 0 {
-				current.LastUsed = c.now().UTC()
-				current.Size = int64(len(old))
-				c.entries[name] = current
-				err = c.evict(ctx)
-				if err == nil {
-					err = c.saveIndex(ctx)
-				}
-			} else {
-				err = nil
-			}
-			release()
-			return old, err
+		if networkError && hasOld {
+			// The bytes on disk are still valid, only freshness is unknown. Serve
+			// them and leave the row alone so a later attempt retries.
+			c.touch(key, now)
+			return old, nil
 		}
 		return nil, err
 	}
-	release, err = c.acquire(ctx)
-	if err != nil {
-		return nil, err
+	return c.commit(ctx, key, previous, result, old, hasOld)
+}
+
+// commit applies one download result to the file and the index. The bytes are
+// returned even when the index write fails: a database problem degrades the
+// cache, never the page.
+func (c *Cache) commit(ctx context.Context, key Key, previous cachedIcon, result downloaded, old []byte, hasOld bool) ([]byte, error) {
+	now := c.now().UTC()
+	next := cachedIcon{
+		etag:         validValidator(result.header.Get("ETag")),
+		lastModified: validValidator(result.header.Get("Last-Modified")),
+		fetchedAt:    now,
+		expiresAt:    now.Add(freshness(result.header)),
+		lastUsed:     now,
 	}
-	defer release()
-	now = c.now().UTC()
-	next := entry{Key: name, ETag: result.header.Get("ETag"), LastModified: result.header.Get("Last-Modified"), FetchedAt: now, ExpiresAt: now.Add(freshness(result.header)), LastUsed: now}
 	var data []byte
 	switch result.status {
 	case http.StatusNotFound:
-		next.ExpiresAt = now.Add(24 * time.Hour)
-		if err = c.removeIcon(ctx, name); err != nil {
+		next.missing, next.size, next.expiresAt = true, 0, now.Add(24*time.Hour)
+		if err := c.removeIcon(ctx, key.filename()); err != nil {
 			return nil, err
 		}
 	case http.StatusNotModified:
-		data = old
-		next.Size = int64(len(old))
-		if next.ETag == "" {
-			next.ETag = previous.ETag
+		if !hasOld {
+			return nil, errors.New("gamemedia: 304 without a cached image")
 		}
-		if next.LastModified == "" {
-			next.LastModified = previous.LastModified
+		data = old
+		next.size = int64(len(old))
+		if next.etag == "" {
+			next.etag = previous.etag
+		}
+		if next.lastModified == "" {
+			next.lastModified = previous.lastModified
 		}
 	default:
 		data = result.data
-		next.Size = int64(len(data))
-		if err = c.atomicWrite(ctx, name, data); err != nil {
+		next.size = int64(len(data))
+		if err := c.atomicWrite(ctx, key.filename(), data); err != nil {
 			return nil, err
 		}
 	}
-	if len(next.ETag) > 4096 || len(next.LastModified) > 4096 {
-		return nil, errors.New("gamemedia: oversized cache validators")
+	if err := c.store(ctx, key, next); err != nil {
+		// The bytes are valid and already on disk; the next use adopts the file.
+		if result.status == http.StatusNotFound {
+			return nil, ErrNotFound
+		}
+		return data, nil
 	}
-	c.entries[name] = next
-	if err = c.evict(ctx); err != nil {
-		return nil, err
-	}
-	if err = c.saveIndex(ctx); err != nil {
-		return nil, err
-	}
+	_ = c.evict(ctx)
 	if result.status == http.StatusNotFound {
 		return nil, ErrNotFound
 	}
 	return data, nil
+}
+
+// revalidate confirms an expired entry in the background. One flight per file
+// and a five-minute backoff after a failure keep a dead source off the frame
+// budget; the stale bytes stay available meanwhile.
+func (c *Cache) revalidate(key Key, previous cachedIcon) {
+	name := key.filename()
+	now := c.now().UTC()
+	c.revalidateMu.Lock()
+	if c.revalidating[name] {
+		c.revalidateMu.Unlock()
+		return
+	}
+	if until, ok := c.revalidateAfter[name]; ok && now.Before(until) {
+		c.revalidateMu.Unlock()
+		return
+	}
+	c.revalidating[name] = true
+	c.revalidateMu.Unlock()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err := c.refresh(ctx, key, previous)
+		c.revalidateMu.Lock()
+		delete(c.revalidating, name)
+		if err != nil {
+			c.revalidateAfter[name] = c.now().UTC().Add(revalidateBackoff)
+		} else {
+			delete(c.revalidateAfter, name)
+		}
+		c.revalidateMu.Unlock()
+	}()
+}
+
+func (c *Cache) refresh(ctx context.Context, key Key, previous cachedIcon) error {
+	old, err := c.readIcon(ctx, key.filename())
+	if err != nil {
+		return err
+	}
+	result, _, err := c.download(ctx, key, previous, true)
+	if err != nil {
+		return err
+	}
+	_, err = c.commit(ctx, key, previous, result, old, true)
+	return err
 }

@@ -45,7 +45,7 @@ func TestTxnRepairAcceptsActualVerificationMismatchRecord(t *testing.T) {
 			case "baseline-mismatch":
 				record := report.Record
 				record.BaselineMismatch = true
-				if e := s.writeInstall(record); e != nil {
+				if e := s.writeInstall(context.Background(), record); e != nil {
 					t.Fatal(e)
 				}
 			}

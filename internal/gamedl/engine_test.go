@@ -35,7 +35,7 @@ func fixture(t *testing.T, data []byte, handler http.HandlerFunc) (*gamedl.Engin
 	}
 	server := httptest.NewTLSServer(handler)
 	t.Cleanup(server.Close)
-	e, err := gamedl.New(gamedl.Options{WorkRoot: t.TempDir(), StateRoot: t.TempDir(), Client: server.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) { return []string{server.URL + "/object"}, nil }})
+	e, err := gamedl.New(gamedl.Options{DB: testDB(t), WorkRoot: t.TempDir(), StateRoot: t.TempDir(), Client: server.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) { return []string{server.URL + "/object"}, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}

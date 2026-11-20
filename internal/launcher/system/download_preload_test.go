@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 	"github.com/nerv-base/Oddward/internal/gamedl"
 	"github.com/nerv-base/Oddward/internal/gameinstall"
 	"github.com/nerv-base/Oddward/internal/gameres"
@@ -76,7 +77,7 @@ func preloadSystemDelivery(t *testing.T, root string) gameDelivery {
 	return gameDelivery{Config: cfg, Manifest: m, Graph: g, XML: xml, Branch: "PC_160", ConfigResponse: downloadResponse{Data: cfgData, Root: root, URL: root + "/observed-preload/config.xml"}}
 }
 func TestNewGameDownloadBackendWiresOfficialPreloadQuery(t *testing.T) {
-	backend := NewGameDownloadBackend(t.TempDir(), nil, nil, "test")
+	backend := NewGameDownloadBackend(dbtest.Open(t), t.TempDir(), nil, nil, "test")
 	if backend.preloadQuery == nil {
 		t.Fatal("production backend did not wire the official pre-release query")
 	}
@@ -126,7 +127,7 @@ func TestSystemPreloadDiscoveryCarriesPerformanceRateFallbacks(t *testing.T) {
 		fmt.Fprint(w, `<config><ResVersion>1.0.0</ResVersion><Extra><listHash>d41d8cd98f00b204e9800998ecf8427e</listHash></Extra></config>`)
 	}))
 	defer srv.Close()
-	b := &GameDownloadBackend{StateRoot: t.TempDir(), Client: srv.Client(), roots: []string{srv.URL}, free: func(string) (int64, error) { return 8 << 30, nil }, processes: func(context.Context) (downloadProcesses, error) { return downloadProcesses{}, nil }}
+	b := &GameDownloadBackend{DB: dbtest.Open(t), StateRoot: t.TempDir(), Client: srv.Client(), roots: []string{srv.URL}, free: func(string) (int64, error) { return 8 << 30, nil }, processes: func(context.Context) (downloadProcesses, error) { return downloadProcesses{}, nil }}
 	root := preloadSystemBase(t, b)
 	input, _, _, err := b.preloadDiscovery(context.Background(), root)
 	if err != nil {
@@ -150,7 +151,7 @@ func TestSystemPreloadUnknownQueryRouteFailsClosedWithoutFetching(t *testing.T) 
 		fmt.Fprint(w, `<config><ResVersion>1.0.0</ResVersion><PreReleaseStatus>start</PreReleaseStatus><PreReleaseBranch>PC_160</PreReleaseBranch><PreReleaseVersion>1.1.0</PreReleaseVersion><Extra><listHash>d41d8cd98f00b204e9800998ecf8427e</listHash></Extra></config>`)
 	}))
 	defer srv.Close()
-	b := &GameDownloadBackend{StateRoot: t.TempDir(), Client: srv.Client(), roots: []string{srv.URL + "/clientRes"}, free: func(string) (int64, error) { return 8 << 30, nil }, processes: func(context.Context) (downloadProcesses, error) { return downloadProcesses{}, nil }}
+	b := &GameDownloadBackend{DB: dbtest.Open(t), StateRoot: t.TempDir(), Client: srv.Client(), roots: []string{srv.URL + "/clientRes"}, free: func(string) (int64, error) { return 8 << 30, nil }, processes: func(context.Context) (downloadProcesses, error) { return downloadProcesses{}, nil }}
 	root := preloadSystemBase(t, b)
 	event := b.HandleDownload(context.Background(), launcher.DownloadRequest{Root: root, Kind: state.DownloadPreload, Effect: state.Effect{Kind: state.EffectPreloadCheck}}, nil)
 	if event.Kind != state.PreloadChecked || event.Enabled || event.Body != "unverified" || calls != 1 {
@@ -165,7 +166,8 @@ func TestSystemPreloadUnknownQueryRouteFailsClosedWithoutFetching(t *testing.T) 
 	}
 }
 func TestSystemPreloadStagedAndRestoreRetainDedicatedCache(t *testing.T) {
-	b := &GameDownloadBackend{StateRoot: t.TempDir(), free: func(string) (int64, error) { return 8 << 30, nil }, processes: func(context.Context) (downloadProcesses, error) { return downloadProcesses{}, nil }}
+	db := dbtest.Open(t)
+	b := &GameDownloadBackend{DB: db, StateRoot: t.TempDir(), free: func(string) (int64, error) { return 8 << 30, nil }, processes: func(context.Context) (downloadProcesses, error) { return downloadProcesses{}, nil }}
 	root := preloadSystemBase(t, b)
 	d := preloadSystemDelivery(t, "https://synthetic.invalid/clientRes")
 	b.roots = []string{d.ConfigResponse.Root}
@@ -185,7 +187,7 @@ func TestSystemPreloadStagedAndRestoreRetainDedicatedCache(t *testing.T) {
 	if err = os.MkdirAll(p.workRoot, 0700); err != nil {
 		t.Fatal(err)
 	}
-	engine, err := gamedl.New(gamedl.Options{WorkRoot: p.workRoot, StateRoot: b.taskRoot(key), Client: http.DefaultClient, Resolve: func(context.Context, gameres.Source) ([]string, error) {
+	engine, err := gamedl.New(gamedl.Options{DB: db, WorkRoot: p.workRoot, StateRoot: b.taskRoot(key), Client: http.DefaultClient, Resolve: func(context.Context, gameres.Source) ([]string, error) {
 		t.Fatal("unexpected network")
 		return nil, nil
 	}})

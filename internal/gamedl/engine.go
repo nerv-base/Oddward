@@ -35,6 +35,9 @@ func New(o Options) (*Engine, error) {
 	if o.Client == nil || o.Resolve == nil {
 		return nil, failure(ErrPathUnsafe, "client and trusted resolver required", "", nil)
 	}
+	if o.DB == nil {
+		return nil, failure(ErrPathUnsafe, "database required", "", nil)
+	}
 	p := &o.Parameters
 	if p.ChunkSize == 0 {
 		p.ChunkSize = 8 << 20
@@ -80,7 +83,7 @@ func New(o Options) (*Engine, error) {
 			return nil, err
 		}
 	}
-	store, err := NewStore(o.StateRoot)
+	store, err := NewStore(o.DB, o.StateRoot)
 	if err != nil {
 		cleanup()
 		return nil, err
@@ -105,9 +108,7 @@ func (e *Engine) Retire(ctx context.Context, id string) error {
 	if err := ctx.Err(); err != nil {
 		return classify("retire task", id, err)
 	}
-	e.store.mu.Lock()
-	defer e.store.mu.Unlock()
-	return removeSafe(e.store.root, "tasks/"+id+".json")
+	return e.store.delete(ctx, id)
 }
 
 func (e *Engine) Store() *Store { return e.store }
@@ -193,7 +194,7 @@ func (e *Engine) Run(ctx context.Context, task Task, report func(Progress)) erro
 		stateMu.Lock()
 		defer stateMu.Unlock()
 		task.Transfers[i] = tr
-		return e.store.Save(context.Background(), task)
+		return e.store.UpdateTransfer(context.Background(), task.ID, i, tr.BytesDone, tr.State)
 	}
 	pending := make([]int, 0, len(task.Transfers))
 	for i, tr := range task.Transfers {
@@ -251,7 +252,9 @@ func (e *Engine) Run(ctx context.Context, task Task, report func(Progress)) erro
 					errOnce.Do(func() { firstErr = err; cancel() })
 					return
 				}
-				updated, err := e.download(runCtx, tr, progress, func(current Transfer) error { return saveTransfer(i, current) })
+				updated, err := e.download(runCtx, tr, progress, func(current Transfer) error { return saveTransfer(i, current) }, func(done int64) error {
+					return e.store.UpdateTransferProgress(context.Background(), task.ID, i, done)
+				})
 				e.admission.release(nil)
 				if err == nil {
 					updated.State = TransferVerified

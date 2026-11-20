@@ -11,6 +11,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 )
 
 const txnPrefix = "Client/WindowsNoEditor/"
@@ -48,10 +50,7 @@ func txnFixture(t *testing.T) (*Store, TxnInput, InstallRecord) {
 	if e := os.MkdirAll(root, 0700); e != nil {
 		t.Fatal(e)
 	}
-	s, e := NewStore(t.TempDir())
-	if e != nil {
-		t.Fatal(e)
-	}
+	s := newStore(t, dbtest.Open(t), t.TempDir())
 	key, e := InstallKey(root)
 	if e != nil {
 		t.Fatal(e)
@@ -60,7 +59,7 @@ func txnFixture(t *testing.T) (*Store, TxnInput, InstallRecord) {
 	for _, v := range []struct{ p, d string }{{"a.bin", "old-a"}, {"b.bin", "old-b"}, {"prune.bin", "old-prune"}, {"keep.bin", "keep"}, {"unknown.bin", "user-data"}} {
 		txnPut(t, root, v.p, v.d)
 	}
-	if e = s.writeInstall(old); e != nil {
+	if e = s.writeInstall(context.Background(), old); e != nil {
 		t.Fatal(e)
 	}
 	old, e = s.ReadInstall(root)
@@ -248,7 +247,7 @@ func TestTxnSameVersionRequiresExactTransactionEvidence(t *testing.T) {
 					t.Fatal(e)
 				}
 				r.TxnID = "unrelated-transaction"
-				if e = s.writeInstall(r); e != nil {
+				if e = s.writeInstall(context.Background(), r); e != nil {
 					t.Fatal(e)
 				}
 			}
@@ -291,7 +290,7 @@ func TestTxnRecoveryRetainsEvidenceWhenCandidateOrBackupChanged(t *testing.T) {
 				}
 			case "foreign-base":
 				old.TxnID = "foreign"
-				if e := s.writeInstall(old); e != nil {
+				if e := s.writeInstall(context.Background(), old); e != nil {
 					t.Fatal(e)
 				}
 			case "broken-journal":

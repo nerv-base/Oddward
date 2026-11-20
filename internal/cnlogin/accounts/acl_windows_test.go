@@ -11,6 +11,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 )
 
 func assertPrivateDACL(t *testing.T, path string) {
@@ -61,10 +63,11 @@ func TestWindowsStoreAndPersistedFilesHaveProtectedPrivateDACL(t *testing.T) {
 	if err := s.SetLast(a.ID); err != nil {
 		t.Fatal(err)
 	}
+	mustLink(t, s, a.ID, sampleGrant(1))
 	for _, name := range dirNames(t, dir) {
 		assertPrivateDACL(t, filepath.Join(dir, name))
 	}
-	tx, err := prepareForTest(t, s, Account{Label: "B"}, sampleSecret(2))
+	tx, err := s.Prepare(Account{Label: "B"}, sampleSecret(2))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +85,7 @@ func TestOpenRejectsJunctionAncestor(t *testing.T) {
 	}
 	link := filepath.Join(root, "link")
 	makeJunction(t, link, target)
-	if _, err := Open(filepath.Join(link, "accounts"), newFakeProtector(t)); err == nil {
+	if _, err := Open(dbtest.Open(t), filepath.Join(link, "accounts"), newFakeProtector(t)); err == nil {
 		t.Fatal("Open followed junction ancestor")
 	}
 	if _, err := os.Stat(filepath.Join(target, "accounts")); !os.IsNotExist(err) {

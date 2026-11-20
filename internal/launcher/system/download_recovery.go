@@ -159,7 +159,7 @@ func (b *GameDownloadBackend) recoverDownload(ctx context.Context, req launcher.
 	} else if err != nil {
 		return event, err
 	}
-	tasks, err := gamedl.NewStore(b.taskRoot(key))
+	tasks, err := gamedl.NewStore(b.DB, b.taskRoot(key))
 	if err != nil {
 		return event, err
 	}

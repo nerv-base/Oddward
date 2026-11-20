@@ -23,6 +23,7 @@ import (
 	"github.com/nerv-base/Oddward/internal/bwiki"
 	"github.com/nerv-base/Oddward/internal/checkin"
 	"github.com/nerv-base/Oddward/internal/cnlogin/accounts"
+	"github.com/nerv-base/Oddward/internal/database"
 	"github.com/nerv-base/Oddward/internal/launcher"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
 	"github.com/nerv-base/Oddward/internal/launcher/system"
@@ -56,7 +57,21 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	store, err := launchsettings.NewStore(settingsPath)
+	// Every structured record lives in one database beside the settings file, so
+	// the launcher cannot end up with half of its state in another directory. A
+	// failure here is fatal: the update stub only rolls back a version that exits
+	// non-zero before it reports itself healthy.
+	dataRoot := filepath.Dir(cachePath)
+	db, err := database.Open(context.Background(), database.Options{Path: filepath.Join(dataRoot, database.FileName)})
+	if err != nil {
+		log.Fatalf("launcher database unavailable: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Printf("launcher database close: %v", err)
+		}
+	}()
+	store, err := launchsettings.NewStore(db, settingsPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -73,24 +88,36 @@ func main() {
 	// the network panel apply to updates and announcements alike.
 	netSettings, netState := system.SavedNetwork(saved.Network)
 	network := netcfg.New(netSettings, nil)
-	accountStore, err := accounts.Open(filepath.Join(filepath.Dir(cachePath), "accounts"), accounts.DPAPI{})
+	accountStore, err := accounts.Open(db, filepath.Join(dataRoot, "accounts"), accounts.DPAPI{})
 	if err != nil {
 		log.Fatal(err)
 	}
-	wishArchives, err := system.NewWishArchives(filepath.Dir(cachePath))
+	wishArchives, err := system.NewWishArchives(db, dataRoot)
 	if err != nil {
 		log.Fatal(err)
 	}
-	bwikiStore, err := bwiki.Open(filepath.Join(filepath.Dir(cachePath), "bwiki"), &http.Client{Transport: network})
+	bwikiStore, err := bwiki.Open(db, filepath.Join(dataRoot, "bwiki"), &http.Client{Transport: network})
 	if err != nil {
 		log.Printf("community wiki cache unavailable: %v", err)
 	} else {
 		wishArchives.SetBWiki(bwikiStore)
 	}
-	checkInRecords, err := checkin.Open(filepath.Join(filepath.Dir(cachePath), "checkin"))
+	checkInRecords, err := checkin.Open(db, filepath.Join(dataRoot, "checkin"))
 	if err != nil {
 		log.Fatal(err)
 	}
+	// The production backends are built before the window exists: adopting the
+	// records of an older build has to finish before the interface can read or
+	// write any of them.
+	downloads := system.NewGameDownloadBackend(db, dataRoot, store, &http.Client{Transport: network}, buildinfo.Version)
+	brandingStore, err := brandingcache.Open(db, filepath.Join(dataRoot, "branding"))
+	if err != nil {
+		log.Printf("branding cache unavailable: %v", err)
+	}
+	feed := news.NewClient()
+	feed.HTTP.Transport = network
+	announcements := system.NewLauncherNews(db, feed, filepath.Join(dataRoot, "cache", "news"))
+	adoptLegacyRecords(db, store, wishArchives, accountStore, checkInRecords, downloads, announcements, brandingStore)
 	tajiduoClient, err := tajiduo.NewClient(tajiduo.Config{HTTPClient: &http.Client{Transport: network}})
 	if err != nil {
 		log.Fatal("cannot initialize Tajiduo client")
@@ -101,7 +128,6 @@ func main() {
 		s.WishLinkBackend = tajiduoBackend
 		s.CheckInBackend = tajiduoBackend
 		s.WishBackend, s.WishLocation = wishArchives, time.Local
-		downloads := system.NewGameDownloadBackend(filepath.Dir(cachePath), store, &http.Client{Transport: network}, buildinfo.Version)
 		s.GameDownloads = downloads
 		prefs := saved.Downloads
 		if prefs == (launchsettings.Downloads{}) {
@@ -153,8 +179,8 @@ func main() {
 		s.InitialManagedRoot = *gameRoot
 		s.Model.Network, s.NetworkBackend = netState, system.SystemNetwork{Network: network, Store: store}
 		selfUpdate(s, executable, network, store, saved)
-		if cache, err := brandingcache.Open(filepath.Join(filepath.Dir(cachePath), "branding")); err == nil {
-			adapter := brandingCacheAdapter{cache: cache}
+		if brandingStore != nil {
+			adapter := brandingCacheAdapter{cache: brandingStore}
 			s.BrandingCache = adapter
 			if record, err := adapter.Load(context.Background()); err == nil {
 				if art, decodeErr := ui.DecodeBitmap(record.Image); decodeErr == nil {
@@ -163,8 +189,6 @@ func main() {
 					s.BrandingVersion = record.VersionName
 				}
 			}
-		} else {
-			log.Printf("branding cache unavailable: %v", err)
 		}
 		if art, err := launcher.LoadPoster(*background, *poster); err == nil {
 			s.Poster = art
@@ -268,10 +292,8 @@ func main() {
 		// Bind wake before either asynchronous reader can start, including a static
 		// background with no animation frames to incidentally flush the result.
 		s.RequestFrame = w.Invalidate
-		feed := news.NewClient()
-		feed.HTTP.Transport = network
-		s.Source = system.NewLauncherNews(feed, filepath.Join(filepath.Dir(cachePath), "cache", "news"))
-		images, err := system.NewWishImages(filepath.Join(filepath.Dir(cachePath), "cache", "gamemedia"), feed.HTTP)
+		s.Source = announcements
+		images, err := system.NewWishImages(db, filepath.Join(dataRoot, "cache", "gamemedia"), feed.HTTP)
 		if err != nil {
 			log.Printf("wish item images unavailable: %v", err)
 		} else {

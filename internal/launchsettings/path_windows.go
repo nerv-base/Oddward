@@ -79,18 +79,3 @@ func checkLocalPath(ctx context.Context, path string, directory bool) error {
 	}
 	return ctx.Err()
 }
-
-// The stage and destination share a directory and volume. MoveFileEx replaces
-// the name directly; there is deliberately no Remove(destination) fallback.
-// Write-through plus Sync is not a claim of full power-loss recovery semantics.
-func replaceFile(stage, destination string) error {
-	from, err := windows.UTF16PtrFromString(stage)
-	if err != nil {
-		return err
-	}
-	to, err := windows.UTF16PtrFromString(destination)
-	if err != nil {
-		return err
-	}
-	return windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
-}

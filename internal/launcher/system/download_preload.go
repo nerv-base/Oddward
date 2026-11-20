@@ -327,7 +327,7 @@ func (b *GameDownloadBackend) preloadReferenceScan(ctx context.Context, root str
 	if err != nil {
 		return nil, err
 	}
-	tasks, err := gamedl.NewStore(b.taskRoot(key))
+	tasks, err := gamedl.NewStore(b.DB, b.taskRoot(key))
 	if err != nil {
 		return nil, err
 	}

@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -128,7 +129,7 @@ func testGameDownloadFirstInstall(t *testing.T, external bool) {
 	defer srv.Close()
 	var running downloadProcesses
 	available := int64(8 << 30)
-	backend := &GameDownloadBackend{StateRoot: t.TempDir(), Client: srv.Client(), roots: []string{srv.URL}, free: func(string) (int64, error) { return available, nil }, processes: func(context.Context) (downloadProcesses, error) { return running, nil }}
+	backend := &GameDownloadBackend{DB: dbtest.Open(t), StateRoot: t.TempDir(), Client: srv.Client(), roots: []string{srv.URL}, free: func(string) (int64, error) { return available, nil }, processes: func(context.Context) (downloadProcesses, error) { return running, nil }}
 	delivery := gameDelivery{
 		Branch:         bootstrapBranch,
 		Config:         gameres.Config{ResVersion: "1.5.6", ListHash: "d41d8cd98f00b204e9800998ecf8427e", ResSize: object.Size + image.Size},
@@ -162,7 +163,7 @@ func testGameDownloadFirstInstall(t *testing.T, external bool) {
 		t.Fatalf("precommit target exists or failed: %v", err)
 	}
 	if external {
-		restarted := &GameDownloadBackend{StateRoot: backend.StateRoot, downloadVolume: backend.downloadVolume}
+		restarted := &GameDownloadBackend{DB: backend.DB, StateRoot: backend.StateRoot, downloadVolume: backend.downloadVolume}
 		restore := req
 		restore.Effect.Kind = state.EffectRecoverScan
 		got := restarted.HandleDownload(ctx, restore, nil)
@@ -269,7 +270,7 @@ func testGameDownloadFirstInstall(t *testing.T, external bool) {
 	if got := backend.HandleDownload(ctx, req, nil); got.Kind != state.DownloadVerified {
 		t.Fatalf("mixed update verify = %d %s", got.Kind, got.Message)
 	}
-	restarted := &GameDownloadBackend{StateRoot: backend.StateRoot, Client: backend.Client, roots: backend.roots, free: backend.free, processes: backend.processes}
+	restarted := &GameDownloadBackend{DB: backend.DB, StateRoot: backend.StateRoot, Client: backend.Client, roots: backend.roots, free: backend.free, processes: backend.processes}
 	req.Effect.Kind = state.EffectRecoverScan
 	if got := restarted.HandleDownload(ctx, req, nil); got.Kind != state.DownloadRestored || got.Stage != state.StageNetwork || got.Message != "1.5.7" || got.Focused {
 		t.Fatalf("reopened durable task = %d stage %d version %q auto %t: %s", got.Kind, got.Stage, got.Message, got.Focused, got.Body)

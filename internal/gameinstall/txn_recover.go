@@ -120,7 +120,7 @@ func (s *Store) Recover(ctx context.Context, root, workRoot string, guard func(c
 		record, readErr := s.ReadInstall(root)
 		if readErr == nil && (record.State == "installing" || record.State == "incomplete") {
 			record.State = "incomplete"
-			if err := s.writeInstall(record); err != nil {
+			if err := s.writeInstall(ctx, record); err != nil {
 				return txnRequired(err)
 			}
 			return RecoveryStatus{State: "incomplete", LaunchBlocked: true, Resume: true, Action: "resume"}, nil
@@ -320,7 +320,7 @@ func (s *Store) txnRecoverOne(ctx context.Context, r *txnRoots, j *txnJournal, g
 			return txnRequired(err)
 		}
 		record.State = "incomplete"
-		if err := s.writeInstall(record); err != nil {
+		if err := s.writeInstall(ctx, record); err != nil {
 			return txnRequired(err)
 		}
 		return RecoveryStatus{State: "incomplete", TxnID: j.TxnID, LaunchBlocked: true, Resume: true, Action: "resume"}, nil

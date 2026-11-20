@@ -4,29 +4,54 @@ package gacha
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/nerv-base/Oddward/internal/database"
 )
 
-// Store serializes operations using one cancelable lock per directory. Use only
-// one Store per directory in a process; there is no cross-process lock. Path
-// checks are conservative snapshots, not a hostile concurrent path-swap jail.
+// Domain is the archive domain in migration_state. The per-file mirror rows use
+// one domain per archive instead: compat_mirrors keeps a single row per domain,
+// while a directory of archives must be reconciled file by file.
+const Domain = "gacha"
+
+// ImportVersion is the importer generation recorded for Domain. Bump it when
+// the importer learns to read a legacy document it did not read before.
+const ImportVersion = 1
+
+// Where an archive row first came from. It is bookkeeping for tracing a
+// migration; the archive itself is identical either way.
+const (
+	sourceSaved  = "oddward"
+	sourceLegacy = "legacy"
+)
+
+// Store is the database-backed gacha archive repository. SQLite is
+// authoritative; every archive is also written as the legacy oddward-gacha file
+// under dir, because the updater can roll the launcher back to a build that
+// cannot read the database. Use only one Store per database and directory in a
+// process: operations serialize on one cancelable lock, and there is no
+// cross-process lock. Path checks are conservative snapshots, not a hostile
+// concurrent path-swap jail.
 type Store struct {
+	db         *database.DB
 	dir        string
 	operations chan struct{}
 }
 
-// NewStore validates an ordinary absolute local Windows directory without I/O.
-// The directory must be app-owned, separate from the user's game installation.
-func NewStore(dir string) (*Store, error) {
+// NewStore binds the archive rows to the mirror directory dir. It validates the
+// path syntax without creating directories or reading user data.
+func NewStore(db *database.DB, dir string) (*Store, error) {
+	if db == nil {
+		return nil, errors.New("gacha store requires an open database")
+	}
 	if err := validPathSyntax(dir); err != nil {
 		return nil, err
 	}
@@ -34,7 +59,7 @@ func NewStore(dir string) (*Store, error) {
 	if filepath.Dir(dir) == dir {
 		return nil, errors.New("gacha directory must not be a volume root")
 	}
-	s := &Store{dir: dir, operations: make(chan struct{}, 1)}
+	s := &Store{db: db, dir: dir, operations: make(chan struct{}, 1)}
 	s.operations <- struct{}{}
 	return s, nil
 }
@@ -55,6 +80,8 @@ func (s *Store) acquire(ctx context.Context) (func(), error) {
 	}
 }
 
+// filename is the legacy path of one archive. The bytes written there are the
+// mirror a rolled-back build reads.
 func (s *Store) filename(roleID string) (string, error) {
 	if err := validateRole(roleID); err != nil {
 		return "", err
@@ -62,51 +89,40 @@ func (s *Store) filename(roleID string) (string, error) {
 	return filepath.Join(s.dir, roleID+".json"), nil
 }
 
-// List returns lexicographically sorted role IDs without decoding file contents.
-// A missing directory is an empty list. Non-archive and unsafe entries are ignored.
+// archiveDomain scopes the mirror row of one archive file.
+func archiveDomain(roleID string) string { return Domain + "/" + roleID }
+
+// List returns the role IDs stored in the database, lexicographically sorted. A
+// role that only has a legacy file appears after the import has stored it.
 func (s *Store) List(ctx context.Context) ([]string, error) {
 	release, err := s.acquire(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
-	if err := checkLocalPath(ctx, s.dir, true); err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(s.dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return []string{}, ctx.Err()
-	}
+	rows, err := s.db.Query(ctx, `SELECT role_id FROM gacha_archives ORDER BY role_id`)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	ids := []string{}
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
 			return nil, err
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		id := strings.TrimSuffix(name, ".json")
-		if validateRole(id) != nil || !entry.Type().IsRegular() {
-			continue
-		}
-		if err := checkLocalPath(ctx, filepath.Join(s.dir, name), false); err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			continue
 		}
 		ids = append(ids, id)
 	}
-	sort.Strings(ids)
-	return ids, ctx.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
-// Load returns an os.ErrNotExist-compatible error for missing files. Decode and
-// size failures wrap ErrCorrupt and never change the existing bytes.
+// Load returns an os.ErrNotExist-compatible error for a role the database does
+// not hold. An unreadable legacy file is reported as ErrCorrupt so the caller
+// can quarantine it, exactly as the file store reported a corrupt archive; the
+// file's contents never become authoritative.
 func (s *Store) Load(ctx context.Context, roleID string) (Archive, error) {
 	release, err := s.acquire(ctx)
 	if err != nil {
@@ -117,115 +133,76 @@ func (s *Store) Load(ctx context.Context, roleID string) (Archive, error) {
 }
 
 func (s *Store) load(ctx context.Context, roleID string) (Archive, error) {
-	name, err := s.filename(roleID)
-	if err != nil {
-		return Archive{}, err
+	archive, err := loadArchive(ctx, s.db.Query, s.db.QueryRow, roleID)
+	if !errors.Is(err, os.ErrNotExist) {
+		return archive, err
 	}
-	if err := checkLocalPath(ctx, name, false); err != nil {
-		return Archive{}, err
+	if _, _, legacyErr := s.readLegacyArchive(ctx, roleID); legacyErr != nil && !errors.Is(legacyErr, os.ErrNotExist) {
+		return Archive{}, legacyErr
 	}
-	file, err := os.Open(name)
-	if err != nil {
-		return Archive{}, err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return Archive{}, err
-	}
-	if !info.Mode().IsRegular() || info.Size() > MaxDocumentBytes {
-		return Archive{}, fmt.Errorf("%w: expected regular archive no larger than 8 MiB", ErrCorrupt)
-	}
-	data, err := io.ReadAll(io.LimitReader(file, MaxDocumentBytes+1))
-	if err != nil {
-		return Archive{}, err
-	}
-	if err := ctx.Err(); err != nil {
-		return Archive{}, err
-	}
-	imported, err := DecodeImport(data)
-	if err != nil {
-		return Archive{}, fmt.Errorf("%w: %w", ErrCorrupt, err)
-	}
-	if imported.Format != "oddward-gacha" || imported.Archive.RoleID != roleID {
-		return Archive{}, fmt.Errorf("%w: archive format or role differs from filename", ErrCorrupt)
-	}
-	return imported.Archive, nil
+	return Archive{}, err
 }
 
-// Save validates and serializes before staging, and refuses to replace corrupt
-// prior archives. Sync plus same-directory MoveFileEx is not a guarantee of
-// complete power-loss recovery. Cancellation concurrent with commit cannot undo it.
-func (s *Store) Save(ctx context.Context, a Archive) (result error) {
+// Save writes the archive as one transaction: its bookkeeping row, its missing
+// records with the merge luck rule, and the complete snapshot set. The mirror
+// bytes and their digest commit with the rows, and only then is the legacy file
+// replaced. If that replacement fails the rows are kept: the database is
+// authoritative and the recorded digest no longer matches the old file, which
+// the next start reconciles.
+func (s *Store) Save(ctx context.Context, a Archive) error {
 	release, err := s.acquire(ctx)
 	if err != nil {
 		return err
 	}
 	defer release()
-	data, err := ExportOddward(a, time.Now().UTC())
+	canonical, err := normalizeArchive(a, false)
 	if err != nil {
 		return err
 	}
-	name, err := s.filename(a.RoleID)
+	name, err := s.filename(canonical.RoleID)
 	if err != nil {
 		return err
 	}
-	if _, err := s.load(ctx, a.RoleID); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if _, err := s.load(ctx, canonical.RoleID); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("previous gacha archive retained: %w", err)
 	}
+	// Checked before the transaction: an unsafe mirror path must never accompany
+	// committed rows.
 	if err := checkLocalPath(ctx, name, false); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(s.dir, 0700); err != nil {
-		return err
-	}
-	if err := checkLocalPath(ctx, name, false); err != nil {
-		return err
-	}
-	stage, err := os.CreateTemp(s.dir, ".gacha-*.tmp")
+	now := time.Now().UTC()
+	err = s.db.Tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if err := putArchive(ctx, tx, canonical, sourceSaved, now); err != nil {
+			return err
+		}
+		stored, err := loadArchive(ctx, tx.QueryContext, tx.QueryRowContext, canonical.RoleID)
+		if err != nil {
+			return err
+		}
+		// The mirror is serialized from the stored archive, not from the input:
+		// records the database already held are part of the file a rollback build
+		// has to see. It is written before the commit so that a refused commit
+		// leaves the file ahead of the rows, which the next start imports, instead
+		// of leaving the rows ahead and reverting them on the next start.
+		mirror, err := ExportOddward(stored, now)
+		if err != nil {
+			return err
+		}
+		return s.db.MirrorInTx(ctx, tx, archiveDomain(canonical.RoleID), name, mirror)
+	})
 	if err != nil {
 		return err
 	}
-	stagedName := stage.Name()
-	committed := false
-	defer func() {
-		_ = stage.Close()
-		if !committed {
-			if err := os.Remove(stagedName); err != nil && !errors.Is(err, os.ErrNotExist) {
-				result = errors.Join(result, fmt.Errorf("remove owned gacha stage: %w", err))
-			}
-		}
-	}()
-	if _, err := stage.Write(data); err != nil {
-		return err
-	}
-	if err := stage.Sync(); err != nil {
-		return err
-	}
-	if err := stage.Close(); err != nil {
-		return err
-	}
-	if err := checkLocalPath(ctx, name, false); err != nil {
-		return err
-	}
-	if err := checkLocalPath(ctx, stagedName, false); err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := replaceFile(stagedName, name); err != nil {
-		return err
-	}
-	committed = true
 	return nil
 }
 
-// Delete removes only the selected local role archive, including corrupt files.
-// Caller-owned UI confirmation is required outside this package.
+// Delete removes one archive from the database and its mirror file, including a
+// file the import never stored. A missing archive is os.ErrNotExist. Caller-owned
+// UI confirmation is required outside this package.
 func (s *Store) Delete(ctx context.Context, roleID string) error {
 	release, err := s.acquire(ctx)
 	if err != nil {
@@ -239,15 +216,41 @@ func (s *Store) Delete(ctx context.Context, roleID string) error {
 	if err := checkLocalPath(ctx, name, false); err != nil {
 		return err
 	}
+	_, statErr := os.Lstat(name)
+	hasFile := statErr == nil
+	if !hasFile && !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+	stored, err := s.archiveExists(ctx, roleID)
+	if err != nil {
+		return err
+	}
+	if !hasFile && !stored {
+		return fmt.Errorf("%w: gacha archive %s", os.ErrNotExist, roleID)
+	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if err := s.db.Tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM gacha_archives WHERE role_id = ?`, roleID); err != nil {
+			return fmt.Errorf("delete gacha archive: %w", err)
+		}
+		// The mirror row goes with the file: a recorded path whose file is gone
+		// would make every later start reconcile it back.
+		_, err := tx.ExecContext(ctx, `DELETE FROM compat_mirrors WHERE domain = ?`, archiveDomain(roleID))
+		return err
+	}); err != nil {
+		return err
+	}
+	if !hasFile {
+		return nil
 	}
 	return os.Remove(name)
 }
 
-// Quarantine renames a corrupt archive without replacing any existing backup.
-// A healthy or missing archive is not quarantined. A same-second name collision
-// returns an error and retains the original, allowing a later explicit retry.
+// Quarantine renames an unreadable legacy archive without replacing any existing
+// backup. A same-second name collision returns an error and retains the
+// original, allowing a later explicit retry.
 func (s *Store) Quarantine(ctx context.Context, roleID string) (string, error) {
 	release, err := s.acquire(ctx)
 	if err != nil {
@@ -274,10 +277,173 @@ func (s *Store) Quarantine(ctx context.Context, roleID string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if err := moveFile(name, destination, false); err != nil {
+	if err := moveFile(name, destination); err != nil {
 		return "", err
 	}
+	// The bytes now belong to the quarantine sibling, so the role has no mirror.
+	if _, err := s.db.Exec(ctx, `DELETE FROM compat_mirrors WHERE domain = ?`, archiveDomain(roleID)); err != nil {
+		return destination, fmt.Errorf("gacha archive quarantined, mirror record not cleared: %w", err)
+	}
 	return destination, nil
+}
+
+func (s *Store) archiveExists(ctx context.Context, roleID string) (bool, error) {
+	var one int
+	err := s.db.QueryRow(ctx, `SELECT 1 FROM gacha_archives WHERE role_id = ?`, roleID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// queryFunc and queryRowFunc let the same read run on the connection pool or
+// inside the transaction that just wrote the rows.
+type queryFunc func(context.Context, string, ...any) (*sql.Rows, error)
+type queryRowFunc func(context.Context, string, ...any) *sql.Row
+
+// loadArchive reads one complete archive. The rows are normalized in memory so
+// the returned order is exactly the file store's order, independent of SQLite's
+// collation.
+func loadArchive(ctx context.Context, query queryFunc, queryRow queryRowFunc, roleID string) (Archive, error) {
+	var one int
+	err := queryRow(ctx, `SELECT 1 FROM gacha_archives WHERE role_id = ?`, roleID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Archive{}, fmt.Errorf("%w: gacha archive %s", os.ErrNotExist, roleID)
+	}
+	if err != nil {
+		return Archive{}, err
+	}
+	archive := Archive{RoleID: roleID, Records: []Record{}, Snapshots: []SnapshotMeta{}}
+	records, err := query(ctx, `SELECT pool, item_id, at_ms, pity, luck FROM gacha_records WHERE role_id = ?`, roleID)
+	if err != nil {
+		return Archive{}, err
+	}
+	for records.Next() {
+		var pool, itemID string
+		var atMS int64
+		var pity, luck int
+		if err := records.Scan(&pool, &itemID, &atMS, &pity, &luck); err != nil {
+			records.Close()
+			return Archive{}, err
+		}
+		archive.Records = append(archive.Records, Record{Pool: Pool(pool), ItemID: itemID, At: time.UnixMilli(atMS).UTC(), Pity: pity, Luck: luck})
+	}
+	if err := records.Err(); err != nil {
+		records.Close()
+		return Archive{}, err
+	}
+	records.Close()
+	type snapshotRow struct {
+		id   int64
+		meta SnapshotMeta
+	}
+	var snapshots []snapshotRow
+	rows, err := query(ctx, `SELECT id, fetched_at, luck_type, luck_title FROM gacha_snapshots WHERE role_id = ?`, roleID)
+	if err != nil {
+		return Archive{}, err
+	}
+	for rows.Next() {
+		var id, fetchedAt int64
+		var luckType int
+		var luckTitle string
+		if err := rows.Scan(&id, &fetchedAt, &luckType, &luckTitle); err != nil {
+			rows.Close()
+			return Archive{}, err
+		}
+		snapshots = append(snapshots, snapshotRow{id: id, meta: SnapshotMeta{FetchedAt: database.StampInt(fetchedAt), LuckType: luckType, LuckTitle: luckTitle, Pools: []PoolMeta{}}})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return Archive{}, err
+	}
+	rows.Close()
+	for _, snapshot := range snapshots {
+		pools, err := query(ctx, `SELECT pool, m, draw_count, rare_count, average, player_over, rule_mismatch FROM gacha_snapshot_pools WHERE snapshot_id = ?`, snapshot.id)
+		if err != nil {
+			return Archive{}, err
+		}
+		for pools.Next() {
+			var pool, average, playerOver string
+			var m, draws, rares, mismatch int
+			if err := pools.Scan(&pool, &m, &draws, &rares, &average, &playerOver, &mismatch); err != nil {
+				pools.Close()
+				return Archive{}, err
+			}
+			snapshot.meta.Pools = append(snapshot.meta.Pools, PoolMeta{Pool: Pool(pool), M: m, DrawCount: draws, RareCount: rares, Average: average, PlayerOver: playerOver, RuleMismatch: mismatch == 1})
+		}
+		if err := pools.Err(); err != nil {
+			pools.Close()
+			return Archive{}, err
+		}
+		pools.Close()
+		archive.Snapshots = append(archive.Snapshots, snapshot.meta)
+	}
+	return normalizeArchive(archive, false)
+}
+
+// putArchive writes one archive's rows inside tx. Records are upserted because
+// an archive is accumulated, never truncated by a save; the luck update applies
+// the same rule mergeArchives applies in memory, so a known tier is never
+// replaced by a larger one. Snapshot rows are replaced because an archive
+// carries its complete snapshot metadata set.
+func putArchive(ctx context.Context, tx *sql.Tx, a Archive, source string, now time.Time) error {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO gacha_archives(role_id, source, imported_at, updated_at)
+		VALUES(?, ?, ?, ?)
+		ON CONFLICT(role_id) DO UPDATE SET updated_at = excluded.updated_at`,
+		a.RoleID, source, database.Stamp(now), database.Stamp(now)); err != nil {
+		return fmt.Errorf("store gacha archive: %w", err)
+	}
+	for _, r := range a.Records {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO gacha_records(role_id, pool, item_id, at_ms, pity, luck, created_at)
+			VALUES(?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(role_id, pool, item_id, at_ms, pity) DO UPDATE SET
+				luck = CASE
+					WHEN gacha_records.luck = -1 THEN excluded.luck
+					WHEN excluded.luck = -1 THEN gacha_records.luck
+					WHEN excluded.luck < gacha_records.luck THEN excluded.luck
+					ELSE gacha_records.luck
+				END`,
+			a.RoleID, string(r.Pool), r.ItemID, r.At.UnixMilli(), r.Pity, r.Luck, database.Stamp(now)); err != nil {
+			return fmt.Errorf("store gacha record: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM gacha_snapshots WHERE role_id = ?`, a.RoleID); err != nil {
+		return fmt.Errorf("replace gacha snapshots: %w", err)
+	}
+	for _, m := range a.Snapshots {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO gacha_snapshots(role_id, meta_key, fetched_at, luck_type, luck_title, created_at)
+			VALUES(?, ?, ?, ?, ?, ?)`,
+			a.RoleID, metaKey(m), database.Stamp(m.FetchedAt), m.LuckType, m.LuckTitle, database.Stamp(now))
+		if err != nil {
+			return fmt.Errorf("store gacha snapshot: %w", err)
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("store gacha snapshot: %w", err)
+		}
+		for _, p := range m.Pools {
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO gacha_snapshot_pools(snapshot_id, pool, m, draw_count, rare_count, average, player_over, rule_mismatch)
+				VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+				id, string(p.Pool), p.M, p.DrawCount, p.RareCount, p.Average, p.PlayerOver, flag(p.RuleMismatch)); err != nil {
+				return fmt.Errorf("store gacha snapshot pool: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+func flag(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func validPathSyntax(path string) error {

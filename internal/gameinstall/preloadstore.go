@@ -5,22 +5,33 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/nerv-base/Oddward/internal/gameres"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/nerv-base/Oddward/internal/database"
+	"github.com/nerv-base/Oddward/internal/gameres"
 )
 
 type PreloadStore struct {
+	db                  *database.DB
 	StateRoot, WorkRoot string
 	// EngineCache retains a dedicated downloader's cache in place beneath the
 	// per-version subtree. The default remains the standalone blobs layout.
 	EngineCache bool
+}
+
+// requireDB reports a store that was built without a database. The preload state
+// machine owns durable records, so there is nothing it can honestly do without one.
+func (s PreloadStore) requireDB() error {
+	if s.db == nil {
+		return errors.New("preload store needs an open database")
+	}
+	return nil
 }
 
 // Transition persists an allowed state edge. The caller owns all side effects:
@@ -206,44 +217,12 @@ func preloadNoLinks(dir string) error {
 		return nil
 	})
 }
-func (s PreloadStore) Save(ctx context.Context, r PreloadRecord) error {
-	if e := ctx.Err(); e != nil {
-		return e
-	}
-	if e := preloadValidateRecord(r); e != nil {
-		return e
-	}
-	dir, e := preloadDirectory(s.StateRoot, r.Branch, r.Version, true)
-	if e != nil {
-		return e
-	}
-	snapshot := struct {
-		Schema   int             `json:"schema"`
-		Branch   string          `json:"branch"`
-		Version  string          `json:"version"`
-		ListHash string          `json:"listHash"`
-		Route    PreloadRoute    `json:"route"`
-		Targets  []PreloadTarget `json:"targets"`
-		Budget   PreloadBudget   `json:"budget"`
-	}{r.Schema, r.Branch, r.Version, r.ListHash, r.Route, r.Targets, r.Budget}
-	planData, e := json.Marshal(snapshot)
-	if e != nil {
-		return e
-	}
-	if e = preloadAtomicJSON(ctx, dir, "plan.json", planData); e != nil {
-		return e
-	}
-	data, e := json.Marshal(r)
-	if e != nil {
-		return e
-	}
-	return preloadAtomicJSON(ctx, dir, "preload.json", data)
-}
 
-// preload.json is the authority; a crash between these two independently atomic
-// writes may leave an older advisory plan.json which callers must not execute.
+// preloadAtomicJSON writes the advisory plan.json through a synced temporary
+// file, because a partly written snapshot must never be read as a whole one. The
+// record itself is a database row, so this file is never an authority.
 func preloadAtomicJSON(ctx context.Context, dir, name string, data []byte) error {
-	if len(data) > 16<<20 {
+	if len(data) > preloadMaxBytes {
 		return ErrPreloadRecord
 	}
 	f, e := os.CreateTemp(dir, ".preload-*.tmp")
@@ -266,40 +245,6 @@ func preloadAtomicJSON(ctx context.Context, dir, name string, data []byte) error
 		return e
 	}
 	return os.Rename(tempName, filepath.Join(dir, name))
-}
-func (s PreloadStore) Load(ctx context.Context, branch, version string) (PreloadRecord, error) {
-	if e := ctx.Err(); e != nil {
-		return PreloadRecord{}, e
-	}
-	dir, e := preloadDirectory(s.StateRoot, branch, version, false)
-	if e != nil {
-		return PreloadRecord{}, e
-	}
-	path := filepath.Join(dir, "preload.json")
-	info, e := os.Lstat(path)
-	if e != nil {
-		return PreloadRecord{}, e
-	}
-	if !info.Mode().IsRegular() || info.Size() > 16<<20 {
-		return PreloadRecord{}, ErrPreloadRecord
-	}
-	f, e := os.Open(path)
-	if e != nil {
-		return PreloadRecord{}, e
-	}
-	defer f.Close()
-	data, e := io.ReadAll(io.LimitReader(f, 16<<20+1))
-	if e != nil {
-		return PreloadRecord{}, e
-	}
-	var r PreloadRecord
-	if json.Unmarshal(data, &r) != nil || r.Branch != branch || r.Version != version {
-		return PreloadRecord{}, ErrPreloadRecord
-	}
-	if e = preloadValidateRecord(r); e != nil {
-		return PreloadRecord{}, e
-	}
-	return r, ctx.Err()
 }
 func (s PreloadStore) BlobPath(r PreloadRecord, o gameres.Object) (string, error) {
 	if !preloadObjectOK(o) {

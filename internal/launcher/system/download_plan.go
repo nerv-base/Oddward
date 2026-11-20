@@ -30,7 +30,7 @@ const (
 
 func downloadWork(root string) string { return filepath.Join(root, ".oddward") }
 func (b *GameDownloadBackend) installStore() (*gameinstall.Store, error) {
-	return gameinstall.NewStore(filepath.Join(b.StateRoot, "installs"))
+	return gameinstall.NewStore(b.DB, filepath.Join(b.StateRoot, "installs"))
 }
 func (b *GameDownloadBackend) taskRoot(key string) string {
 	return filepath.Join(b.StateRoot, "installs", key)
@@ -76,7 +76,7 @@ func (b *GameDownloadBackend) newDownloadEngine(ctx context.Context, p *download
 	metadata := b.metadata()
 	params := gamedl.Parameters{FilesInFlight: defaultFilesInFlight, ConnectionsPerFile: defaultConnectionsPerFile, RateLimitKiB: int64(prefs.RateLimitKiB)}
 	return gamedl.New(gamedl.Options{
-		WorkRoot: p.engineRoot(), StateRoot: b.taskRoot(p.key), Client: metadata.client, Resolve: metadata.resolve(p.delivery.Branch), Lease: lease,
+		DB: b.DB, WorkRoot: p.engineRoot(), StateRoot: b.taskRoot(p.key), Client: metadata.client, Resolve: metadata.resolve(p.delivery.Branch), Lease: lease,
 		Parameters: params, UserAgent: "Oddward/" + b.Version,
 	})
 }

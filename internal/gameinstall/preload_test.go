@@ -92,7 +92,7 @@ func TestPreloadStoreRecoveryAndDiscardReferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := PreloadStore{StateRoot: t.TempDir(), WorkRoot: t.TempDir()}
+	s := preloadStateStore(t, false)
 	r := p.Record
 	r.State = PreloadWaitingRelease
 	r.Files[0].State = PreloadFileStaged

@@ -211,7 +211,7 @@ func (s *Store) VerifyInstallation(ctx context.Context, selected string, report 
 		record.State = Adopted
 		record.VerifyCoverage = "metadata"
 		record.VerifiedTargets = 0
-		if err := s.writeInstall(record); err != nil {
+		if err := s.writeInstall(ctx, record); err != nil {
 			return result, err
 		}
 	}
@@ -281,7 +281,7 @@ func (s *Store) VerifyInstallation(ctx context.Context, selected string, report 
 	} else {
 		record.State = Detected
 	}
-	if err := s.writeInstall(record); err != nil {
+	if err := s.writeInstall(ctx, record); err != nil {
 		return result, err
 	}
 	result.Record = record

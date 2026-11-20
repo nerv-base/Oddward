@@ -81,10 +81,9 @@ func checkLocalPath(ctx context.Context, path string, directory bool) error {
 	return ctx.Err()
 }
 
-// The stage and destination share a directory. There is no remove-first fallback.
-func replaceFile(stage, destination string) error { return moveFile(stage, destination, true) }
-
-func moveFile(from, to string, replace bool) error {
+// moveFile renames one file and flushes the rename. It never replaces an
+// existing destination, so quarantine keeps a same-second backup intact.
+func moveFile(from, to string) error {
 	source, err := windows.UTF16PtrFromString(from)
 	if err != nil {
 		return err
@@ -93,9 +92,5 @@ func moveFile(from, to string, replace bool) error {
 	if err != nil {
 		return err
 	}
-	flags := uint32(windows.MOVEFILE_WRITE_THROUGH)
-	if replace {
-		flags |= windows.MOVEFILE_REPLACE_EXISTING
-	}
-	return windows.MoveFileEx(source, destination, flags)
+	return windows.MoveFileEx(source, destination, windows.MOVEFILE_WRITE_THROUGH)
 }

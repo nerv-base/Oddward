@@ -27,7 +27,8 @@ func TestRecoveryDropsCorruptBitmapAndTruncatedPart(t *testing.T) {
 			}))
 			defer server.Close()
 			work, state := t.TempDir(), t.TempDir()
-			opts := gamedl.Options{WorkRoot: work, StateRoot: state, Client: server.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) { return []string{server.URL}, nil }, Parameters: gamedl.Parameters{ChunkSize: 1 << 20, ConnectionsPerFile: 1}}
+			db := testDB(t)
+			opts := gamedl.Options{DB: db, WorkRoot: work, StateRoot: state, Client: server.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) { return []string{server.URL}, nil }, Parameters: gamedl.Parameters{ChunkSize: 1 << 20, ConnectionsPerFile: 1}}
 			task := gamedl.Task{ID: "recovery", Kind: gamedl.TaskPreloadFiles, ListHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Transfers: []gamedl.Transfer{{Object: obj, Source: gameres.Source{Kind: gameres.SourceCAS, Object: obj}}}}
 			e, err := gamedl.New(opts)
 			if err != nil {
@@ -97,12 +98,13 @@ func TestTaskStoreRejectsCorruptionAndManifestChange(t *testing.T) {
 			data := []byte("task identity")
 			obj := identity(data)
 			work, state := t.TempDir(), t.TempDir()
-			opts := gamedl.Options{WorkRoot: work, StateRoot: state, Client: &http.Client{}, Resolve: func(context.Context, gameres.Source) ([]string, error) {
+			db := testDB(t)
+			opts := gamedl.Options{DB: db, WorkRoot: work, StateRoot: state, Client: &http.Client{}, Resolve: func(context.Context, gameres.Source) ([]string, error) {
 				t.Error("recovery made network request")
 				return nil, nil
 			}}
 			task := gamedl.Task{ID: "persisted", Kind: gamedl.TaskPreloadFiles, ListHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Transfers: []gamedl.Transfer{{Object: obj, Source: gameres.Source{Kind: gameres.SourceCAS, Object: obj}}}, State: gamedl.StatePaused}
-			store, err := gamedl.NewStore(state)
+			store, err := gamedl.NewStore(db, state)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -111,14 +113,14 @@ func TestTaskStoreRejectsCorruptionAndManifestChange(t *testing.T) {
 			}
 			store.Close()
 			manifest := task.ListHash
-			kind := gamedl.ErrStaleTask
 			if fault == "truncated-task" {
-				if err = os.WriteFile(filepath.Join(state, "tasks", task.ID+".json"), []byte(`{"schema":2`), 0600); err != nil {
+				// The database, not the mirror, is authoritative: a damaged row
+				// must fail recovery before any blob is reused.
+				if _, err = db.Exec(context.Background(), `UPDATE download_transfers SET blocks = 'truncated' WHERE task_id = ?`, task.ID); err != nil {
 					t.Fatal(err)
 				}
 			} else {
 				manifest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-				kind = gamedl.ErrStaleTask
 			}
 			e, err := gamedl.New(opts)
 			if err != nil {
@@ -126,12 +128,12 @@ func TestTaskStoreRejectsCorruptionAndManifestChange(t *testing.T) {
 			}
 			defer e.Close()
 			_, err = e.Recover(context.Background(), manifest)
-			requireKind(t, err, kind)
+			requireKind(t, err, gamedl.ErrStaleTask)
 		})
 	}
 }
 func TestTaskStoreRoundTripsPatchAndTargetIdentitiesWithoutURLs(t *testing.T) {
-	store, err := gamedl.NewStore(t.TempDir())
+	store, err := gamedl.NewStore(testDB(t), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

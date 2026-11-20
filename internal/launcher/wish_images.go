@@ -6,120 +6,265 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"image"
+	"time"
+
 	"github.com/egoist/mygo/ui"
+	"github.com/nerv-base/Oddward/internal/gamemedia"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
 	"golang.org/x/image/draw"
-	"image"
 )
+
+// wishIconWorkers bounds in-flight icon loads. The game-media cache already
+// allows four concurrent fetches, and one worker per slot keeps every download
+// paired with exactly one decode of at most a 96-pixel RGBA. Four saturates the
+// first screen without letting a scroll pile up work; see
+// BenchmarkIconFirstScreen20.
+const wishIconWorkers = 4
+
+// Transient icon failures back off, so a flaky source is retried later in the
+// same session instead of being cached as failed forever. A 404 is a permanent
+// answer from the source and waits for the cache's own negative TTL.
+const (
+	wishIconRetryBase      = time.Second
+	wishIconRetryMax       = 30 * time.Second
+	wishIconNotFoundRetry  = 24 * time.Hour
+	wishIconRetryDoublings = 5 // attempts whose delay doubles before clamping
+)
+
+// wishIconTrace reports one delivered load to the benchmark. The shell leaves
+// trace nil; production code pays one nil check per icon.
+type wishIconTrace struct {
+	ID          string
+	QueuedAt    time.Time
+	StartedAt   time.Time
+	LoadedAt    time.Time
+	DecodedAt   time.Time
+	DeliveredAt time.Time
+}
 
 type wishIconResult struct {
 	id         string
 	generation uint64
 	pixels     *image.RGBA
 	err        error
+	cancelled  bool
+	queuedAt   time.Time
+	startedAt  time.Time
+	loadedAt   time.Time
+	decodedAt  time.Time
 }
 
-// All maps, bitmaps, queue and LRU entries belong to the UI thread. A single
-// outstanding worker bounds decode memory, even if a source ignores cancel.
+type wishIconLoad struct {
+	cancel context.CancelFunc
+}
+
+type wishIconFailure struct {
+	attempts int
+	retryAt  time.Time
+}
+
+// All maps, bitmaps, queue, retry and LRU entries belong to the UI thread.
+// Workers only read their arguments and write their own result; at most
+// wishIconWorkers of them exist, so decode memory stays bounded even if a
+// source ignores cancellation.
 type wishIconMedia struct {
-	cache            map[string]*ui.Bitmap
-	failed           map[string]bool
-	recent           []string
-	wanted           []string
-	queued           map[string]bool
-	generation       uint64
-	active           bool
-	activeID         string
-	activeGeneration uint64
-	cancel           context.CancelFunc
-	out              chan wishIconResult
+	cache    map[string]*ui.Bitmap
+	recent   []string
+	wanted   []string
+	queued   map[string]bool
+	failures map[string]wishIconFailure
+	inflight map[string]*wishIconLoad
+	painted  map[string]bool // ids the view asked for during the last paint
+	queuedAt map[string]time.Time
+
+	generation uint64
+	active     bool // any load in flight; the page reads this for invalidation
+	out        chan wishIconResult
+
+	trace func(wishIconTrace)
 }
 
 func (s *Shell) wishIconsEnabled() bool {
 	return s.ctx != nil && s.ctx.Err() == nil && !s.Model.Closed && s.Model.Page == state.WishAnalysis && s.Model.Overlay == state.NoOverlay && s.WishImages != nil
 }
 
+// syncWishImages runs once per frame, before painting. It drains finished loads
+// on the UI thread, cancels loads whose icon has left the view, and starts new
+// loads in paint order. No I/O, decode or SQL runs here.
 func (s *Shell) syncWishImages() {
 	b := &s.wishIcons
 	enabled := s.wishIconsEnabled()
-	b.generation = s.Model.Wish.Token
-	if b.active && (!enabled || b.activeGeneration != b.generation) && b.cancel != nil {
-		b.cancel()
+	generation := s.Model.Wish.Token
+	if b.generation != generation {
+		// Switching roles invalidates queued work and every result still in
+		// flight; their slots stay occupied until they report, so decode
+		// concurrency never exceeds wishIconWorkers.
+		b.generation = generation
+		b.cancelAll()
+		b.wanted = nil
+		b.queued = nil
 	}
-	for b.out != nil {
-		select {
-		case r := <-b.out:
-			if !b.active || r.id != b.activeID || r.generation != b.activeGeneration {
-				continue
+	b.drain(enabled)
+	if !enabled {
+		b.cancelAll()
+		b.wanted = nil
+		b.queued = nil
+		b.painted = nil
+		return
+	}
+	if b.painted != nil {
+		// The previous paint did not ask for this icon: it left the viewport.
+		for id, load := range b.inflight {
+			if !b.painted[id] && load.cancel != nil {
+				load.cancel()
 			}
-			b.active = false
-			if b.cancel != nil {
-				b.cancel()
-				b.cancel = nil
-			}
-			if !enabled || r.generation != b.generation || errors.Is(r.err, context.Canceled) {
-				continue
-			}
-			if r.err != nil || r.pixels == nil {
-				if b.failed == nil {
-					b.failed = make(map[string]bool)
-				}
-				b.failed[r.id] = true
-				continue
-			}
-			b.remember(r.id, ui.NewBitmap(r.pixels))
-		default:
-			goto drained
 		}
 	}
-drained:
+	b.painted = make(map[string]bool)
 	wanted := b.wanted
 	b.wanted = nil
 	b.queued = nil
-	if !enabled || b.active {
-		return
-	}
 	for _, id := range wanted {
-		if b.failed[id] || b.cache[id] != nil {
+		if len(b.inflight) >= wishIconWorkers {
+			return
+		}
+		if b.cache[id] != nil || b.inflight[id] != nil {
 			continue
 		}
-		if b.out == nil {
-			b.out = make(chan wishIconResult, 1)
+		if failure, ok := b.failures[id]; ok && time.Now().Before(failure.retryAt) {
+			continue
 		}
-		ctx, cancel := context.WithCancel(s.ctx)
-		b.active, b.activeID, b.activeGeneration, b.cancel = true, id, b.generation, cancel
-		source, out, life, wake, generation := s.WishImages, b.out, s.ctx, s.RequestFrame, b.generation
-		go func() {
-			data, err := source.Image(ctx, id)
-			var pixels *image.RGBA
-			if err == nil && ctx.Err() == nil {
-				pixels, err = decodeWishIcon(data)
-			}
-			if ctx.Err() != nil {
-				pixels, err = nil, ctx.Err()
-			}
-			if life.Err() != nil {
-				return
-			}
-			select {
-			case out <- wishIconResult{id: id, generation: generation, pixels: pixels, err: err}:
-				if wake != nil && life.Err() == nil {
-					wake()
-				}
-			case <-life.Done():
-			}
-		}()
-		return
+		s.startWishIcon(id)
 	}
 }
 
+// drain hands every finished result to the UI state. A stale, cancelled or
+// failed load frees its slot without touching the bitmap cache.
+func (b *wishIconMedia) drain(enabled bool) {
+	for b.out != nil {
+		select {
+		case r := <-b.out:
+			delete(b.inflight, r.id)
+			b.active = len(b.inflight) > 0
+			if r.cancelled || r.generation != b.generation || !enabled {
+				delete(b.queuedAt, r.id)
+				continue
+			}
+			if r.err != nil {
+				b.fail(r.id, r.err)
+				continue
+			}
+			if r.pixels == nil {
+				continue
+			}
+			delete(b.failures, r.id)
+			b.remember(r.id, ui.NewBitmap(r.pixels))
+			if b.trace != nil {
+				b.trace(wishIconTrace{ID: r.id, QueuedAt: r.queuedAt, StartedAt: r.startedAt, LoadedAt: r.loadedAt, DecodedAt: r.decodedAt, DeliveredAt: time.Now()})
+			}
+		default:
+			return
+		}
+	}
+}
+
+// fail schedules the next attempt. Attempts grow the backoff so a source that
+// keeps failing is asked rarely, and a later session frame still retries it.
+func (b *wishIconMedia) fail(id string, err error) {
+	failure := b.failures[id]
+	failure.attempts++
+	delay := wishIconRetryBase
+	for i := 1; i < failure.attempts && i < wishIconRetryDoublings; i++ {
+		delay *= 2
+	}
+	if delay > wishIconRetryMax {
+		delay = wishIconRetryMax
+	}
+	if errors.Is(err, gamemedia.ErrNotFound) || errors.Is(err, gamemedia.ErrUnknownItem) {
+		delay = wishIconNotFoundRetry
+	}
+	failure.retryAt = time.Now().Add(delay)
+	if b.failures == nil {
+		b.failures = make(map[string]wishIconFailure)
+	}
+	b.failures[id] = failure
+}
+
+// startWishIcon launches one bounded load. The worker fetches and decodes; the
+// UI thread never blocks on it because results arrive through b.out.
+func (s *Shell) startWishIcon(id string) {
+	b := &s.wishIcons
+	if b.out == nil {
+		b.out = make(chan wishIconResult, wishIconWorkers)
+	}
+	if b.inflight == nil {
+		b.inflight = make(map[string]*wishIconLoad)
+	}
+	ctx, cancel := context.WithCancel(s.ctx)
+	b.inflight[id] = &wishIconLoad{cancel: cancel}
+	b.active = true
+	queuedAt := time.Now()
+	if b.trace != nil {
+		if b.queuedAt == nil {
+			b.queuedAt = make(map[string]time.Time)
+		}
+		if queued := b.queuedAt[id]; !queued.IsZero() {
+			queuedAt = queued
+		}
+		delete(b.queuedAt, id)
+	}
+	source, out, life, wake, generation := s.WishImages, b.out, s.ctx, s.RequestFrame, b.generation
+	go func() {
+		startedAt := time.Now()
+		data, err := source.Image(ctx, id)
+		loadedAt := time.Now()
+		var pixels *image.RGBA
+		if err == nil && ctx.Err() == nil {
+			pixels, err = decodeWishIcon(data)
+		}
+		decodedAt := time.Now()
+		cancelled := ctx.Err() != nil
+		if cancelled {
+			pixels, err = nil, nil
+		}
+		if life.Err() != nil {
+			return
+		}
+		select {
+		case out <- wishIconResult{id: id, generation: generation, pixels: pixels, err: err, cancelled: cancelled, queuedAt: queuedAt, startedAt: startedAt, loadedAt: loadedAt, decodedAt: decodedAt}:
+			if wake != nil && life.Err() == nil {
+				wake()
+			}
+		case <-life.Done():
+		}
+	}()
+}
+
+func (b *wishIconMedia) cancelAll() {
+	for _, load := range b.inflight {
+		if load.cancel != nil {
+			load.cancel()
+		}
+	}
+}
+
+// wishIcon is called by the paint in viewport order. It returns a cached bitmap
+// or queues the id; repeated calls for one id in a frame are free.
 func (s *Shell) wishIcon(id string) *ui.Bitmap {
 	b := &s.wishIcons
+	if b.painted == nil {
+		b.painted = make(map[string]bool)
+	}
+	b.painted[id] = true
 	if bitmap := b.cache[id]; bitmap != nil {
 		b.remember(id, bitmap)
 		return bitmap
 	}
-	if !s.wishIconsEnabled() || b.failed[id] || (b.active && b.activeID == id) || b.queued[id] {
+	if !s.wishIconsEnabled() || b.queued[id] || b.inflight[id] != nil {
+		return nil
+	}
+	if failure, ok := b.failures[id]; ok && time.Now().Before(failure.retryAt) {
 		return nil
 	}
 	if b.queued == nil {
@@ -127,6 +272,16 @@ func (s *Shell) wishIcon(id string) *ui.Bitmap {
 	}
 	b.queued[id] = true
 	b.wanted = append(b.wanted, id)
+	if b.trace != nil {
+		if b.queuedAt == nil {
+			b.queuedAt = make(map[string]time.Time)
+		}
+		// The first request keeps the clock: an icon that has to wait several
+		// frames for a free worker reports the whole wait, not the last frame.
+		if _, waiting := b.queuedAt[id]; !waiting {
+			b.queuedAt[id] = time.Now()
+		}
+	}
 	return nil
 }
 

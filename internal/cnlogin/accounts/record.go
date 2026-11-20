@@ -33,6 +33,12 @@ const (
 	gcmTagSize     = 16
 	maxWrappedSize = 4096
 	identityKeyLen = 2 * sha256.Size
+
+	// keylessIdentityPrefix marks the accounts.identity_key of a record that
+	// carries no identity key, which is a record written before a subject key
+	// existed. The column is NOT NULL and unique, so such a record needs a value
+	// no HMAC can equal: identity keys are upper-case hex, this is neither.
+	keylessIdentityPrefix = "keyless:"
 )
 
 // recordFile is the on-disk JSON shape. Secret marshals as standard base64.
@@ -88,6 +94,18 @@ func identityKeyFor(subjectKey []byte, channelUID string) string {
 	mac.Write([]byte(identityPrefix))
 	mac.Write([]byte(channelUID))
 	return strings.ToUpper(hex.EncodeToString(mac.Sum(nil)))
+}
+
+// keylessIdentity is the identity_key column value of a record with no identity
+// key. It keeps the column unique without claiming a channel identity.
+func keylessIdentity(id string) string { return keylessIdentityPrefix + id }
+
+// identityColumn is the identity_key column value for a sealed record.
+func identityColumn(id, identity string) string {
+	if identity == "" {
+		return keylessIdentity(id)
+	}
+	return identity
 }
 
 func encodeRecord(r record) ([]byte, error) {
@@ -167,15 +185,15 @@ func parseRecordBytes(raw []byte) (record, error) {
 	}, nil
 }
 
-// parseRecord additionally requires the record to belong to the file it was
-// read from.
+// parseRecord additionally requires the record to belong to the row it was read
+// from.
 func parseRecord(id string, raw []byte) (record, error) {
 	r, err := parseRecordBytes(raw)
 	if err != nil {
 		return record{}, err
 	}
 	if r.ID != id {
-		return record{}, fmt.Errorf("%w: id does not match file name", ErrCorrupt)
+		return record{}, fmt.Errorf("%w: id does not match its account row", ErrCorrupt)
 	}
 	return r, nil
 }

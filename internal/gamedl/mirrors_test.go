@@ -41,7 +41,7 @@ func TestMirrorSwitchChecksLengthAndDoesNotBorrowIfRange(t *testing.T) {
 		http.ServeContent(w, r, "fixture", zeroTime, bytes.NewReader(data))
 	}))
 	defer mirrorB.Close()
-	e, err := gamedl.New(gamedl.Options{WorkRoot: t.TempDir(), StateRoot: t.TempDir(), Client: mirrorA.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) {
+	e, err := gamedl.New(gamedl.Options{DB: testDB(t), WorkRoot: t.TempDir(), StateRoot: t.TempDir(), Client: mirrorA.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) {
 		return []string{mirrorA.URL, mirrorB.URL}, nil
 	}, Parameters: gamedl.Parameters{ChunkSize: 1 << 20, ConnectionsPerFile: 1}})
 	if err != nil {
@@ -85,7 +85,8 @@ func TestConditionalResumeAndChangedValidatorResetProgress(t *testing.T) {
 		http.ServeContent(w, r, "fixture", zeroTime, bytes.NewReader(data))
 	}))
 	defer server.Close()
-	opts := gamedl.Options{WorkRoot: t.TempDir(), StateRoot: t.TempDir(), Client: server.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) { return []string{server.URL}, nil }, Parameters: gamedl.Parameters{ChunkSize: 1 << 20, ConnectionsPerFile: 1}}
+	db := testDB(t)
+	opts := gamedl.Options{DB: db, WorkRoot: t.TempDir(), StateRoot: t.TempDir(), Client: server.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) { return []string{server.URL}, nil }, Parameters: gamedl.Parameters{ChunkSize: 1 << 20, ConnectionsPerFile: 1}}
 	task := gamedl.Task{ID: "conditional", Kind: gamedl.TaskPreloadFiles, ListHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Transfers: []gamedl.Transfer{{Object: obj, Source: gameres.Source{Kind: gameres.SourceCAS, Object: obj}}}}
 	e, err := gamedl.New(opts)
 	if err != nil {

@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/nerv-base/Oddward/internal/database/dbtest"
 )
 
 func txnSourceFixture(t *testing.T) (*Store, TxnInput) {
@@ -20,10 +22,7 @@ func txnSourceFixture(t *testing.T) (*Store, TxnInput) {
 	if e := os.MkdirAll(work, 0700); e != nil {
 		t.Fatal(e)
 	}
-	s, e := NewStore(t.TempDir())
-	if e != nil {
-		t.Fatal(e)
-	}
+	s := newStore(t, dbtest.Open(t), t.TempDir())
 	key, e := InstallKey(root)
 	if e != nil {
 		t.Fatal(e)
@@ -62,10 +61,7 @@ func TestTxnExternalFreshSourcesCopyPreserveAndResume(t *testing.T) {
 				if !hit || !errors.Is(e, stop) {
 					t.Fatalf("missing external checkpoint %s: hit=%v %v", point, hit, e)
 				}
-				restarted, e := NewStore(s.stateRoot)
-				if e != nil {
-					t.Fatal(e)
-				}
+				restarted := newStore(t, s.db, s.stateRoot)
 				if point == "after-source-copy" {
 					in.Checkpoint = nil
 					in.FreeBytes = func(context.Context) (int64, error) { return 1 << 20, nil }
@@ -163,11 +159,8 @@ func TestTxnExternalFreshBudgetCountsOnlyUnstagedCopies(t *testing.T) {
 		}
 		return 1 << 20, nil
 	}
-	restarted, e := NewStore(s.stateRoot)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if _, e = restarted.Commit(context.Background(), in); e != nil {
+	restarted := newStore(t, s.db, s.stateRoot)
+	if _, e := restarted.Commit(context.Background(), in); e != nil {
 		t.Fatalf("already staged bytes charged twice: %v", e)
 	}
 	if checks != 2 {
@@ -269,7 +262,7 @@ func TestTxnExternalSourcesRejectUnsafeAndNonfresh(t *testing.T) {
 				old.VerifyCoverage = "full"
 				old.VerifiedTargets = 1
 				txnPut(t, in.Root, "source.bin", "verified external source")
-				if e := s.writeInstall(old); e != nil {
+				if e := s.writeInstall(context.Background(), old); e != nil {
 					t.Fatal(e)
 				}
 				in.Candidate = old

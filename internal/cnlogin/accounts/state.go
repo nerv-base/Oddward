@@ -2,53 +2,79 @@
 
 package accounts
 
+// The device-wide login state lives in the single account_state row: the subject
+// key that derives identity keys, the remembered account and the acknowledged
+// notice revision. The subject key keeps its on-disk representation (a DPAPI
+// wrapped JSON document), so wrapping, rotation and the mirror file behave
+// exactly as before.
+
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
+	"strings"
+
+	"github.com/nerv-base/Oddward/internal/database"
 )
 
 const (
+	// stateVersion is the schema version of a protected state document.
 	stateVersion = 1
-	// maxStateSize bounds every protected state file, including the login
-	// notice the upstream format caps at 1024 bytes.
+	// maxStateSize bounds the wrapped subject key and the wrapped last-account
+	// document; maxNoticeSize bounds the smaller notice document.
 	maxStateSize  = 4096
 	maxNoticeSize = 1024
 
+	// subjectFileName holds the wrapped subject key; lastFileName and
+	// noticeFileName hold the other two state documents.
 	subjectFileName = "subject-key.bin"
 	lastFileName    = "last-login.bin"
 	noticeFileName  = "notice.bin"
 
+	// The purpose field binds a protected document to the one column it belongs
+	// to, so a swapped file fails to decrypt instead of being misread.
 	subjectPurpose = "subject-key"
 	lastPurpose    = "last-login"
 	noticePurpose  = "login-notice"
 
+	// subjectKeySize is the size of the HMAC key that derives identity keys.
 	subjectKeySize = 32
 )
 
-// errState is returned when a protected state file does not hold the document
-// its name promises.
-var errState = errors.New("accounts: state file is not recognized")
+var (
+	// errState reports a state document that does not validate: wrong version,
+	// wrong purpose, or bytes this user's protector cannot unwrap.
+	errState = errors.New("accounts: corrupt login state")
 
-// Every state file is the protector-wrapped JSON of one of these documents. The
-// purpose string is inside the wrapped bytes, so a blob copied to another state
-// file is rejected instead of being misread as that state.
+	// lastNone is the account_state.last_account value for "explicitly no
+	// account". The column is NULL when nothing was ever chosen and its CHECK
+	// allows NULL or 32 characters, so the empty string the file format used
+	// cannot be stored verbatim; a run of dashes is 32 characters, keeps the
+	// "never chosen" case distinguishable, and no real id can equal it because
+	// ids are hex.
+	lastNone = strings.Repeat("-", 32)
+)
+
+// subjectState is the wrapped subject key document.
 type subjectState struct {
 	Version int    `json:"version"`
 	Purpose string `json:"purpose"`
 	Key     []byte `json:"key"`
 }
 
+// lastState is the wrapped remembered-account document.
 type lastState struct {
 	Version int    `json:"version"`
 	Purpose string `json:"purpose"`
 	ID      string `json:"id"`
 }
 
+// noticeState is the wrapped notice-acknowledgement document.
 type noticeState struct {
 	Version         int    `json:"version"`
 	Purpose         string `json:"purpose"`
@@ -56,157 +82,237 @@ type noticeState struct {
 	AcknowledgedUtc string `json:"acknowledgedUtc"`
 }
 
-// readState reads and unwraps a protected state file. present reports that the
-// file exists even when it cannot be unwrapped; ok reports that the plaintext is
-// usable. A blob wrapped by another user's protector is indistinguishable from
-// no state, so it is reported as present but unusable: a remembered account
-// from another user is forgotten, not guessed.
-func (s *Store) readState(name string, limit int) (plain []byte, present, ok bool) {
-	raw, err := s.readFile(name, limit)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, false, false
-	}
-	if err != nil {
-		return nil, true, false
-	}
-	plain, err = s.p.Unprotect(raw)
-	if err != nil {
-		return nil, true, false
-	}
-	return plain, true, true
-}
-
-// writeState seals doc and replaces the state file name atomically. limit
-// bounds the wrapped file so a state document can never outgrow its reader.
-func (s *Store) writeState(name string, limit int, doc any) error {
-	plain, err := json.Marshal(doc)
-	if err != nil {
-		return err
-	}
-	defer wipeBytes(plain)
-	wrapped, err := s.p.Protect(plain)
-	if err != nil {
-		return fmt.Errorf("accounts: protect %s: %w", name, err)
-	}
-	if len(wrapped) > limit {
-		return fmt.Errorf("accounts: protected %s is %d bytes", name, len(wrapped))
-	}
-	return s.writeAtomic(name, wrapped)
-}
-
-// decodeState checks the envelope of a state document and decodes it strictly.
+// decodeState decodes one protected state document and rejects anything that is
+// not exactly the document and purpose it was written for.
 func decodeState(plain []byte, purpose string, doc any) error {
-	var header struct {
-		Version int    `json:"version"`
-		Purpose string `json:"purpose"`
-	}
-	if err := json.Unmarshal(plain, &header); err != nil {
-		return errState
-	}
-	if header.Version != stateVersion || header.Purpose != purpose {
-		return errState
-	}
 	dec := json.NewDecoder(bytes.NewReader(plain))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(doc); err != nil {
-		return errState
+		return fmt.Errorf("%w: decode %s", errState, purpose)
 	}
-	if _, err := dec.Token(); err != io.EOF {
-		return errState
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("%w: trailing data in %s", errState, purpose)
+	}
+	var (
+		version int
+		got     string
+	)
+	switch d := doc.(type) {
+	case *subjectState:
+		version, got = d.Version, d.Purpose
+	case *lastState:
+		version, got = d.Version, d.Purpose
+	case *noticeState:
+		version, got = d.Version, d.Purpose
+	default:
+		return fmt.Errorf("%w: unknown %s document", errState, purpose)
+	}
+	if version != stateVersion || got != purpose {
+		return fmt.Errorf("%w: %s is version %d for %q", errState, purpose, version, got)
 	}
 	return nil
 }
 
-// subjectKey loads the store's de-duplication key, creating it when missing.
-// created reports that the key is new: every existing record then carries an
-// identity key derived under another key (or none), so those records have to be
-// compared by decrypting them once.
-func (s *Store) subjectKey() (key []byte, created bool, err error) {
-	if plain, _, ok := s.readState(subjectFileName, maxStateSize); ok {
-		var st subjectState
-		err := decodeState(plain, subjectPurpose, &st)
-		wipeBytes(plain)
-		if err == nil && len(st.Key) == subjectKeySize {
-			return st.Key, false, nil
+// sealState protects one state document. Only the wrapped bytes leave this
+// function; the plaintext is wiped.
+func (s *Store) sealState(name string, limit int, doc any) ([]byte, error) {
+	plain, err := json.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("accounts: encode %s: %w", name, err)
+	}
+	defer wipeBytes(plain)
+	wrapped, err := s.p.Protect(plain)
+	if err != nil {
+		return nil, fmt.Errorf("accounts: protect %s: %w", name, err)
+	}
+	if len(wrapped) == 0 || len(wrapped) > limit {
+		return nil, fmt.Errorf("accounts: protect %s: %w: unexpected wrapped size %d", name, ErrCorrupt, len(wrapped))
+	}
+	return wrapped, nil
+}
+
+// readStateRow reads the three device-state values. A missing row reports zero
+// values, which is what a store with no state has.
+func (s *Store) readStateRow(ctx context.Context) (subject []byte, last sql.NullString, notice int64, err error) {
+	err = s.db.QueryRow(ctx, `SELECT subject_key, last_account, notice_revision FROM account_state WHERE id = 1`).
+		Scan(&subject, &last, &notice)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, sql.NullString{}, 0, nil
+	case err != nil:
+		return nil, sql.NullString{}, 0, fmt.Errorf("accounts: read login state: %w", err)
+	}
+	return subject, last, notice, nil
+}
+
+// subjectKey returns the stored HMAC key for identity keys, generating one when
+// there is none. created reports a key that did not exist before, which means
+// records written without it have to be identified by decrypting them.
+//
+// A generated key is kept in the store, not written: a prepared save may be
+// rolled back, and the key must not outlive it. The Commit that stores the first
+// record derived from it writes it in the same transaction.
+func (s *Store) subjectKey(ctx context.Context) (key []byte, created bool, err error) {
+	var wrapped []byte
+	wrapped, _, _, err = s.readStateRow(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	if wrapped != nil {
+		if plain, unprotectErr := s.p.Unprotect(wrapped); unprotectErr == nil {
+			var doc subjectState
+			decodeErr := decodeState(plain, subjectPurpose, &doc)
+			wipeBytes(plain)
+			if decodeErr == nil && len(doc.Key) == subjectKeySize {
+				return doc.Key, false, nil
+			}
+			wipeBytes(doc.Key)
 		}
-		// A corrupt or foreign key file is replaced: the key is derived state,
-		// not user data, and every record stays readable without it.
-		wipeBytes(st.Key)
+	}
+	// A corrupt or foreign key is replaced, not repaired: it is derived state,
+	// and every stored record stays readable without it.
+	if s.pending != nil {
+		return bytes.Clone(s.pending), true, nil
 	}
 	key = make([]byte, subjectKeySize)
 	if _, err := rand.Read(key); err != nil {
-		return nil, false, err
-	}
-	st := subjectState{Version: stateVersion, Purpose: subjectPurpose, Key: key}
-	if err := s.writeState(subjectFileName, maxStateSize, st); err != nil {
 		wipeBytes(key)
-		return nil, false, err
+		return nil, false, fmt.Errorf("accounts: generate subject key: %w", err)
 	}
-	return key, true, nil
+	s.pending = key
+	return bytes.Clone(key), true, nil
 }
 
-// readLast reports the remembered account id and whether a state file exists.
-// An unreadable or malformed file means "remember none" and still counts as
-// state, so a store that forgot explicitly never falls back to its only account.
-func (s *Store) readLast() (id string, state bool) {
-	plain, present, ok := s.readState(lastFileName, maxStateSize)
-	if !ok {
-		return "", present
+// pendingSubjectKey protects the key a staged save generated, for the
+// transaction that stores the first record derived from it.
+func (s *Store) pendingSubjectKey() ([]byte, error) {
+	if s.pending == nil {
+		return nil, nil
 	}
-	var st lastState
-	err := decodeState(plain, lastPurpose, &st)
-	wipeBytes(plain)
-	if err != nil || !isLowerHex(st.ID, 32) {
-		return "", true
-	}
-	return st.ID, true
+	return s.sealState(subjectFileName, maxStateSize, subjectState{
+		Version: stateVersion,
+		Purpose: subjectPurpose,
+		Key:     s.pending,
+	})
 }
 
-// writeLast remembers id, or forgets it when id is empty. Both are protected
-// state: "none" is recorded, never left to inference.
-func (s *Store) writeLast(id string) error {
-	return s.writeState(lastFileName, maxStateSize, lastState{Version: stateVersion, Purpose: lastPurpose, ID: id})
+// forgetPendingSubjectKey drops the staged key once it is stored.
+func (s *Store) forgetPendingSubjectKey() {
+	wipeBytes(s.pending)
+	s.pending = nil
 }
 
-// NoticeAcknowledged reports whether exactly revision was accepted.
+// readLast reports the remembered account id and whether a choice was recorded.
+// chosen is false only when nothing was ever recorded, so Last can fall back to
+// the only account.
+func (s *Store) readLast(ctx context.Context) (id string, chosen bool, err error) {
+	_, last, _, err := s.readStateRow(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	if !last.Valid {
+		return "", false, nil
+	}
+	if !isLowerHex(last.String, 32) {
+		// The stored value is the "explicitly none" marker, or something an
+		// older build wrote that does not name an account.
+		return "", true, nil
+	}
+	return last.String, true, nil
+}
+
+// writeLast records an account choice; an empty id records "explicitly none".
+func (s *Store) writeLast(ctx context.Context, id string) error {
+	stored := any(lastNone)
+	if id != "" {
+		stored = id
+	}
+	wrapped, err := s.sealState(lastFileName, maxStateSize, lastState{
+		Version: stateVersion,
+		Purpose: lastPurpose,
+		ID:      id,
+	})
+	if err != nil {
+		return err
+	}
+	return s.writeTx(ctx, func(ctx context.Context, tx *sql.Tx) (mirrorChange, error) {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO account_state(id, subject_key, last_account, notice_revision, updated_at)
+			VALUES(1, NULL, ?, 0, ?)
+			ON CONFLICT(id) DO UPDATE SET last_account = excluded.last_account, updated_at = excluded.updated_at`,
+			stored, database.Stamp(s.now())); err != nil {
+			return mirrorChange{}, fmt.Errorf("accounts: remember last account: %w", err)
+		}
+		return mirrorChange{write: map[string][]byte{lastFileName: wrapped}}, nil
+	})
+}
+
+// forgetLast clears the remembered account inside an existing transaction, which
+// is what removing that account does.
+func (s *Store) forgetLast(ctx context.Context, tx *sql.Tx, change *mirrorChange) error {
+	wrapped, err := s.sealState(lastFileName, maxStateSize, lastState{
+		Version: stateVersion,
+		Purpose: lastPurpose,
+		ID:      "",
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE account_state SET last_account = ?, updated_at = ? WHERE id = 1`,
+		lastNone, database.Stamp(s.now())); err != nil {
+		return fmt.Errorf("accounts: forget last account: %w", err)
+	}
+	if change.write == nil {
+		change.write = make(map[string][]byte, 1)
+	}
+	change.write[lastFileName] = wrapped
+	return nil
+}
+
+// NoticeAcknowledged reports whether revision was acknowledged by this user.
+// Acknowledgement is bound to the exact revision: a new notice needs a new
+// acknowledgement.
 func (s *Store) NoticeAcknowledged(revision int) (bool, error) {
 	if revision < 1 {
-		return false, fmt.Errorf("%w: revision %d", ErrInvalidNotice, revision)
+		return false, fmt.Errorf("%w: %d", ErrInvalidNotice, revision)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.checkDir(); err != nil {
+	_, _, notice, err := s.readStateRow(context.Background())
+	if err != nil {
 		return false, err
 	}
-	plain, _, ok := s.readState(noticeFileName, maxNoticeSize)
-	if !ok {
-		return false, nil
-	}
-	var st noticeState
-	err := decodeState(plain, noticePurpose, &st)
-	wipeBytes(plain)
-	if err != nil {
-		// An unreadable notice state is treated as not acknowledged, so the
-		// notice is shown again instead of being skipped.
-		return false, nil
-	}
-	return st.Revision == revision, nil
+	return notice == int64(revision), nil
 }
 
-// AcceptNotice records that revision was shown and accepted.
+// AcceptNotice records that the user acknowledged revision.
 func (s *Store) AcceptNotice(revision int) error {
 	if revision < 1 {
-		return fmt.Errorf("%w: revision %d", ErrInvalidNotice, revision)
+		return fmt.Errorf("%w: %d", ErrInvalidNotice, revision)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ctx := context.Background()
 	if err := s.checkDir(); err != nil {
 		return err
 	}
-	return s.writeState(noticeFileName, maxNoticeSize, noticeState{
+	wrapped, err := s.sealState(noticeFileName, maxNoticeSize, noticeState{
 		Version:         stateVersion,
 		Purpose:         noticePurpose,
 		Revision:        revision,
 		AcknowledgedUtc: formatTime(s.now()),
+	})
+	if err != nil {
+		return err
+	}
+	return s.writeTx(ctx, func(ctx context.Context, tx *sql.Tx) (mirrorChange, error) {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO account_state(id, subject_key, last_account, notice_revision, updated_at)
+			VALUES(1, NULL, NULL, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET notice_revision = excluded.notice_revision, updated_at = excluded.updated_at`,
+			revision, database.Stamp(s.now())); err != nil {
+			return mirrorChange{}, fmt.Errorf("accounts: accept notice: %w", err)
+		}
+		return mirrorChange{write: map[string][]byte{noticeFileName: wrapped}}, nil
 	})
 }
