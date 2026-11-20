@@ -508,7 +508,10 @@ func (s *Shell) wishRecord(c *ui.Context, data wishPageData, r gacha.Record, ind
 		var image *ui.Bitmap
 		bounds := row.Bounds()
 		_, viewportHeight := c.Size()
-		if data.Image != nil && (bounds.H == 0 || (bounds.Y+bounds.H > 0 && bounds.Y < viewportHeight)) {
+		// A row without bounds has not been laid out yet; asking for every
+		// record then would queue the whole archive on the first frame. The
+		// archive load prefetches the first screen instead (prefetchWishIcons).
+		if data.Image != nil && bounds.H > 0 && bounds.Y+bounds.H > 0 && bounds.Y < viewportHeight {
 			image = data.Image(r.ItemID)
 		}
 		iconKey := c.Key(fmt.Sprintf("wish-icon-%d", index))

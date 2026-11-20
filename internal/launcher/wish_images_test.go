@@ -47,7 +47,7 @@ func TestWishImagesHiddenStatesDoNotQueueAndResume(t *testing.T) {
 	}
 }
 
-func TestWishImagesKeepOneWorkerAndDiscardOldGeneration(t *testing.T) {
+func TestWishImagesDiscardStaleGenerationWithoutReusingSlot(t *testing.T) {
 	m := settled(state.Ready)
 	m.Page = state.WishAnalysis
 	s := NewShell(m)

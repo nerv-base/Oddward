@@ -198,6 +198,10 @@ type Shell struct {
 	// ShowLogin shows or hides the separate login window.
 	ShowLogin  func(open bool)
 	loginShown bool
+
+	// viewportW and viewportH are the window size from the last frame, taken in
+	// View before tick so the icon prefetch can size the first screen.
+	viewportW, viewportH float32
 }
 
 type demoOperation struct {
@@ -604,6 +608,7 @@ func (s *Shell) tick(c *ui.Context) {
 }
 
 func (s *Shell) View(c *ui.Context) {
+	s.viewportW, s.viewportH = c.Size()
 	s.syncBackground()
 	tone := s.tone()
 	s.theme.Accent, s.theme.Focus, s.theme.InactiveAccent = tone, tone, tone

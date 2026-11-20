@@ -215,6 +215,13 @@ const (
 	monoFont                     = "Bahnschrift"
 )
 
+// The first-screen prefetch estimate is kept out of the layout block above so
+// adding it never realigns every constant; see wishFirstScreenRows.
+const (
+	wishIconFirstScreenMaxRows         = 24
+	wishIconFootnoteLine       float32 = 20
+)
+
 func launcherTheme() *ui.Theme {
 	t := *ui.DarkTheme()
 	t.Background, t.Text, t.TextMuted = ink, paper, muted

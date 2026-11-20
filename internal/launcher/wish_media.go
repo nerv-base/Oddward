@@ -173,6 +173,13 @@ func (s *Shell) syncWish() {
 				}
 			}
 			s.Dispatch(e)
+			if e.Kind == state.WishLoaded || e.Kind == state.WishImported {
+				// The archive changed the visible column order: drop what the
+				// previous one queued, then warm the new first screen before
+				// the paint asks for it.
+				s.resetWishIcons()
+				s.prefetchWishIcons(s.wish.archive)
+			}
 		default:
 			if !s.wish.started && s.Model.Page == state.WishAnalysis && s.Model.Overlay == state.NoOverlay && s.Model.Wish.Phase == state.WishIdle {
 				s.wish.started = true

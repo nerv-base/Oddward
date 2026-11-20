@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"image"
+	"path/filepath"
 	"time"
 
 	"github.com/egoist/mygo/ui"
@@ -33,9 +34,12 @@ const (
 )
 
 // wishIconTrace reports one delivered load to the benchmark. The shell leaves
-// trace nil; production code pays one nil check per icon.
+// trace nil; production code pays one nil check per icon. ThumbHit means the
+// pixels came from the decoded-thumbnail cache, so StartedAt and LoadedAt
+// bracket one small read instead of a source fetch.
 type wishIconTrace struct {
 	ID          string
+	ThumbHit    bool
 	QueuedAt    time.Time
 	StartedAt   time.Time
 	LoadedAt    time.Time
@@ -49,6 +53,7 @@ type wishIconResult struct {
 	pixels     *image.RGBA
 	err        error
 	cancelled  bool
+	thumbHit   bool
 	queuedAt   time.Time
 	startedAt  time.Time
 	loadedAt   time.Time
@@ -76,17 +81,34 @@ type wishIconMedia struct {
 	failures map[string]wishIconFailure
 	inflight map[string]*wishIconLoad
 	painted  map[string]bool // ids the view asked for during the last paint
+	// pinned holds prefetched ids the view has not painted yet. The first paint
+	// after a load runs one frame later, so without the pin those loads would be
+	// cancelled as offscreen before they were ever shown.
+	pinned   map[string]bool
 	queuedAt map[string]time.Time
 
 	generation uint64
 	active     bool // any load in flight; the page reads this for invalidation
 	out        chan wishIconResult
 
+	// thumbs caches decoded icons across restarts; nil when DataDir is unset.
+	thumbs *gamemedia.ThumbCache
+
 	trace func(wishIconTrace)
 }
 
 func (s *Shell) wishIconsEnabled() bool {
 	return s.ctx != nil && s.ctx.Err() == nil && !s.Model.Closed && s.Model.Page == state.WishAnalysis && s.Model.Overlay == state.NoOverlay && s.WishImages != nil
+}
+
+// wishThumbCache returns the decoded-icon store, creating it on first use. It
+// is nil when the shell has no data directory, which turns the disk cache off.
+func (s *Shell) wishThumbCache() *gamemedia.ThumbCache {
+	b := &s.wishIcons
+	if b.thumbs == nil && s.DataDir != "" {
+		b.thumbs = gamemedia.NewThumbCache(filepath.Join(s.DataDir, "cache", "wish-thumbs"))
+	}
+	return b.thumbs
 }
 
 // syncWishImages runs once per frame, before painting. It drains finished loads
@@ -104,6 +126,7 @@ func (s *Shell) syncWishImages() {
 		b.cancelAll()
 		b.wanted = nil
 		b.queued = nil
+		b.pinned = nil
 	}
 	b.drain(enabled)
 	if !enabled {
@@ -111,12 +134,14 @@ func (s *Shell) syncWishImages() {
 		b.wanted = nil
 		b.queued = nil
 		b.painted = nil
+		b.pinned = nil
 		return
 	}
 	if b.painted != nil {
-		// The previous paint did not ask for this icon: it left the viewport.
+		// The previous paint did not ask for this icon and no prefetch pinned
+		// it: it left the viewport.
 		for id, load := range b.inflight {
-			if !b.painted[id] && load.cancel != nil {
+			if !b.painted[id] && !b.pinned[id] && load.cancel != nil {
 				load.cancel()
 			}
 		}
@@ -161,7 +186,7 @@ func (b *wishIconMedia) drain(enabled bool) {
 			delete(b.failures, r.id)
 			b.remember(r.id, ui.NewBitmap(r.pixels))
 			if b.trace != nil {
-				b.trace(wishIconTrace{ID: r.id, QueuedAt: r.queuedAt, StartedAt: r.startedAt, LoadedAt: r.loadedAt, DecodedAt: r.decodedAt, DeliveredAt: time.Now()})
+				b.trace(wishIconTrace{ID: r.id, ThumbHit: r.thumbHit, QueuedAt: r.queuedAt, StartedAt: r.startedAt, LoadedAt: r.loadedAt, DecodedAt: r.decodedAt, DeliveredAt: time.Now()})
 			}
 		default:
 			return
@@ -214,16 +239,34 @@ func (s *Shell) startWishIcon(id string) {
 		}
 		delete(b.queuedAt, id)
 	}
-	source, out, life, wake, generation := s.WishImages, b.out, s.ctx, s.RequestFrame, b.generation
+	source, thumbs, out, life, wake, generation := s.WishImages, s.wishThumbCache(), b.out, s.ctx, s.RequestFrame, b.generation
 	go func() {
 		startedAt := time.Now()
-		data, err := source.Image(ctx, id)
-		loadedAt := time.Now()
 		var pixels *image.RGBA
-		if err == nil && ctx.Err() == nil {
-			pixels, err = decodeWishIcon(data)
+		var err error
+		// A saved thumbnail is the whole point of the disk cache: a restart
+		// loads pixels the previous run already decoded instead of fetching and
+		// resampling the source again. The file is validated by the cache, so a
+		// miss here just falls through to the source path.
+		thumbHit := false
+		if thumbs != nil {
+			pixels = thumbs.Load(id, wishIconDecodeEdge)
+			thumbHit = pixels != nil
 		}
-		decodedAt := time.Now()
+		loadedAt := time.Now()
+		decodedAt := loadedAt
+		if !thumbHit {
+			var data []byte
+			data, err = source.Image(ctx, id)
+			loadedAt = time.Now()
+			if err == nil && ctx.Err() == nil {
+				pixels, err = decodeWishIcon(data)
+			}
+			decodedAt = time.Now()
+			if err == nil && thumbs != nil {
+				_ = thumbs.Save(id, wishIconDecodeEdge, pixels)
+			}
+		}
 		cancelled := ctx.Err() != nil
 		if cancelled {
 			pixels, err = nil, nil
@@ -232,7 +275,7 @@ func (s *Shell) startWishIcon(id string) {
 			return
 		}
 		select {
-		case out <- wishIconResult{id: id, generation: generation, pixels: pixels, err: err, cancelled: cancelled, queuedAt: queuedAt, startedAt: startedAt, loadedAt: loadedAt, decodedAt: decodedAt}:
+		case out <- wishIconResult{id: id, generation: generation, pixels: pixels, err: err, cancelled: cancelled, thumbHit: thumbHit, queuedAt: queuedAt, startedAt: startedAt, loadedAt: loadedAt, decodedAt: decodedAt}:
 			if wake != nil && life.Err() == nil {
 				wake()
 			}
@@ -249,9 +292,32 @@ func (b *wishIconMedia) cancelAll() {
 	}
 }
 
+// resetWishIcons drops queued and in-flight icons after the visible archive
+// changed. It records the new generation first, so the syncWishImages in the
+// same frame keeps the prefetch that follows instead of wiping it.
+func (s *Shell) resetWishIcons() {
+	b := &s.wishIcons
+	b.generation = s.Model.Wish.Token
+	b.cancelAll()
+	b.wanted = nil
+	b.queued = nil
+	b.pinned = nil
+}
+
 // wishIcon is called by the paint in viewport order. It returns a cached bitmap
 // or queues the id; repeated calls for one id in a frame are free.
 func (s *Shell) wishIcon(id string) *ui.Bitmap {
+	delete(s.wishIcons.pinned, id)
+	return s.requestWishIcon(id, false)
+}
+
+// prefetchWishIcon warms an icon the first screen is about to paint. The pin
+// keeps its load alive until the paint has asked for it once; see wishIconMedia.
+func (s *Shell) prefetchWishIcon(id string) *ui.Bitmap {
+	return s.requestWishIcon(id, true)
+}
+
+func (s *Shell) requestWishIcon(id string, pinned bool) *ui.Bitmap {
 	b := &s.wishIcons
 	if b.painted == nil {
 		b.painted = make(map[string]bool)
@@ -262,6 +328,9 @@ func (s *Shell) wishIcon(id string) *ui.Bitmap {
 		return bitmap
 	}
 	if !s.wishIconsEnabled() || b.queued[id] || b.inflight[id] != nil {
+		if pinned && s.wishIconsEnabled() && (b.queued[id] || b.inflight[id] != nil) {
+			b.pin(id)
+		}
 		return nil
 	}
 	if failure, ok := b.failures[id]; ok && time.Now().Before(failure.retryAt) {
@@ -272,6 +341,9 @@ func (s *Shell) wishIcon(id string) *ui.Bitmap {
 	}
 	b.queued[id] = true
 	b.wanted = append(b.wanted, id)
+	if pinned {
+		b.pin(id)
+	}
 	if b.trace != nil {
 		if b.queuedAt == nil {
 			b.queuedAt = make(map[string]time.Time)
@@ -283,6 +355,13 @@ func (s *Shell) wishIcon(id string) *ui.Bitmap {
 		}
 	}
 	return nil
+}
+
+func (b *wishIconMedia) pin(id string) {
+	if b.pinned == nil {
+		b.pinned = make(map[string]bool)
+	}
+	b.pinned[id] = true
 }
 
 func (b *wishIconMedia) remember(id string, bitmap *ui.Bitmap) {
