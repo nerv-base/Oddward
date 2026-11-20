@@ -324,6 +324,51 @@ func (s PreloadStore) Load(ctx context.Context, branch, version string) (Preload
 	return entry.record, ctx.Err()
 }
 
+// List returns every record of this installation, newest first. Callers that used
+// to enumerate the preload mirror directories must read this instead: the database
+// is authoritative, so a record whose mirror write failed, or whose mirror the
+// older build removed, still shows up.
+func (s PreloadStore) List(ctx context.Context) ([]PreloadRecord, error) {
+	if e := ctx.Err(); e != nil {
+		return nil, e
+	}
+	if err := s.requireDB(); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(ctx,
+		"SELECT branch, version FROM preload_records WHERE install_key = ? ORDER BY updated_at DESC, branch, version",
+		s.StateRoot)
+	if err != nil {
+		return nil, err
+	}
+	type key struct{ branch, version string }
+	keys := []key{}
+	for rows.Next() {
+		var k key
+		if err := rows.Scan(&k.branch, &k.version); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	records := make([]PreloadRecord, 0, len(keys))
+	for _, k := range keys {
+		r, err := s.Load(ctx, k.branch, k.version)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, r)
+	}
+	return records, ctx.Err()
+}
+
 // ImportPreloadLegacy adopts the preload.json mirrors below one installation state
 // root. Startup knows the state roots before it knows their work roots, and this
 // import reads only the mirrors: it never touches a blob, so the work root it binds

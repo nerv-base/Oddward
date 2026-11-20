@@ -211,9 +211,9 @@ func TestInstallRecordRoundTripMatchesLegacyDocument(t *testing.T) {
 			if string(mirrored) != string(document) {
 				t.Fatalf("mirror differs from the committed document:\n%s", mirrored)
 			}
-			mirror, ok, err := s.db.Mirror(ctx, InstallDomain)
-			if err != nil || !ok || mirror.Path != path || mirror.Digest != database.Digest(document) {
-				t.Fatalf("mirror bookkeeping: %+v %v %v", mirror, ok, err)
+			mirrors, err := s.db.Mirrors(ctx, InstallDomain)
+			if err != nil || len(mirrors) != 1 || mirrors[0].Path != path || mirrors[0].Digest != database.Digest(document) {
+				t.Fatalf("mirror bookkeeping: %+v %v", mirrors, err)
 			}
 		})
 	}
@@ -319,12 +319,13 @@ func TestInstallImportReconcilesChangedMirror(t *testing.T) {
 	if _, _, err := s.ImportLegacy(ctx); err != nil {
 		t.Fatal(err)
 	}
-	mirror, ok, err := s.db.Mirror(ctx, InstallDomain)
-	if err != nil || !ok || mirror.Path != installMirrorPath(stateRoot, newer) {
-		t.Fatalf("tracked mirror: %+v %v %v", mirror, ok, err)
+	mirrors, err := s.db.Mirrors(ctx, InstallDomain)
+	if err != nil || len(mirrors) != 1 || mirrors[0].Path != installMirrorPath(stateRoot, newer) {
+		t.Fatalf("tracked mirror: %+v %v", mirrors, err)
 	}
 	// A rolled-back build rewrites the tracked mirror and exits.
-	document, err := os.ReadFile(mirror.Path)
+	path := installMirrorPath(stateRoot, newer)
+	document, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,11 +337,11 @@ func TestInstallImportReconcilesChangedMirror(t *testing.T) {
 	if document, err = installJSON(changed); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(mirror.Path, document, 0600); err != nil {
+	if err := os.WriteFile(path, document, 0600); err != nil {
 		t.Fatal(err)
 	}
 	modified := time.Now().UTC().Add(2 * time.Minute)
-	if err := os.Chtimes(mirror.Path, modified, modified); err != nil {
+	if err := os.Chtimes(path, modified, modified); err != nil {
 		t.Fatal(err)
 	}
 	if stale, err := s.db.MirrorStale(ctx, InstallDomain); err != nil || !stale {
@@ -373,19 +374,20 @@ func TestInstallImportCorruptMirrorLeavesRowsUntouched(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("record before the corrupt import: %v", err)
 	}
-	mirror, ok, err := s.db.Mirror(ctx, InstallDomain)
-	if err != nil || !ok {
-		t.Fatalf("tracked mirror: %v", err)
+	mirrors, err := s.db.Mirrors(ctx, InstallDomain)
+	if err != nil || len(mirrors) != 1 {
+		t.Fatalf("tracked mirror: %+v %v", mirrors, err)
 	}
-	if err := os.WriteFile(mirror.Path, []byte(`{"schema": 2,`), 0600); err != nil {
+	path := mirrors[0].Path
+	if err := os.WriteFile(path, []byte(`{"schema": 2,`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	modified := time.Now().UTC().Add(2 * time.Minute)
-	if err := os.Chtimes(mirror.Path, modified, modified); err != nil {
+	if err := os.Chtimes(path, modified, modified); err != nil {
 		t.Fatal(err)
 	}
 	ran, err := s.db.RunImport(ctx, InstallDomain, InstallImportVersion, s.ImportLegacy)
-	if !ran || !errors.Is(err, ErrInvalidState) || !strings.Contains(err.Error(), mirror.Path) {
+	if !ran || !errors.Is(err, ErrInvalidState) || !strings.Contains(err.Error(), path) {
 		t.Fatalf("corrupt mirror: ran=%v err=%v", ran, err)
 	}
 	after, found, err := readInstallEntry(ctx, s.db.Reader(), newer)
@@ -641,5 +643,61 @@ func TestPreloadRecordsKeepInstallationsApart(t *testing.T) {
 	}
 	if rows != 2 {
 		t.Fatalf("kept %d preload rows, want 2", rows)
+	}
+}
+
+// The preload mirror directory is a rollback aid, so evidence has to come from the
+// rows: a record whose mirror never landed, or that an older build removed, still
+// has to be listed, and only this installation's records may appear.
+func TestPreloadListReadsTheRowsNotTheMirrors(t *testing.T) {
+	ctx := context.Background()
+	db := dbtest.Open(t)
+	root := t.TempDir()
+	store, err := NewPreloadStore(db, root, root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := NewPreloadStore(db, t.TempDir(), t.TempDir(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, record := legacyPreloadRecord(t)
+	first, second := record, record
+	first.TaskID = record.TaskID + "-a"
+	second.TaskID = record.TaskID + "-b"
+	second.Version = "9.9.9"
+	if err := store.Save(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := record
+	unrelated.TaskID = record.TaskID + "-other"
+	if err := other.Save(ctx, unrelated); err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove the mirror of the second record: the row still stands.
+	mirror := filepath.Join(root, "preload", second.Branch, second.Version, preloadFileName)
+	if err := os.Remove(mirror); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := store.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("List = %d records, want 2", len(listed))
+	}
+	seen := map[string]bool{}
+	for _, r := range listed {
+		seen[r.TaskID] = true
+	}
+	if !seen[first.TaskID] || !seen[second.TaskID] || seen[unrelated.TaskID] {
+		t.Fatalf("List returned %v", seen)
+	}
+	if listed[0].UpdatedAt.Before(listed[1].UpdatedAt) {
+		t.Fatalf("List is not newest first: %v", listed)
 	}
 }

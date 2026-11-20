@@ -376,12 +376,12 @@ func TestImportLegacyReconcilesMirrorRewrittenByOlderBuild(t *testing.T) {
 	if _, _, err = store.ImportLegacy(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	mirror, ok, err := db.Mirror(context.Background(), gamedl.Domain)
-	if err != nil || !ok {
-		t.Fatalf("mirror record: %+v ok=%v err=%v", mirror, ok, err)
+	mirrors, err := db.Mirrors(context.Background(), gamedl.Domain)
+	if err != nil || len(mirrors) != 1 {
+		t.Fatalf("mirror records: %+v err=%v", mirrors, err)
 	}
-	if mirror.Path != filepath.Join(state, "tasks", task.ID+".json") {
-		t.Fatalf("mirror path=%q", mirror.Path)
+	if mirrors[0].Path != filepath.Join(state, "tasks", task.ID+".json") {
+		t.Fatalf("mirror path=%q", mirrors[0].Path)
 	}
 	if stale, err := db.MirrorStale(context.Background(), gamedl.Domain); err != nil || stale {
 		t.Fatalf("fresh mirror reported stale=%v err=%v", stale, err)

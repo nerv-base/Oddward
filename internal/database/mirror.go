@@ -23,7 +23,7 @@ import (
 // A mirror write is recorded in compat_mirrors with the digest of the bytes this
 // build wrote. If the file on disk later differs from that digest, an older build
 // ran and changed the file, so the domain must reconcile it into the database
-// before its own rows are used again. MigrateDomain does that automatically.
+// before its own rows are used again. RunImport does that automatically.
 
 // Digest returns the digest recorded for a mirror, in the form compat_mirrors
 // stores it.
@@ -32,7 +32,7 @@ func Digest(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Mirror is the recorded state of one domain's legacy file.
+// Mirror is the recorded state of one legacy file.
 type Mirror struct {
 	Domain     string
 	Path       string
@@ -46,7 +46,7 @@ type Mirror struct {
 func (db *DB) RecordMirror(ctx context.Context, tx *sql.Tx, domain, path, digest string) error {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO compat_mirrors(domain, path, digest, mirrored_at) VALUES(?, ?, ?, ?)
-		ON CONFLICT(domain) DO UPDATE SET path = excluded.path, digest = excluded.digest, mirrored_at = excluded.mirrored_at`,
+		ON CONFLICT(domain, path) DO UPDATE SET digest = excluded.digest, mirrored_at = excluded.mirrored_at`,
 		domain, path, digest, db.now().UnixNano()); err != nil {
 		return fmt.Errorf("database: record %s mirror: %w", domain, err)
 	}
@@ -131,38 +131,51 @@ func WriteMirror(path string, data []byte) error {
 	return protectFile(path)
 }
 
-// MirrorStale reports whether the legacy file for domain was changed by another
-// build since this one last wrote it. A file that no longer exists is a miss.
+// MirrorStale reports whether any legacy file of domain was changed by another
+// build since this one last wrote it. A file that no longer exists counts as
+// changed; a domain with no recorded mirror is not stale.
 func (db *DB) MirrorStale(ctx context.Context, domain string) (bool, error) {
-	record, found, err := db.Mirror(ctx, domain)
-	if err != nil || !found {
-		return false, err
-	}
-	current, err := os.ReadFile(record.Path)
-	if errors.Is(err, os.ErrNotExist) {
-		return true, nil
-	}
+	records, err := db.Mirrors(ctx, domain)
 	if err != nil {
 		return false, err
 	}
-	return Digest(current) != record.Digest, nil
+	for _, record := range records {
+		current, err := os.ReadFile(record.Path)
+		if errors.Is(err, os.ErrNotExist) {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if Digest(current) != record.Digest {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
-// Mirror returns the record for domain.
-func (db *DB) Mirror(ctx context.Context, domain string) (Mirror, bool, error) {
-	var (
-		record Mirror
-		at     int64
-	)
-	err := db.QueryRow(ctx,
-		"SELECT domain, path, digest, mirrored_at FROM compat_mirrors WHERE domain = ?", domain).
-		Scan(&record.Domain, &record.Path, &record.Digest, &at)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Mirror{}, false, nil
-	}
+// Mirrors returns every legacy file recorded for domain, ordered by path. A
+// domain can write many files: gacha keeps one document per role, downloads one
+// per task, and installs and preloads one per installation, so the rollback check
+// has to look at all of them rather than just the last one written.
+func (db *DB) Mirrors(ctx context.Context, domain string) ([]Mirror, error) {
+	rows, err := db.Query(ctx,
+		"SELECT domain, path, digest, mirrored_at FROM compat_mirrors WHERE domain = ? ORDER BY path", domain)
 	if err != nil {
-		return Mirror{}, false, err
+		return nil, err
 	}
-	record.MirroredAt = time.Unix(0, at).UTC()
-	return record, true, nil
+	defer rows.Close()
+	records := []Mirror{}
+	for rows.Next() {
+		var (
+			record Mirror
+			at     int64
+		)
+		if err := rows.Scan(&record.Domain, &record.Path, &record.Digest, &at); err != nil {
+			return nil, err
+		}
+		record.MirroredAt = time.Unix(0, at).UTC()
+		records = append(records, record)
+	}
+	return records, rows.Err()
 }

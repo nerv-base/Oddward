@@ -34,8 +34,8 @@ func TestPrepareRollbackLeavesNothing(t *testing.T) {
 	if names := dirNames(t, dir); len(names) != 0 {
 		t.Fatalf("rolled back save left files: %v", names)
 	}
-	if _, found, err := s.db.Mirror(t.Context(), accountsDomain); err != nil || found {
-		t.Fatalf("rolled back save recorded a mirror digest: found=%v err=%v", found, err)
+	if records, err := s.db.Mirrors(t.Context(), accountsDomain); err != nil || len(records) != 0 {
+		t.Fatalf("rolled back save recorded a mirror digest: records=%v err=%v", records, err)
 	}
 	if err := tx.Commit(); err == nil {
 		t.Fatal("a rolled back save committed")

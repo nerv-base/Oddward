@@ -124,12 +124,12 @@ func TestImportLegacyMigrationParity(t *testing.T) {
 	if !bytes.Equal(mirror, rowBytes(t, s, idA)) {
 		t.Fatal("the imported record is not mirrored byte for byte")
 	}
-	record, found, err := s.db.Mirror(t.Context(), accountsDomain)
-	if err != nil || !found {
-		t.Fatalf("no mirror digest recorded: found=%v err=%v", found, err)
+	records, err := s.db.Mirrors(t.Context(), accountsDomain)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("mirror digests recorded: records=%v err=%v", records, err)
 	}
-	if record.Path != s.mirrorPath(mirrorIndexName) {
-		t.Fatalf("mirror path = %q, want the index", record.Path)
+	if records[0].Path != s.mirrorPath(mirrorIndexName) {
+		t.Fatalf("mirror path = %q, want the index", records[0].Path)
 	}
 	state, found, err := s.db.MigrationState(t.Context(), accountsDomain)
 	if err != nil || !found {

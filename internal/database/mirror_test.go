@@ -102,8 +102,47 @@ func TestMirrorThenCommitKeepsRowsWhenMirrorFails(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("rows committed although the mirror failed: %d", count)
 	}
-	if _, found, err := db.Mirror(ctx, "settings"); err != nil || found {
-		t.Fatalf("mirror record: found = %v, err = %v", found, err)
+	if records, err := db.Mirrors(ctx, "settings"); err != nil || len(records) != 0 {
+		t.Fatalf("mirror records: records = %v, err = %v", records, err)
+	}
+}
+
+// A domain writes more than one file (a role, a task, an installation), so a
+// change to any of them has to make the domain stale, not just the last write.
+func TestMirrorStaleSeesEveryFileOfTheDomain(t *testing.T) {
+	db := dbtest.Open(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	first := filepath.Join(dir, "role-a.json")
+	second := filepath.Join(dir, "role-b.json")
+	for _, path := range []string{first, second} {
+		data := []byte(`{"role":"` + filepath.Base(path) + `"}`)
+		if err := db.MirrorThenCommit(ctx, "gacha", path, data, func(ctx context.Context, tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, "INSERT INTO app_meta(key, value) VALUES(?, ?)", path, database.Digest(data))
+			return err
+		}); err != nil {
+			t.Fatalf("mirror %s: %v", path, err)
+		}
+	}
+	if records, err := db.Mirrors(ctx, "gacha"); err != nil || len(records) != 2 {
+		t.Fatalf("mirrors = %v, err = %v", records, err)
+	}
+	if stale, err := db.MirrorStale(ctx, "gacha"); err != nil || stale {
+		t.Fatalf("fresh mirrors: stale = %v, err = %v", stale, err)
+	}
+
+	// An older build edits the file this build wrote first, not the last one.
+	if err := os.WriteFile(first, []byte(`{"role":"role-a.json","edited":true}`), 0o600); err != nil {
+		t.Fatalf("rewrite older mirror: %v", err)
+	}
+	if stale, err := db.MirrorStale(ctx, "gacha"); err != nil || !stale {
+		t.Fatalf("edited older mirror: stale = %v, err = %v", stale, err)
+	}
+	if err := os.Remove(second); err != nil {
+		t.Fatalf("remove newer mirror: %v", err)
+	}
+	if stale, err := db.MirrorStale(ctx, "gacha"); err != nil || !stale {
+		t.Fatalf("missing newer mirror: stale = %v, err = %v", stale, err)
 	}
 }
 

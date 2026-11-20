@@ -3,11 +3,9 @@ package system
 
 import (
 	"context"
-	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/nerv-base/Oddward/internal/gameinstall"
@@ -63,58 +61,23 @@ func preloadSystemWork(root string, r gameinstall.PreloadRecord) string {
 	return filepath.Join(downloadWork(root), "preload", r.Branch, r.Version)
 }
 
-// Metadata traversal is bounded and rejects links before reading records.
+// Metadata is read from the database: the preload mirror directories are a
+// rollback aid, so a record whose mirror write failed is still evidence.
 func (b *GameDownloadBackend) preloadRecords(ctx context.Context, root string) ([]gameinstall.PreloadRecord, error) {
 	store, err := b.preloadStore(root)
 	if err != nil {
 		return nil, err
 	}
-	base := filepath.Join(store.StateRoot, "preload")
-	if _, err = downloadDirectory(base, false); errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	} else if err != nil {
-		return nil, err
-	}
-	branches, err := os.ReadDir(base)
+	stored, err := store.List(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if len(branches) > 128 {
-		return nil, gameinstall.ErrPreloadRecord
-	}
-	records := []gameinstall.PreloadRecord{}
-	for _, branch := range branches {
-		if err = ctx.Err(); err != nil {
-			return nil, err
-		}
-		branchPath := filepath.Join(base, branch.Name())
-		if _, err = downloadDirectory(branchPath, false); err != nil {
-			return nil, err
-		}
-		versions, err := os.ReadDir(branchPath)
-		if err != nil {
-			return nil, err
-		}
-		if len(versions) > 128 {
-			return nil, gameinstall.ErrPreloadRecord
-		}
-		for _, version := range versions {
-			if err = ctx.Err(); err != nil {
-				return nil, err
-			}
-			if _, err = downloadDirectory(filepath.Join(branchPath, version.Name()), false); err != nil {
-				return nil, err
-			}
-			r, err := store.Load(ctx, branch.Name(), version.Name())
-			if err != nil {
-				return nil, err
-			}
-			if r.State != gameinstall.PreloadCompleted && r.State != gameinstall.PreloadUnavailable {
-				records = append(records, r)
-			}
+	records := make([]gameinstall.PreloadRecord, 0, len(stored))
+	for _, r := range stored {
+		if r.State != gameinstall.PreloadCompleted && r.State != gameinstall.PreloadUnavailable {
+			records = append(records, r)
 		}
 	}
-	sort.Slice(records, func(i, j int) bool { return records[i].UpdatedAt.After(records[j].UpdatedAt) })
 	return records, nil
 }
 func (b *GameDownloadBackend) preloadLatest(ctx context.Context, root string) (gameinstall.PreloadRecord, error) {
