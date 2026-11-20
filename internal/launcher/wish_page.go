@@ -480,18 +480,12 @@ func wishItemName(catalog gacha.Catalog, id string) (string, bool) {
 
 func (s *Shell) wishRecord(c *ui.Context, data wishPageData, r gacha.Record, index int, highlight string, nextHighlight *string) {
 	name, known := wishItemName(data.Catalog, r.ItemID)
-	rarity := ""
-	if item, ok := data.Catalog.Lookup(r.ItemID); ok {
-		rarity = item.Rarity
-	}
 	band := gacha.Band(r.Pool, r.Pity)
 	at := gacha.FormatTime(r.At, data.Location)
 	featured := r.Pool == gacha.Weapon && gacha.IsUp(r.Pool, r.ItemID)
-	labelName := name
-	if rarity != "" {
-		labelName += "（" + rarity + "）"
-	}
-	label := fmt.Sprintf("%s，%d 抽，%s", labelName, r.Pity, at)
+	// Every row below the strip is an S pull, so the row never repeats the
+	// rarity the list itself already implies.
+	label := fmt.Sprintf("%s，%d 抽，%s", name, r.Pity, at)
 	if featured {
 		label += "，当期限定"
 	}
@@ -552,9 +546,6 @@ func (s *Shell) wishRecord(c *ui.Context, data wishPageData, r gacha.Record, ind
 					}
 					ui.Row(c).FillWidth().Height(wishRowHeight).Padding(0, wishSpaceSM).Gap(wishSpaceXXS).AlignItems(ui.Center).Children(func() {
 						title := ui.Text(c, name).FontSize(wishTextBody).FontWeight(600).SingleLine().Grow(1).Shrink(1)
-						if rarity != "" {
-							ui.Text(c, rarity).FontSize(wishTextFootnote).FontWeight(700).TextColor(tone).SingleLine()
-						}
 						if !known {
 							title.Font(wishMonospace)
 							ui.Text(c, "未收录").FontSize(wishTextFootnote).TextColor(muted).SingleLine()

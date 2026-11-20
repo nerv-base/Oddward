@@ -4,6 +4,7 @@ package launcher
 
 import (
 	"image/color"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,7 +45,7 @@ func TestWishWarningBarsRemainDistinctFromArbitraryTone(t *testing.T) {
 	}
 }
 
-func TestWishRecordShowsWikiRarity(t *testing.T) {
+func TestWishRecordHasNoRedundantRarityBadge(t *testing.T) {
 	at := time.Date(2026, 11, 15, 4, 0, 0, 0, time.UTC)
 	archive := gacha.Archive{RoleID: "100012345", Records: []gacha.Record{
 		{Pool: gacha.Weapon, ItemID: "fork_wushoutieyu", At: at, Pity: 60},
@@ -58,11 +59,18 @@ func TestWishRecordShowsWikiRarity(t *testing.T) {
 		c.SetTheme(s.theme)
 		s.wishPage(c, wishPageData{Archive: archive, Catalog: catalog, Stats: gacha.Statistics(archive)})
 	}, 1280, 720)
-	if !tt.HasText("焰魂狂飙") || !tt.HasText("S") {
-		t.Fatal("wiki name or rarity missing from the record row")
+	if !tt.HasText("焰魂狂飙") {
+		t.Fatal("wiki name missing from the record row")
 	}
-	if _, ok := tt.AccessByRole(ui.RoleButton, "焰魂狂飙（S），60 抽，2026-11-15 04:00"); !ok {
-		t.Fatal("rarity missing from the accessible record label")
+	// The record list only holds S pulls, so a per-row S badge repeats what
+	// the list already says. Nothing should render a bare rarity next to it.
+	for _, text := range tt.Texts() {
+		if strings.TrimSpace(text) == "S" {
+			t.Fatal("record row still repeats the S rarity")
+		}
+	}
+	if _, ok := tt.AccessByRole(ui.RoleButton, "焰魂狂飙，60 抽，2026-11-15 04:00"); !ok {
+		t.Fatal("accessible record label should not repeat the rarity")
 	}
 }
 
