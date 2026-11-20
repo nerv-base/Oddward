@@ -20,7 +20,7 @@ func TestNormalPrimaryOpensInstallPathWithoutStartingWork(t *testing.T) {
 		t.Errorf("unlocated action = %+v", p)
 	}
 	next, fx := Reduce(m, Event{Kind: Primary})
-	if next.Overlay == NoOverlay || next.HomeDownloadsOpen || next.Flow != m.Flow || len(fx) != 0 {
+	if next.Overlay == NoOverlay || next.Flow != m.Flow || len(fx) != 0 {
 		t.Fatalf("unlocated primary should open an install dialog without starting work: overlay=%v fx=%+v", next.Overlay, fx)
 	}
 }
@@ -32,8 +32,8 @@ func TestNormalPrimaryReturnsToDownloadsForUninstalledSelectedRoot(t *testing.T)
 		t.Fatalf("an empty installation directory must remain a download target: %+v", p)
 	}
 	next, fx := Reduce(m, Event{Kind: Primary})
-	if !next.HomeDownloadsOpen || next.Overlay != NoOverlay || len(fx) != 0 {
-		t.Fatalf("primary must reopen downloads without starting work, got overlay=%v effects=%+v", next.Overlay, fx)
+	if next.Overlay != NoOverlay || len(fx) != 1 || fx[0].Kind != EffectDownloadPlan || next.Download.Kind != DownloadInstall {
+		t.Fatalf("primary must plan the missing install at once, got overlay=%v effects=%+v", next.Overlay, fx)
 	}
 }
 

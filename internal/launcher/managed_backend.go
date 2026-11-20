@@ -4,7 +4,6 @@ package launcher
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/nerv-base/Oddward/internal/launcher/state"
@@ -309,11 +308,4 @@ func (s *Shell) syncManaged() {
 			return
 		}
 	}
-}
-
-func managedBytes(p state.ManagedState) string {
-	if p.Total <= 0 {
-		return p.Message
-	}
-	return fmt.Sprintf("%s · %.1f / %.1f MB", p.Message, float64(p.Downloaded)/(1024*1024), float64(p.Total)/(1024*1024))
 }

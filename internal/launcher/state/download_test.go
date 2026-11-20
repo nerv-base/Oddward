@@ -35,7 +35,7 @@ func TestDownloadSpaceShortOfferAllowsExplicitReplanning(t *testing.T) {
 	}
 }
 
-func TestPreloadReconcileSupplementalPlanRequiresFreshConfirmation(t *testing.T) {
+func TestPreloadReconcileSupplementalPlanStartsAfterReset(t *testing.T) {
 	m := downloadModel()
 	m.Download.Kind = DownloadPreload
 	m.Download.Preload = PreloadStateWaitingRelease
@@ -49,11 +49,10 @@ func TestPreloadReconcileSupplementalPlanRequiresFreshConfirmation(t *testing.T)
 	requireDownloadEffect(t, m, fx, EffectPreloadCheck)
 	m, _ = Reduce(m, Event{Kind: DownloadRoutePlanned, Token: m.Download.Request, Index: uint8(RouteFull), Total: 12, Reused: 888})
 	m, fx = Reduce(m, Event{Kind: DownloadPlanned, Token: m.Download.Request, Message: "v2", Total: 12, Reused: 888, FilesTotal: 1, Needed: 24, Free: 100})
-	if len(fx) != 0 || m.Download.Phase != DownloadPreparing || !m.Download.AwaitingConfirmation || m.Download.Total != 12 || m.Download.Downloaded != 0 || m.Download.FilesDone != 0 {
-		t.Fatalf("supplemental offer not reset/confirmed: %+v", m.Download)
-	}
-	m, fx = Reduce(m, Event{Kind: DownloadConfirm})
 	requireDownloadEffect(t, m, fx, EffectPreloadRun)
+	if m.Download.Phase != DownloadPreparing || m.Download.AwaitingConfirmation || m.Download.Total != 12 || m.Download.Downloaded != 0 || m.Download.FilesDone != 0 {
+		t.Fatalf("supplemental offer not reset: %+v", m.Download)
+	}
 	m, _ = Reduce(m, downloadEvent(m, PreloadStarted))
 	m, fx = Reduce(m, downloadEvent(m, PreloadStaged))
 	if len(fx) != 0 || m.Download.Preload != PreloadStateWaitingRelease {
@@ -64,9 +63,15 @@ func TestPreloadReconcileSupplementalPlanRequiresFreshConfirmation(t *testing.T)
 }
 
 func TestPreloadSpaceShortOfferAllowsExplicitReplanning(t *testing.T) {
-	m := plannedDownload(t, DownloadPreload)
-	m.Download.SpaceShort = true
-	m, fx := Reduce(m, Event{Kind: PreloadRequest})
+	m := downloadModel()
+	m, _ = Reduce(m, Event{Kind: PreloadRequest})
+	m, _ = Reduce(m, Event{Kind: PreloadChecked, Token: m.Download.Request, Enabled: true, Message: "v2"})
+	m, _ = Reduce(m, Event{Kind: DownloadRoutePlanned, Token: m.Download.Request, Index: uint8(RoutePatch), Total: 100, PatchBytes: 40, Reused: 900})
+	m, fx := Reduce(m, Event{Kind: DownloadPlanned, Token: m.Download.Request, Message: "v2", Total: 100, FilesTotal: 4, Reused: 900, Needed: 4096, Free: 512, Enabled: true})
+	if len(fx) != 0 || !m.Download.SpaceShort || !m.Download.AwaitingConfirmation {
+		t.Fatalf("a short preload plan must wait: %+v %+v", m.Download, fx)
+	}
+	m, fx = Reduce(m, Event{Kind: PreloadRequest})
 	requireDownloadEffect(t, m, fx, EffectPreloadCheck)
 	m, fx = Reduce(m, Event{Kind: PreloadChecked, Token: m.Download.Request, Enabled: true, Message: "v2"})
 	requireDownloadEffect(t, m, fx, EffectDownloadPlan)
@@ -143,7 +148,7 @@ func TestInstallDialogPlansSelectedPathBeforeExplicitStart(t *testing.T) {
 	}
 	m, fx = Reduce(m, Event{Kind: DownloadConfirm})
 	if len(fx) != 2 || fx[0].Kind != SaveManagedSettings || fx[1].Kind != EffectDownloadRun || fx[1].Path != selected ||
-		m.Overlay != NoOverlay || m.HomeDownloadsOpen || Present(m).Primary != "正在准备下载" {
+		m.Overlay != NoOverlay || Present(m).Primary != "正在准备下载" {
 		t.Fatalf("explicit start must save the target and show preparation in the compact Home action: %+v %+v", m.Download, fx)
 	}
 }
@@ -173,7 +178,7 @@ func TestInstallDialogDirectoryChangeAndDismissIgnoreStalePlans(t *testing.T) {
 	}
 	secondPlan := Event{Kind: DownloadPlanned, Token: m.Download.Request, Message: "v2", Total: 419, Needed: 804, Free: 1960}
 	m, fx = Reduce(m, Event{Kind: Dismiss})
-	if len(fx) != 0 || m.Managed.Root != "" || m.Overlay != NoOverlay || m.HomeDownloadsOpen {
+	if len(fx) != 0 || m.Managed.Root != "" || m.Overlay != NoOverlay {
 		t.Fatalf("dismiss must discard the draft without running work: overlay=%v root=%q effects=%+v", m.Overlay, m.Managed.Root, fx)
 	}
 	m, fx = Reduce(m, secondPlan)
@@ -231,33 +236,49 @@ func plannedDownload(t *testing.T, kind DownloadKind) Model {
 	}
 	m, _ = Reduce(m, Event{Kind: DownloadRoutePlanned, Token: m.Download.Request, Index: uint8(RoutePatch), Total: 100, PatchBytes: 40, Reused: 900})
 	m, fx := Reduce(m, Event{Kind: DownloadPlanned, Token: m.Download.Request, Message: "v2", Total: 100, FilesTotal: 4, Reused: 900})
-	if len(fx) != 0 || !m.Download.AwaitingConfirmation || m.Download.Version != "v2" {
-		t.Fatalf("planning must await user confirmation: %+v %+v", m.Download, fx)
+	if kind == DownloadInstall {
+		if len(fx) != 0 || !m.Download.AwaitingConfirmation || m.Download.Version != "v2" {
+			t.Fatalf("fresh install plan must await confirmation: %+v %+v", m.Download, fx)
+		}
+		return m
+	}
+	run := EffectDownloadRun
+	if kind == DownloadPreload {
+		run = EffectPreloadRun
+	}
+	requireDownloadEffect(t, m, fx, run)
+	if m.Download.AwaitingConfirmation || m.Download.Version != "v2" {
+		t.Fatalf("a plan that fits must start at once: %+v %+v", m.Download, fx)
 	}
 	return m
 }
 func runningDownload(t *testing.T) Model {
 	t.Helper()
 	m := plannedDownload(t, DownloadUpdate)
-	m, fx := Reduce(m, Event{Kind: DownloadConfirm})
-	requireDownloadEffect(t, m, fx, EffectDownloadRun)
 	m, _ = Reduce(m, downloadEvent(m, DownloadStarted))
 	return m
 }
-func TestDownloadPlanRequiresConfirmationAndRejectsShortSpace(t *testing.T) {
+func TestDownloadPlanStartsAtOnceUnlessTheDiskIsShort(t *testing.T) {
 	m := plannedDownload(t, DownloadUpdate)
 	if m.Download.Route != RoutePatch || m.Download.PatchBytes != 40 || m.Download.Reused != 900 {
 		t.Fatalf("offer lost backend numbers: %+v", m.Download)
 	}
-	m.Download.SpaceShort = true
-	n, fx := Reduce(m, Event{Kind: DownloadConfirm})
-	if len(fx) != 0 || n.Download.Phase != DownloadPreparing {
-		t.Fatal("space short offer started")
+	if m.Download.AwaitingConfirmation || m.Download.Phase != DownloadPreparing {
+		t.Fatalf("a fitting offer must start without a second click: %+v", m.Download)
 	}
-	m.Download.SpaceShort = false
-	n, fx = Reduce(m, Event{Kind: DownloadConfirm})
+	short := downloadModel()
+	short, _ = Reduce(short, Event{Kind: DownloadRequest})
+	short, fx := Reduce(short, Event{Kind: DownloadPlanned, Token: short.Download.Request, Message: "v2", Total: 100, Needed: 4096, Free: 512, Enabled: true})
+	if len(fx) != 0 || !short.Download.SpaceShort || !short.Download.AwaitingConfirmation {
+		t.Fatalf("a short plan must wait for a new location: %+v %+v", short.Download, fx)
+	}
+	if n, fx := Reduce(short, Event{Kind: DownloadConfirm}); len(fx) != 0 || n != short {
+		t.Fatal("a short plan started anyway")
+	}
+	short.Download.SpaceShort = false
+	n, fx := Reduce(short, Event{Kind: DownloadConfirm})
 	requireDownloadEffect(t, n, fx, EffectDownloadRun)
-	if n.Download.Request == m.Download.Request {
+	if n.Download.Request == short.Download.Request {
 		t.Fatal("run must fence planning responses")
 	}
 	n2, fx := Reduce(n, Event{Kind: DownloadConfirm})
@@ -429,10 +450,8 @@ func TestDownloadLocateOnlyOnUserRequestQuickAdoptAndManualVerify(t *testing.T) 
 }
 func TestPreloadStagingNeverWritesInstallationAndRequiresReconcile(t *testing.T) {
 	m := plannedDownload(t, DownloadPreload)
-	m, fx := Reduce(m, Event{Kind: DownloadConfirm})
-	requireDownloadEffect(t, m, fx, EffectPreloadRun)
 	m, _ = Reduce(m, downloadEvent(m, PreloadStarted))
-	m, fx = Reduce(m, downloadEvent(m, DownloadVerified))
+	m, fx := Reduce(m, downloadEvent(m, DownloadVerified))
 	if len(fx) != 0 || m.Download.Current != "" {
 		t.Fatal("preload verification committed installation")
 	}

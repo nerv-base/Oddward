@@ -59,3 +59,29 @@ func TestModelValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestWelcomeBannerRoundTripAndValidation(t *testing.T) {
+	welcome := Model{Screen: "welcome", Banner: "夜航星，欢迎登录", GameProcessID: 42, GameCreationTime: "133000000000000000"}
+	if err := validateModel(welcome); err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	if err := writeFrame(&b, envelope{Version: 1, Type: "model", Model: &welcome}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readFrame(&b)
+	if err != nil || got.Model == nil || got.Model.Screen != welcome.Screen || got.Model.Banner != welcome.Banner || got.Model.GameProcessID != welcome.GameProcessID || got.Model.GameCreationTime != welcome.GameCreationTime {
+		t.Fatalf("welcome model round trip failed: %v", err)
+	}
+	for _, m := range []Model{
+		{Screen: "welcome"},
+		{Screen: "welcome", Banner: strings.Repeat("b", 257)},
+		{Screen: "phone", Banner: "夜航星，欢迎登录"},
+		{Screen: "accounts", Banner: "夜航星，欢迎登录"},
+		{Screen: "notice", Banner: "夜航星，欢迎登录"},
+	} {
+		if !errors.Is(validateModel(m), ErrProtocol) {
+			t.Fatalf("banner model accepted: screen=%q banner length=%d", m.Screen, len(m.Banner))
+		}
+	}
+}

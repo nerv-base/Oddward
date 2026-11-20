@@ -7,7 +7,6 @@ import "testing"
 func TestDownloadDiskFullBackendPauseIsResumableWithoutUserPauseRequest(t *testing.T) {
 	for _, kind := range []DownloadKind{DownloadUpdate, DownloadPreload} {
 		m := plannedDownload(t, kind)
-		m, _ = Reduce(m, Event{Kind: DownloadConfirm})
 		m, _ = Reduce(m, downloadEvent(m, DownloadStarted))
 		m.Download.Downloaded = 30
 		m.Download.Rate = 50

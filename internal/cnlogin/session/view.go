@@ -37,6 +37,9 @@ func (s *Session) model() loginui.Model {
 		m.Subtitle = "国服账号"
 		m.PrimaryLabel = "登录"
 		m.CanBack = true
+	case "welcome":
+		// The banner surface only reads Banner; the window never opens.
+		m.Banner = s.st.welcome
 	default:
 		m.Title = "手机号登录"
 		m.Subtitle = "国服账号"

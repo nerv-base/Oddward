@@ -45,13 +45,12 @@ const (
 	downloadButtonHeight      float32 = 36
 	downloadMeterHeight       float32 = 4
 	downloadStatusHeight      float32 = 26
-	homeDownloadWidth         float32 = 360
-	homeDownloadHeight        float32 = 374
-	homeDownloadInset         float32 = 16
 	homeDownloadGap           float32 = 8
 	homeDockHeight            float32 = 48
 	homeDockPrimaryWidth      float32 = 144
-	homeDockWidth                     = homeDockPrimaryWidth + 2*homeDockHeight
+	homeDockWidth                     = homeDockPrimaryWidth + homeDockHeight
+	homePreloadChipWidth      float32 = 120
+	homePreloadChipGap        float32 = 8
 	homeDockBadgeSize         float32 = 34
 	homeDockPopupInset        float32 = 12
 	homeDockPopupRadius       float32 = 8
@@ -377,11 +376,9 @@ func (s *Shell) action(c *ui.Context) {
 	s.newsCard(c)
 	if s.Model.NormalMode {
 		s.managedActionNote(c, p)
-		// The compact capsule already carries progress, so no deck repeats it.
+		// One capsule starts, updates or pauses; the preload chip only exists
+		// while there is a preload to report.
 		s.homeDock(c, p)
-		if s.Model.HomeDownloadsOpen && s.Model.Overlay == state.NoOverlay {
-			s.homeDownloads(c)
-		}
 	} else {
 		s.taskDeck(c, p)
 		ui.Box(c.Key("action-area")).Absolute().Right(dockRight+actionHeight+menuGap).Bottom(homeBottom).Size(actionWidth, actionHeight).Children(func() {

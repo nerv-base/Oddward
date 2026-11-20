@@ -142,8 +142,10 @@ const OverlayInstallPath Overlay = 43
 
 const (
 	OpenInstallPath EventKind = 257 + iota
-	OpenHomeDownloads
-	CloseHomeDownloads
+	// 258 and 259 retired with the home download panel. Their numbers stay
+	// reserved so recorded events keep one meaning.
+	_
+	_
 )
 const (
 	DownloadRequest EventKind = 260 + iota
@@ -344,22 +346,12 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 			}
 			return m, nil, true
 		}
-	case OpenHomeDownloads:
-		if m.NormalMode && m.Page == Home && m.Overlay == NoOverlay {
-			m.HomeDownloadsOpen = true
-			m.Bar = MediaBarHidden
-		}
-		return m, nil, true
 	case OpenInstallPath:
 		if m.NormalMode && m.Page == Home && m.Overlay == NoOverlay && m.Managed.Root == "" &&
 			!downloadUnfinished(*d) && !ManagedBusy(m.Managed.Phase) && !ManagedActive(m.Managed.Phase) {
 			m.Overlay = OverlayInstallPath
-			m.HomeDownloadsOpen = false
 			m.Bar = MediaBarHidden
 		}
-		return m, nil, true
-	case CloseHomeDownloads:
-		m.HomeDownloadsOpen = false
 		return m, nil, true
 	}
 	if m.Overlay == OverlayInstallPath {
@@ -400,18 +392,15 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 	}
 	if e.Kind == Primary && m.Page == Home && m.Overlay == NoOverlay {
 		if p, action, ok := homeDownloadPrimary(m); ok {
-			if !p.Enabled {
+			if !p.Enabled || action == 0 {
 				return m, nil, true
-			}
-			if action == DownloadRequest {
-				m.HomeDownloadsOpen = true
 			}
 			return reduceDownload(m, Event{Kind: action})
 		}
 	}
 	if e.Kind == Primary && downloadLaunchBlocked(m) {
 		if m.Page == Home && m.Overlay == NoOverlay && d.Phase == DownloadRecoveryRequired {
-			m.HomeDownloadsOpen = true
+			return reduceDownload(m, Event{Kind: DownloadRecoverRequest})
 		}
 		return m, nil, true
 	}
@@ -567,6 +556,16 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		if d.SpaceShort {
 			d.Note = "disk-short"
 		}
+		// A plan that fits and has a working network starts immediately: the
+		// home action is the user's confirmation, so no second dialog stands
+		// between the click and the transfer. Fresh installs keep their picker
+		// open until the user presses start there.
+		if d.Kind != DownloadInstall && !d.SpaceShort && DownloadNetworkBlocked(m) == "" {
+			next, fx, handled := reduceDownload(m, Event{Kind: DownloadConfirm})
+			if handled {
+				return next, fx, true
+			}
+		}
 	case DownloadConfirm:
 		if !d.AwaitingConfirmation || d.SpaceShort || d.operation != downloadOperationNone || d.pausePending || d.cancelPending || DownloadNetworkBlocked(m) != "" {
 			break
@@ -585,8 +584,6 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		if d.Kind == DownloadPreload {
 			k = EffectPreloadRun
 			d.Preload = PreloadStateDownloading
-		} else {
-			m.HomeDownloadsOpen = false
 		}
 		if m.Overlay == OverlayInstallPath {
 			m.Overlay = NoOverlay

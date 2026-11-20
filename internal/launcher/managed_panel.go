@@ -54,7 +54,7 @@ func (s *Shell) gameBasicInformation(c *ui.Context) {
 			if s.Model.Download.Preload != state.PreloadStateUnavailable || s.Model.Download.Phase != state.DownloadIdle {
 				s.quietButton(c, "game-preload", "预下载管理", false).Shrink(0).Height(downloadButtonHeight).OnClick(func() {
 					s.Dispatch(state.Event{Kind: state.Dismiss})
-					s.Dispatch(state.Event{Kind: state.OpenHomeDownloads})
+					s.openDownloadSettings()
 				})
 			}
 		})
@@ -122,31 +122,30 @@ func (s *Shell) managedNoticePanel(c *ui.Context) {
 	})
 }
 
+// managedActionNote only carries things the player must act on: a failure and
+// the two recovery buttons. The verbose component narration is gone; the
+// capsule already says what the launcher is doing.
 func (s *Shell) managedActionNote(c *ui.Context, presentation state.Presentation) {
 	p := s.Model.Managed
+	waiting := s.Model.Login.Phase == state.LoginWaiting
+	preparing := p.Phase == state.ManagedPreparing || p.Phase == state.ManagedLocating
+	if p.Error == "" && !waiting && !preparing {
+		return
+	}
 	bottom := homeBottom + homeDockHeight + 14
 	if presentation.Progress {
 		bottom += deckHeight + deckGap
 	}
 	ui.Column(c.Key("managed-status")).Absolute().Right(dockRight).Bottom(bottom).Width(actionWidth).Gap(6).Children(func() {
-		text := p.Message
-		color := muted
-		if p.Phase == state.ManagedPreparing {
-			text = managedBytes(p)
-		}
 		if p.Error != "" {
-			text = p.Error
-			color = warning
+			ui.Text(c, p.Error).FontSize(12).TextColor(warning).LineHeight(1.5)
 		}
-		if text != "" {
-			ui.Text(c, text).FontSize(12).TextColor(color).LineHeight(1.5)
-		}
-		if s.Model.Login.Phase == state.LoginWaiting {
+		if waiting {
 			s.quietButton(c, "login-reopen", "打开登录窗口", false).Height(28).AlignSelf(ui.End).OnClick(func() {
 				s.Dispatch(state.Event{Kind: state.LoginReopen})
 			})
 		}
-		if p.Phase == state.ManagedPreparing || p.Phase == state.ManagedLocating {
+		if preparing {
 			s.quietButton(c, "managed-cancel", "取消准备", false).Height(28).AlignSelf(ui.End).OnClick(func() {
 				s.Dispatch(state.Event{Kind: state.ManagedCancel})
 			})

@@ -2,7 +2,9 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -142,6 +144,73 @@ internal static class Tests
     } finally {w.Close();OverlayTests.Pump();}
    }
   });
+  Check("welcome banner is exclusive to the greeting screen", () => {
+   Model welcome=Welcome();
+   using MemoryStream wire=new();Protocol.Write(wire,new Envelope(Type:"model",Model:welcome));wire.Position=0;
+   Model back=Protocol.Read(wire)!.Model!;
+   Require(back.Screen=="welcome"&&back.Banner=="夜航星，欢迎登录","welcome banner round trip");
+   Require(back.GameProcessId==42&&back.GameCreationTime=="133000000000000000","welcome keeps bound identity");
+   foreach(Model invalid in new[]{welcome with{Banner=""},welcome with{Banner=new string('x',257)},Phone() with{Banner="夜航星，欢迎登录"},Accounts() with{Banner="x"},Notice() with{Banner="x"}}) {
+    bool rejected=false;try{using MemoryStream bad=new();Protocol.Write(bad,new Envelope(Type:"model",Model:invalid));}catch(InvalidDataException){rejected=true;}
+    Require(rejected,"banner only on welcome");
+   }
+  });
+  Check("welcome banner is a top centered pill with an accessible label", () => {
+   LoginWindow w=new(_=>{});w.EnterBanner(Welcome(),false,true);
+   Border card=Find<Border>(w,"banner_card");TextBlock text=Find<TextBlock>(w,"banner");
+   Require(text.Text=="夜航星，欢迎登录","banner text");
+   Require(AutomationProperties.GetName(text)=="夜航星，欢迎登录","banner accessible name");
+   Require(card.HorizontalAlignment==HorizontalAlignment.Center&&card.VerticalAlignment==VerticalAlignment.Top,"banner anchored to top center");
+   foreach((int width,int height) in new[]{(1280,720),(600,900),(360,240)}) {
+    Layout(w,width,height);
+    Rect bounds=card.TransformToAncestor((FrameworkElement)w.Content).TransformBounds(new Rect(0,0,card.ActualWidth,card.ActualHeight));
+    Require(Math.Abs(bounds.X+bounds.Width/2-width/2.0)<.6,"banner horizontally centered");
+    Require(Math.Abs(bounds.Y-48)<.6,"banner keeps the top inset");
+   }
+   Require(!w.ShowInTaskbar&&!w.Topmost&&!w.ShowActivated,"banner never activates");
+   System.Windows.Shapes.Path mark=Find<System.Windows.Shapes.Path>(w,"banner_mark");
+   Rect markBounds=mark.TransformToAncestor((FrameworkElement)w.Content).TransformBounds(new Rect(0,0,mark.ActualWidth,mark.ActualHeight));
+   Rect textBounds=text.TransformToAncestor((FrameworkElement)w.Content).TransformBounds(new Rect(0,0,text.ActualWidth,text.ActualHeight));
+   Require(mark.ActualWidth>15&&mark.ActualHeight>15,"banner mark is drawn");
+   Require(markBounds.Right<=textBounds.Left-1,"banner mark precedes the text");
+   Require(((SolidColorBrush)mark.Fill).Color==((SolidColorBrush)text.Foreground).Color,"banner mark stays monochrome with the text");
+   LoginWindow narrow=new(_=>{});narrow.EnterBanner(Welcome() with{Banner=new string('长',60)},false,true);
+   Layout(narrow,1280,720);Layout(narrow,360,240);Layout(narrow,360,240);
+   Border longCard=Find<Border>(narrow,"banner_card");
+   Rect longBounds=longCard.TransformToAncestor((FrameworkElement)narrow.Content).TransformBounds(new Rect(0,0,longCard.ActualWidth,longCard.ActualHeight));
+   Require(longBounds.Width<=360.1,"banner text trims inside a narrow client");
+   Layout(w,1280,720);Save(w,output,"welcome.png",1280,720);
+  });
+  Check("welcome banner ignores the mouse and the taskbar", () => {
+   LoginWindow w=new(_=>{});w.EnterBanner(Welcome(),false,true);Layout(w);
+   nint hwnd=new System.Windows.Interop.WindowInteropHelper(w).EnsureHandle();
+   long ex=GetWindowLongPtr(hwnd,-20).ToInt64();
+   Require((ex&0x20)!=0,"banner is click through");
+   Require((ex&0x08000000)!=0,"banner never activates on click");
+   Require((ex&0x80)!=0,"banner stays out of the taskbar");
+  });
+  Check("welcome banner keeps an opaque fallback without transparency", () => {
+   foreach((bool highContrast,bool transparencyEnabled,byte alpha) in new[]{(false,true,(byte)235),(true,true,(byte)255),(false,false,(byte)255)}) {
+    LoginWindow w=new(_=>{});w.EnterBanner(Welcome(),highContrast,transparencyEnabled);
+    Color color=((SolidColorBrush)Find<Border>(w,"banner_card").Background).Color;
+    Require(color.A==alpha,$"banner alpha when highContrast={highContrast}, transparencyEnabled={transparencyEnabled}");
+    if(highContrast) Require(((SolidColorBrush)Find<System.Windows.Shapes.Path>(w,"banner_mark").Fill).Color==SystemColors.WindowTextColor,"banner mark follows high contrast");
+   }
+  });
+  Check("welcome banner closes a window that never reached the screen", () => {
+   LoginWindow w=new(_=>{});w.EnterBanner(Welcome(),false,true);
+   bool closed=false;w.Closed+=(_,_)=>closed=true;
+   w.Close();
+   Require(closed,"unshown banner window closes without an exception");
+  });
+  Check("welcome banner fades away and closes itself", () => {
+   List<UiEvent> sent=[];LoginWindow w=new(sent.Add);w.EnterBanner(Welcome(),false,true);
+   w.Left=-4000;w.Top=-4000;bool closed=false;w.Closed+=(_,_)=>closed=true;
+   w.Show();OverlayTests.Pump();Require(w.IsVisible,"banner visible");
+   DateTime deadline=DateTime.UtcNow.AddSeconds(6);
+   while(!closed&&DateTime.UtcNow<deadline){OverlayTests.Pump();Thread.Sleep(20);}
+   Require(closed,"banner closed after its hold");
+  });
   Check("saved account rename delete and login stay presentation only", () => {
    List<UiEvent> sent=[];LoginWindow w=new(sent.Add);Model accounts=Accounts();w.Apply(accounts);Layout(w);
    Require(sent.Count==0,"snapshot is not an action");
@@ -187,12 +256,16 @@ internal static class Tests
   foreach(string line in results)Console.WriteLine(line);
   return failures==0?0:1;
  }
- private static void Check(string name,Action body){try{body();results.Add("PASS "+name);}catch(Exception e){failures++;results.Add("FAIL "+name+": "+e.GetType().Name+" "+e.Message);}}
+ private static void Check(string name,Action body){try{body();results.Add("PASS "+name);}catch(Exception e){failures++;results.Add("FAIL "+name+": "+Describe(e));}}
+ private static string Describe(Exception e){StringBuilder text=new();for(Exception? x=e;x!=null;x=x.InnerException)text.Append(text.Length==0?"":" | ").Append(x.GetType().Name).Append(' ').Append(x.Message);return text.ToString();}
  private static void Require(bool condition,string name){if(!condition)throw new InvalidOperationException(name);}
  private static Model Phone()=>new(){Screen="phone",Title="手机号登录",Subtitle="合成离线测试",CanSendSms=true,Remember=true};
  private static Model Accounts()=>new(){Screen="accounts",Title="选择保存的账号",Subtitle="合成离线测试",Accounts=[new("fixture-a","合成账号 A","138****0000"),new("fixture-b","合成账号 B","139****0000")],SelectedAccountId="fixture-a"};
  private static Model Notice()=>new(){Screen="notice",Title="登录前请阅读",Subtitle="合成离线测试",PrimaryLabel="我已了解并同意继续",Notice=Enumerable.Range(1,8).Select(i=>new Section("主题 "+i,"合成告知文字：用途、风险、共享、数据、存储、网络、保留与选择均由 Go 后端提供。这里不保存任何确认状态。")).ToArray()};
- private static void Layout(LoginWindow w){Require(w.Content is FrameworkElement,"window content exists");FrameworkElement content=(FrameworkElement)w.Content;content.Measure(new Size(420,520));content.Arrange(new Rect(0,0,420,520));content.UpdateLayout();}
+ private static Model Welcome()=>new(){Screen="welcome",Banner="夜航星，欢迎登录",GameProcessId=42,GameCreationTime="133000000000000000"};
+ private static void Layout(LoginWindow w,int width=420,int height=520){Require(w.Content is FrameworkElement,"window content exists");FrameworkElement content=(FrameworkElement)w.Content;content.Measure(new Size(width,height));content.Arrange(new Rect(0,0,width,height));content.UpdateLayout();}
+ [DllImport("user32.dll",EntryPoint="GetWindowLongPtrW")]
+ private static extern nint GetWindowLongPtr(nint hwnd,int index);
  private static IEnumerable<DependencyObject> Descendants(DependencyObject root){yield return root;for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++)foreach(var x in Descendants(VisualTreeHelper.GetChild(root,i)))yield return x;}
  private static T Find<T>(LoginWindow w,string id)where T:DependencyObject=>Descendants((DependencyObject)w.Content).OfType<T>().First(x=>AutomationProperties.GetAutomationId(x)==id);
  private static void Click(LoginWindow w,string id)=>Find<Button>(w,id).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));

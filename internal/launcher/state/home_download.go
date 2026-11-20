@@ -34,7 +34,12 @@ func homeDownloadPrimary(m Model) (Presentation, EventKind, bool) {
 	case d.pausePending:
 		return status("正在暂停")
 	case d.AwaitingConfirmation && m.Overlay != OverlayInstallPath:
-		return action("查看下载方案", OpenHomeDownloads)
+		if d.SpaceShort {
+			out.Detail = DownloadNoteText("disk-short")
+			out.Task = false
+			return action("空间不足", DownloadRequest)
+		}
+		return status("准备开始下载")
 	case d.Phase == DownloadRunning && p.CanPause:
 		return action("暂停下载", DownloadPause)
 	case d.Phase == DownloadSuspended:
@@ -55,13 +60,17 @@ func homeDownloadPrimary(m Model) (Presentation, EventKind, bool) {
 	case d.Phase == DownloadVerifying:
 		return status("检查游戏文件")
 	case d.Phase == DownloadError || d.Phase == DownloadStale:
+		out.Task = false
 		if d.Kind == DownloadUpdate && (d.Located || d.Verified) {
 			if d.offerResultRoot != "" && SameManagedRoot(d.offerResultRoot, m.Managed.Root) && d.OfferVersion != "" && d.OfferVersion != d.Current {
 				return action("重试更新", DownloadRequest)
 			}
 			return Presentation{}, 0, false
 		}
-		return action("查看下载问题", OpenHomeDownloads)
+		if d.Kind == DownloadUpdate || d.Kind == DownloadInstall {
+			return action("重试下载", DownloadRequest)
+		}
+		return Presentation{}, 0, false
 	default:
 		return Presentation{}, 0, false
 	}

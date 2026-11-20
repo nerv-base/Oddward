@@ -264,6 +264,9 @@ func (p *Plan) deps(host Host, game Game) deps {
 		ui: func(ctx context.Context, model loginui.Model) (UI, error) {
 			return loginui.Start(ctx, uiConfig, model)
 		},
+		welcome: func(ctx context.Context, model loginui.Model) (UI, error) {
+			return loginui.Start(ctx, uiConfig, model)
+		},
 		loadConfig: func(ctx context.Context, key [16]byte) (laohu.Config, error) {
 			return loadBootConfig(ctx, p.cfg.Root, key)
 		},
@@ -295,6 +298,7 @@ type deps struct {
 	game       Game
 	accounts   Accounts
 	ui         func(ctx context.Context, model loginui.Model) (UI, error)
+	welcome    func(ctx context.Context, model loginui.Model) (UI, error)
 	loadConfig func(ctx context.Context, key [16]byte) (laohu.Config, error)
 	newClient  func(ctx context.Context, cfg laohu.Config, key laohu.AppKey, deviceID string) (*laohu.Client, error)
 	now        func() time.Time
@@ -365,6 +369,8 @@ func (s *Session) loop() {
 		select {
 		case <-s.ctx.Done():
 			s.closeUI()
+			// The banner is decoration; it must never outlive the session.
+			s.closeBanner()
 			// The login state belongs to this goroutine, so the HTTP client is
 			// released here rather than from Close on the caller's thread.
 			if s.st.client != nil {
@@ -459,11 +465,13 @@ func (s *Session) handleHost(event HostEvent) {
 }
 
 func (s *Session) loginRequested() {
-	if s.ui != nil {
-		return
-	}
+	// A delivered login already answers this request. The welcome banner may
+	// still be on screen, so check this before the window handle.
 	if s.st.delivered {
 		s.deps.host.CompleteLoginRequest()
+		return
+	}
+	if s.ui != nil {
 		return
 	}
 	// Every request is a new login attempt: never reuse an admission decision
@@ -473,9 +481,18 @@ func (s *Session) loginRequested() {
 	}
 	s.st.busy = s.st.setupErr != nil
 	s.st.status = setupMessage(s.st.setupErr)
-	if s.st.screen == "" {
+	if s.st.screen == "" || s.st.screen == "welcome" {
 		s.st.screen = "phone"
 	}
+	if s.st.autoLogin && s.st.setupErr == nil && s.st.client != nil {
+		// The launcher already selected this account; log it in without asking.
+		s.st.autoLogin = false
+		s.st.screen = "accounts"
+		s.st.selected = s.st.lastID
+		s.loginSaved(s.st.selected)
+		return
+	}
+	s.st.autoLogin = false
 	s.openUI()
 }
 
@@ -526,6 +543,7 @@ func (s *Session) replyQuery(query cnproto.Query) {
 
 func (s *Session) logout() {
 	s.closeUI()
+	s.closeBanner()
 	if s.st.admission != nil {
 		s.st.admission.Reset()
 	}
@@ -535,6 +553,12 @@ func (s *Session) logout() {
 	s.st.preLogin = nil
 	s.st.pendingQuery = nil
 	s.st.delivered = false
+	// An in-game logout is an explicit choice; the next request asks again.
+	s.st.autoLogin = false
+	s.st.welcome = ""
+	if s.st.screen == "welcome" {
+		s.st.screen = s.initialScreen()
+	}
 	s.st.busy = false
 	s.st.status = ""
 }

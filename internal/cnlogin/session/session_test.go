@@ -442,7 +442,8 @@ type testRig struct {
 	clock    *testClock
 	session  *Session
 
-	uiCreated chan *fakeUI
+	uiCreated     chan *fakeUI
+	bannerCreated chan *fakeUI
 }
 
 func newRig(t *testing.T, accountStore *fakeAccounts, preLogin string, configure ...func(*deps)) *testRig {
@@ -457,12 +458,13 @@ func newRig(t *testing.T, accountStore *fakeAccounts, preLogin string, configure
 	game := &fakeGame{identity: process.Identity{PID: 4321, CreationTime: 987654321}, wait: make(chan struct{})}
 	clock := &testClock{now: time.UnixMilli(1700000000000)}
 	rig := &testRig{
-		host:      host,
-		game:      game,
-		accounts:  accountStore,
-		service:   service,
-		clock:     clock,
-		uiCreated: make(chan *fakeUI, 4),
+		host:          host,
+		game:          game,
+		accounts:      accountStore,
+		service:       service,
+		clock:         clock,
+		uiCreated:     make(chan *fakeUI, 4),
+		bannerCreated: make(chan *fakeUI, 4),
 	}
 	d := deps{
 		host:     host,
@@ -471,6 +473,11 @@ func newRig(t *testing.T, accountStore *fakeAccounts, preLogin string, configure
 		ui: func(ctx context.Context, model loginui.Model) (UI, error) {
 			ui := newFakeUI(model)
 			rig.uiCreated <- ui
+			return ui, nil
+		},
+		welcome: func(ctx context.Context, model loginui.Model) (UI, error) {
+			ui := newFakeUI(model)
+			rig.bannerCreated <- ui
 			return ui, nil
 		},
 		loadConfig: func(ctx context.Context, key [16]byte) (laohu.Config, error) {
@@ -523,7 +530,13 @@ func (r *testRig) register(t *testing.T) {
 
 func (r *testRig) openLogin(t *testing.T) *fakeUI {
 	t.Helper()
-	r.host.events <- HostEvent{Kind: HostLoginRequested}
+	r.request(t)
+	return r.window(t)
+}
+
+// window waits for a login window the session opened without being asked to.
+func (r *testRig) window(t *testing.T) *fakeUI {
+	t.Helper()
 	select {
 	case ui := <-r.uiCreated:
 		return ui
@@ -531,6 +544,23 @@ func (r *testRig) openLogin(t *testing.T) *fakeUI {
 		t.Fatal("login window was not opened")
 		return nil
 	}
+}
+
+// banner waits for the welcome banner surface.
+func (r *testRig) banner(t *testing.T) *fakeUI {
+	t.Helper()
+	select {
+	case ui := <-r.bannerCreated:
+		return ui
+	case <-time.After(3 * time.Second):
+		t.Fatal("welcome banner was not opened")
+		return nil
+	}
+}
+
+func (r *testRig) request(t *testing.T) {
+	t.Helper()
+	r.host.events <- HostEvent{Kind: HostLoginRequested}
 }
 
 func (r *testRig) noLogin(t *testing.T) {

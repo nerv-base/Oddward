@@ -29,6 +29,7 @@ internal sealed record Model
  public bool Remember { get; init; }
  public bool CanBack { get; init; }
  public bool CanOfficial { get; init; }
+ public string Banner { get; init; } = "";
  public Section[] Notice { get; init; } = [];
  public Account[] Accounts { get; init; } = [];
  public string SelectedAccountId { get; init; } = "";
@@ -100,7 +101,11 @@ internal static class Protocol
   ulong.TryParse(value,System.Globalization.NumberStyles.None,System.Globalization.CultureInfo.InvariantCulture,out _);
  private static bool ValidIdentity(Model m)=>m.GameProcessId==0 ? m.GameCreationTime=="" : CanonicalPositive(m.GameCreationTime);
  private static bool ValidModel(Model m)=>
-  ValidIdentity(m)&&m.Screen is "notice" or "phone" or "accounts"&&Bound(m.Title,256)&&Bound(m.Subtitle,512)&&Bound(m.Status,4096)&&Bound(m.PrimaryLabel,128)&&Bound(m.SmsLabel,128)&&Bound(m.SelectedAccountId,64)&&
+  ValidIdentity(m)&&m.Screen is "notice" or "phone" or "accounts" or "welcome"&&Bound(m.Banner,256)&&
+  // The greeting is the only surface outside the window, so only a welcome
+  // snapshot may carry it and a welcome snapshot must carry it.
+  (m.Screen=="welcome"?m.Banner.Length>0:m.Banner.Length==0)&&
+  Bound(m.Title,256)&&Bound(m.Subtitle,512)&&Bound(m.Status,4096)&&Bound(m.PrimaryLabel,128)&&Bound(m.SmsLabel,128)&&Bound(m.SelectedAccountId,64)&&
   m.Accounts is {Length:<=16}&&m.Accounts.All(a=>a is not null&&a.Id!=""&&Bound(a.Id,64)&&Bound(a.Label,128)&&Bound(a.MaskedPhone,32))&&
   m.Notice is {Length:<=8}&&m.Notice.All(s=>s is not null&&Bound(s.Title,256)&&Bound(s.Body,4096));
 }

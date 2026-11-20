@@ -3,10 +3,15 @@ using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
+using System.Windows.Shapes;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Threading;
 using Nte.LoginHost.Presentation;
+using System.Runtime.InteropServices;
 
 namespace Oddward.LoginUi;
 
@@ -27,6 +32,21 @@ internal sealed class LoginWindow : Window
  private bool pending,applying,hasModel;
  private string focusedInput="";
  private FormState? destroyedForm;
+ private readonly TextBlock bannerText=new();
+ private readonly DispatcherTimer bannerTimer=new();
+ private bool bannerMode,bannerStarted,dismissed;
+ // Anomaly Eye from internal/branding/symbol.svg: the four closed subpaths,
+ // constant with the artwork, offset by the asset's own translate group.
+ private static readonly Geometry Mark=CreateMark();
+ private static Geometry CreateMark()
+ {
+  // Geometry.Parse returns a frozen path, so the asset's own translate group
+  // becomes a wrapper instead of a property write.
+  GeometryGroup mark=new(){Transform=new TranslateTransform(-121,-63)};
+  mark.Children.Add(Geometry.Parse("M 264 435 L 357 259 L 800 143 L 765 222 L 815 247 L 790 302 L 826 334 L 799 414 C 565 373 468 370 264 435 Z M 184 298 L 281 367 L 250 440 L 518 516 L 237 615 Z M 333 606 L 742 425 L 803 581 C 605 599 438 662 279 751 Z M 553 412 L 609 409 L 611 465 L 554 467 Z"));
+  mark.Freeze();
+  return mark;
+ }
  internal bool CloseRequested {get;private set;}
  internal bool InfrastructureLost {get;private set;}
  protected override void OnSourceInitialized(EventArgs e)
@@ -62,6 +82,7 @@ internal sealed class LoginWindow : Window
   InputMethod.SetIsInputMethodEnabled(phone,false);InputMethod.SetIsInputMethodEnabled(captcha,false);
   phone.GotKeyboardFocus+=(_,_)=>focusedInput="phone";captcha.GotKeyboardFocus+=(_,_)=>focusedInput="captcha";
   close.Click+=(_,_)=>Close();
+  bannerTimer.Tick+=(_,_)=>Dismiss();
 
   primary.Click+=(_,_)=>Primary();
   sms.Click+=(_,_)=>{if(model.Screen=="phone"&&model.CanSendSms)Send(new("send_sms",Phone:phone.Text));};
@@ -90,7 +111,13 @@ internal sealed class LoginWindow : Window
   if(focusedInput=="phone")FocusManager.SetFocusedElement(this,phone);
   else if(focusedInput=="captcha")FocusManager.SetFocusedElement(this,captcha);
  }
- internal void UseGameOverlay()=>UseGameOverlay(SystemParameters.HighContrast,TransparencyEnabled());
+ internal void UseGameOverlay()
+ {
+  // The greeting banner already owns the window surface. GameOverlay applies
+  // the overlay mode right after Apply, so it must not replace the banner.
+  if(bannerMode)return;
+  UseGameOverlay(SystemParameters.HighContrast,TransparencyEnabled());
+ }
  private static bool TransparencyEnabled()
  {
   try {
@@ -111,7 +138,9 @@ internal sealed class LoginWindow : Window
  }
  internal void Apply(Model value)
  {
-  Dispatcher.VerifyAccess();applying=true;
+  Dispatcher.VerifyAccess();
+  if(value.Screen=="welcome"){EnterBanner(value,SystemParameters.HighContrast,TransparencyEnabled());return;}
+  applying=true;
   try {
    // Same-screen countdown snapshots must not replace unsubmitted local input.
    if(!hasModel||model.Screen!=value.Screen){phone.Clear();captcha.Clear();remember.IsChecked=value.Remember;}
@@ -147,6 +176,76 @@ internal sealed class LoginWindow : Window
   } finally {applying=false;}
  }
  private bool CanAct=>!pending&&!model.Busy&&!applying;
+ internal void EnterBanner(Model value,bool highContrast,bool transparencyEnabled)
+ {
+  model=value;hasModel=true;bannerText.Text=value.Banner;
+  AutomationProperties.SetName(bannerText,value.Banner);
+  if(bannerMode)return;
+  bannerMode=true;
+  UseGameOverlay(highContrast,transparencyEnabled);
+  Color body=LoginVisuals.Brush(LoginVisuals.Body) is SolidColorBrush solid?solid.Color:Color.FromRgb(0xE3,0xE3,0xE3);
+  bannerText.Foreground=highContrast?SystemColors.WindowTextBrush:LoginVisuals.Brush(LoginVisuals.Text);
+  bannerText.FontFamily=LoginVisuals.Font;bannerText.FontSize=15;bannerText.FontWeight=FontWeights.SemiBold;
+  bannerText.TextWrapping=TextWrapping.NoWrap;bannerText.TextTrimming=TextTrimming.CharacterEllipsis;
+  AutomationProperties.SetAutomationId(bannerText,"banner");
+  // The mark is the project's own Anomaly Eye (symbol.svg) as closed-form
+  // geometry, so it takes the same monochrome foreground as the text and
+  // stays crisp at any DPI without decoding an image.
+  Path mark=new(){
+   Data=Mark,Stretch=Stretch.Uniform,Fill=bannerText.Foreground,Width=20,Height=20,
+   VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(0,0,9,0)};
+  AutomationProperties.SetAutomationId(mark,"banner_mark");AutomationProperties.SetName(mark,"Oddward");
+  Grid row=new();
+  row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});
+  row.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(1,GridUnitType.Star)});
+  Grid.SetColumn(mark,0);Grid.SetColumn(bannerText,1);
+  row.Children.Add(mark);row.Children.Add(bannerText);
+  Border pill=new(){
+   Tag="pill",Child=row,Padding=new Thickness(18,10,22,10),BorderThickness=new Thickness(1),
+   Background=new SolidColorBrush(Color.FromArgb(highContrast||!transparencyEnabled?(byte)255:(byte)235,body.R,body.G,body.B)),
+   BorderBrush=highContrast?SystemColors.WindowTextBrush:LoginVisuals.Brush(LoginVisuals.Bezel),
+   IsHitTestVisible=false,
+   HorizontalAlignment=HorizontalAlignment.Center,VerticalAlignment=VerticalAlignment.Top,Margin=new Thickness(0,48,0,0),
+   Effect=new DropShadowEffect{BlurRadius=18,ShadowDepth=3,Direction=270,Opacity=.35,Color=Colors.Black}};
+  AutomationProperties.SetAutomationId(pill,"banner_card");
+  Grid root=new(){Background=Brushes.Transparent};root.Children.Add(pill);Content=root;
+  // Keep a renamed account inside a narrow game client instead of growing
+  // past its edge; TextBlock trims with an ellipsis once the cap arrives.
+  root.SizeChanged+=(_,e)=>pill.MaxWidth=Math.Max(0,e.NewSize.Width-48);
+  SetBannerWindowStyles();
+  IsVisibleChanged+=(_,_)=>{if(IsVisible)BeginBanner();};
+ }
+ private const long WsExTransparent=0x00000020,WsExToolWindow=0x00000080,WsExNoActivate=0x08000000;
+ [DllImport("user32.dll",EntryPoint="GetWindowLongPtrW")]
+ private static extern nint GetWindowLongPtr(nint hwnd,int index);
+ [DllImport("user32.dll",EntryPoint="SetWindowLongPtrW",SetLastError=true)]
+ private static extern nint SetWindowLongPtr(nint hwnd,int index,nint value);
+ private void SetBannerWindowStyles()
+ {
+  // Decorating a game window must never take focus, appear on the taskbar,
+  // or intercept a click meant for the game.
+  nint hwnd=new WindowInteropHelper(this).EnsureHandle();
+  nint current=GetWindowLongPtr(hwnd,-20);
+  SetWindowLongPtr(hwnd,-20,(nint)(current.ToInt64()|WsExTransparent|WsExToolWindow|WsExNoActivate));
+ }
+ private void BeginBanner()
+ {
+  if(bannerStarted)return;bannerStarted=true;
+  if(!SystemParameters.ClientAreaAnimation){bannerTimer.Interval=TimeSpan.FromSeconds(2.4);bannerTimer.Start();return;}
+  DoubleAnimationUsingKeyFrames fade=new();
+  fade.KeyFrames.Add(new LinearDoubleKeyFrame(0,KeyTime.FromTimeSpan(TimeSpan.Zero)));
+  fade.KeyFrames.Add(new EasingDoubleKeyFrame(1,KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(220)),new CubicEase{EasingMode=EasingMode.EaseOut}));
+  fade.KeyFrames.Add(new LinearDoubleKeyFrame(1,KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(2620))));
+  fade.KeyFrames.Add(new EasingDoubleKeyFrame(0,KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(3000)),new CubicEase{EasingMode=EasingMode.EaseIn}));
+  BeginAnimation(OpacityProperty,fade);
+  bannerTimer.Interval=TimeSpan.FromMilliseconds(3050);bannerTimer.Start();
+ }
+ private void Dismiss()
+ {
+  if(dismissed)return;dismissed=true;
+  bannerTimer.Stop();
+  try{Close();}catch(InvalidOperationException){CloseRequested=true;}
+ }
  private Account? Selected()=>accounts.SelectedItem as Account;
  private void Primary()
  {

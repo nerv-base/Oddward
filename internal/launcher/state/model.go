@@ -317,14 +317,13 @@ type Model struct {
 	CloseToTray  bool
 	AccentFollow bool
 	// CheckUpdates asks the update service once at startup.
-	CheckUpdates      bool
-	Closed            bool
-	Download          DownloadState
-	HomeDownloadsOpen bool
-	Update            UpdateState
-	Network           NetworkState
-	Login             LoginState
-	HomeAccounts      HomeAccountsState
+	CheckUpdates bool
+	Closed       bool
+	Download     DownloadState
+	Update       UpdateState
+	Network      NetworkState
+	Login        LoginState
+	HomeAccounts HomeAccountsState
 
 	// The official announcement board.
 	News           NewsStatus
@@ -615,7 +614,6 @@ func Reduce(m Model, e Event) (Model, []Effect) {
 			}
 		}
 		m.NormalMode = false
-		m.HomeDownloadsOpen = false
 		m.Page = Home
 		m.Progress = 0
 		m.Error = ""

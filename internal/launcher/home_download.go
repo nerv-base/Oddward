@@ -9,46 +9,32 @@ import (
 	"github.com/nerv-base/Oddward/internal/launcher/state"
 )
 
+// homeDock is the whole download story on the home page: one capsule that
+// starts, updates or pauses the game, and — only while a preload exists — one
+// compact chip to its left. There is no permanent panel and no second button
+// that repeats what the capsule already says.
 func (s *Shell) homeDock(c *ui.Context, primary state.Presentation) {
 	m := s.Model
 	p := state.PresentDownload(m)
+	preload := state.PresentPreload(m)
 	dock := ui.Column(c.Key("home-dock")).Absolute().Right(dockRight).Bottom(homeBottom).
 		Width(homeDockWidth).AlignItems(ui.End)
+	if preload.Visible {
+		dock.Width(homeDockWidth + homePreloadChipWidth + homePreloadChipGap)
+	}
 	hover := dock.Hovered()
-	pinned := ui.Local(dock, "pinned", func() bool { return false })
-	dismissed := ui.Local(dock, "dismissed", func() bool { return false })
-	opener := ui.Local(dock, "details-opener", func() ui.Handle { return ui.Handle{} })
-	firstAction := ui.Local(dock, "details-first-action", func() ui.Handle { return ui.Handle{} })
-	if !hover {
-		*dismissed = false
-	}
-	canPeek := m.Overlay == state.NoOverlay && !m.HomeDownloadsOpen && !primary.LocateExisting &&
+	canPeek := m.Overlay == state.NoOverlay && !primary.LocateExisting &&
 		(primary.Task || m.Download.Phase != state.DownloadIdle && m.Download.Phase != state.DownloadDone || m.Download.Preload != state.PreloadStateUnavailable)
-	if !canPeek {
-		*pinned = false
-	}
-	showDetails := canPeek && (*pinned || hover && !*dismissed)
 	if m.HomeAccounts.Open && m.Overlay == state.NoOverlay && c.Shortcut(0, ui.KeyEscape) {
 		s.Dispatch(state.Event{Kind: state.HomeAccountsClose})
-	} else if showDetails && c.Shortcut(0, ui.KeyEscape) {
-		if *pinned {
-			opener.Focus()
-		}
-		*pinned, *dismissed, showDetails = false, true, false
-	} else if m.HomeDownloadsOpen && m.Overlay == state.NoOverlay && c.Shortcut(0, ui.KeyEscape) {
-		s.Dispatch(state.Event{Kind: state.CloseHomeDownloads})
-		*dismissed = true
 	}
 	dock.Children(func() {
-		if showDetails {
-			s.homeTransferSummary(c, p, firstAction)
+		if canPeek && hover {
+			s.homeTransferSummary(c, p)
 			ui.Box(c).Height(homeDownloadGap)
-		} else if p.OfferVersion != "" && primary.Primary == "更新游戏" && !m.HomeDownloadsOpen {
-			ui.Text(c, "可用正式版本 "+p.OfferVersion).FontSize(downloadCaptionSize).SingleLine().Padding(4, 10).
-				Margin(0, 0, homeDownloadGap, 0).Radius(homeDockPopupRadius).Material(frostedSurface{Tint: homeDockTint})
 		}
 		if m.HomeAccounts.Count > 0 && !primary.LocateExisting {
-			if m.HomeAccounts.Open && !showDetails {
+			if m.HomeAccounts.Open && !(canPeek && hover) {
 				s.homeAccountsPopup(c)
 				ui.Box(c).Height(homeDownloadGap)
 			}
@@ -61,42 +47,43 @@ func (s *Shell) homeDock(c *ui.Context, primary state.Presentation) {
 			s.homeAccountRow(c, current)
 			ui.Box(c).Height(homeDownloadGap + 4)
 		}
-		ui.Row(c.Key("home-dock-row")).Height(homeDockHeight).Radius(homeDockHeight / 2).Clip().
-			Material(frostedSurface{Tint: homeDockTint}).Children(func() {
-			if !primary.LocateExisting {
-				label, icon := "游戏下载与更新", "\uE896"
-				if canPeek {
-					label, icon = "查看下载详情", "\uE70E"
-					if *pinned {
-						label, icon = "收起下载详情", "\uE70D"
-					}
-				} else if m.HomeDownloadsOpen {
-					label, icon = "收起游戏下载与更新", "\uE70D"
-				}
-				s.homeDockIcon(c, "home-dock-details", label, icon, func() {
-					if canPeek {
-						*pinned, *dismissed = !*pinned, *pinned
-						if *pinned {
-							firstAction.Focus()
-						}
-						return
-					}
-					event := state.OpenHomeDownloads
-					if m.HomeDownloadsOpen {
-						event = state.CloseHomeDownloads
-						*dismissed = true
-					}
-					s.Dispatch(state.Event{Kind: event})
-				}).Expanded(showDetails || m.HomeDownloadsOpen).Bind(opener)
+		ui.Row(c.Key("home-dock-actions")).Height(homeDockHeight).AlignItems(ui.Center).
+			Gap(homePreloadChipGap).Children(func() {
+			if preload.Visible {
+				s.homePreloadChip(c, preload)
 			}
-			s.homeDockPrimary(c, primary, p)
-			s.homeDockIcon(c, "home-dock-game-settings", "游戏设置", "\uE713", func() {
-				s.Dispatch(state.Event{Kind: state.OpenOverlay, Overlay: state.GameSettings})
+			ui.Row(c.Key("home-dock-row")).Height(homeDockHeight).Radius(homeDockHeight / 2).Clip().
+				Material(frostedSurface{Tint: homeDockTint}).Children(func() {
+				s.homeDockPrimary(c, primary, p)
+				s.homeDockIcon(c, "home-dock-game-settings", "游戏设置", "\uE713", func() {
+					s.Dispatch(state.Event{Kind: state.OpenOverlay, Overlay: state.GameSettings})
+				})
 			})
 		})
 	})
-	if primary.LocateExisting && !m.HomeDownloadsOpen {
+	if primary.LocateExisting {
 		s.locateExistingAction(c)
+	}
+}
+
+// homePreloadChip is the only preload surface on the home page. It carries its
+// own percentage so a running preload never moves into the launch capsule.
+func (s *Shell) homePreloadChip(c *ui.Context, p state.PreloadPresentation) {
+	b := ui.ButtonBase(c.Key("home-preload")).Label(p.Label).Tooltip(p.Detail).
+		Size(homePreloadChipWidth, homeDockHeight).Padding(0, 10).Gap(6).
+		AlignItems(ui.Center).Justify(ui.Center).Radius(homeDockHeight/2).
+		Border(1, hairline).Background(homeDockTint).TextColor(paper).DimDisabled(true).
+		Disabled(!p.Enabled)
+	s.homeDockFeedback(b)
+	b.Children(func() {
+		glyph(c, "\uE896", 13)
+		ui.Text(c, p.Label).FontSize(downloadCaptionSize).FontWeight(600).SingleLine().PassThrough()
+		if p.ShowBar {
+			mono(c, fmt.Sprintf("%d%%", min(max(p.Percent, 0), 100)), 12).TextColor(s.tone())
+		}
+	})
+	if p.Enabled && p.Action != 0 {
+		b.OnClick(func() { s.Dispatch(state.Event{Kind: p.Action}) })
 	}
 }
 
@@ -196,7 +183,7 @@ func (s *Shell) homeDockPrimary(c *ui.Context, p state.Presentation, d state.Dow
 	} else {
 		b.Children(func() {
 			switch p.Primary {
-			case "下载游戏", "更新游戏":
+			case "下载游戏", "更新游戏", "重试下载":
 				glyph(c, "\uE896", 14)
 			case "启动游戏", "重试启动":
 				glyph(c, "\uE768", 14)
@@ -207,7 +194,9 @@ func (s *Shell) homeDockPrimary(c *ui.Context, p state.Presentation, d state.Dow
 	b.OnClick(func() { s.Dispatch(state.Event{Kind: state.Primary}) })
 }
 
-func (s *Shell) homeTransferSummary(c *ui.Context, p state.DownloadPresentation, firstAction *ui.Handle) {
+// homeTransferSummary answers the hover question "what is it doing right now".
+// Destructive actions stay here; everything else is already on the capsule.
+func (s *Shell) homeTransferSummary(c *ui.Context, p state.DownloadPresentation) {
 	ui.Column(c.Key("home-transfer-summary")).Role(ui.RoleGroup).Label("下载详情").FillWidth().
 		Padding(8, homeDockPopupInset, 4, homeDockPopupInset).Gap(4).Radius(homeDockPopupRadius).
 		Material(frostedSurface{Tint: homeDockTint}).Children(func() {
@@ -234,16 +223,11 @@ func (s *Shell) homeTransferSummary(c *ui.Context, p state.DownloadPresentation,
 		if p.NextAction != "" {
 			ui.Text(c, p.NextAction).FontSize(downloadCaptionSize).MaxLines(2).TextColor(muted)
 		}
-		ui.Row(c).FillWidth().Justify(ui.End).Gap(4).Children(func() {
-			if p.CanCancel {
+		if p.CanCancel {
+			ui.Row(c).FillWidth().Justify(ui.End).Children(func() {
 				s.quietButton(c, "home-download-cancel", "取消任务", false).Height(downloadButtonHeight).
-					Padding(0, 8).Radius(homeDockPopupRadius).Bind(firstAction).OnClick(s.confirmDownloadCancel)
-			}
-			more := s.quietButton(c, "home-download-more", "更多下载选项", false).Height(downloadButtonHeight).
-				Padding(0, 8).Radius(homeDockPopupRadius).OnClick(func() { s.Dispatch(state.Event{Kind: state.OpenHomeDownloads}) })
-			if !p.CanCancel {
-				more.Bind(firstAction)
-			}
-		})
+					Padding(0, 8).Radius(homeDockPopupRadius).OnClick(s.confirmDownloadCancel)
+			})
+		}
 	})
 }

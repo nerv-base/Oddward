@@ -13,16 +13,16 @@ func TestHomePrimaryPlansAnOfferedUpdate(t *testing.T) {
 		t.Fatalf("a confirmed game update must own the home action: %+v", p)
 	}
 	m, fx := Reduce(m, Event{Kind: Primary})
-	if len(fx) != 1 || fx[0].Kind != EffectDownloadPlan || !m.HomeDownloadsOpen {
-		t.Fatalf("update action must open planning with the real download backend: %+v", fx)
+	if len(fx) != 1 || fx[0].Kind != EffectDownloadPlan {
+		t.Fatalf("update action must plan with the real download backend: %+v", fx)
 	}
-	m, _ = Reduce(m, Event{Kind: DownloadPlanned, Token: m.Download.Request, Message: "2.0.0", Total: 8 << 20, Needed: 64 << 20, Free: 128 << 20})
-	if !PresentDownload(m).CanConfirm {
-		t.Fatal("a verified plan should be ready for confirmation")
+	m, fx = Reduce(m, Event{Kind: DownloadPlanned, Token: m.Download.Request, Message: "2.0.0", Total: 8 << 20, Needed: 64 << 20, Free: 128 << 20})
+	requireDownloadEffect(t, m, fx, EffectDownloadRun)
+	if PresentDownload(m).CanConfirm || m.Download.AwaitingConfirmation {
+		t.Fatal("a plan that fits must start without a confirmation step")
 	}
-	m, fx = Reduce(m, Event{Kind: DownloadConfirm})
-	if len(fx) != 1 || fx[0].Kind != EffectDownloadRun || m.HomeDownloadsOpen {
-		t.Fatalf("confirmed download must use the compact home status: %+v", fx)
+	if p := Present(m); p.Primary != "正在准备下载" {
+		t.Fatalf("the home capsule must show preparation at once: %+v", p)
 	}
 }
 
@@ -54,12 +54,13 @@ func TestHomeUpdatePlanFailureKeepsCorrectAction(t *testing.T) {
 
 func TestHomePreloadConfirmationKeepsControls(t *testing.T) {
 	m := plannedDownload(t, DownloadPreload)
-	m.HomeDownloadsOpen = true
-	m, fx := Reduce(m, Event{Kind: DownloadConfirm})
-	requireDownloadEffect(t, m, fx, EffectPreloadRun)
 	m, _ = Reduce(m, downloadEvent(m, PreloadStarted))
-	if !m.HomeDownloadsOpen || !PresentDownload(m).CanPause || Present(m).Primary != "启动游戏" {
+	if !PresentDownload(m).CanPause || Present(m).Primary != "启动游戏" {
 		t.Fatalf("starting a preload must keep its controls alongside the launch action: %+v", m.Download)
+	}
+	chip := PresentPreload(m)
+	if !chip.Visible || chip.Label != "预下载中" || chip.Action != DownloadPause || !chip.Enabled {
+		t.Fatalf("a running preload must surface as a pause chip: %+v", chip)
 	}
 }
 

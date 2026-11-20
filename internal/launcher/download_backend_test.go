@@ -63,7 +63,7 @@ func TestDownloadReportsPreserveReliableRouteAndResult(t *testing.T) {
 		return state.Event{Kind: state.DownloadPlanned, Message: "1.1", Total: 100, Reused: 200, FilesTotal: 3}
 	})
 	s.Dispatch(state.Event{Kind: state.DownloadRequest})
-	pumpDownloads(t, s, wake, func() bool { return s.Model.Download.AwaitingConfirmation })
+	pumpDownloads(t, s, wake, func() bool { return s.Model.Download.Version != "" })
 	if s.Model.Download.Route != state.RoutePatch || s.Model.Download.PatchBytes != 70 || s.Model.Download.Version != "1.1" {
 		t.Fatalf("reliable route or result dropped: %+v", s.Model.Download)
 	}

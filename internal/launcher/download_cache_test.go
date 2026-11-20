@@ -36,9 +36,16 @@ func cachePlanFixture(sourceShort bool) state.Model {
 }
 
 func TestDownloadCacheShortSourceVolumeHasExplicitBudgetLabel(t *testing.T) {
-	s := NewShell(cachePlanFixture(true))
+	m := cachePlanFixture(true)
+	s := NewShell(m)
 	defer s.Dispose()
-	tt := ui.NewTester(s.View, 1280, 720)
+	home := ui.NewTester(s.View, 1280, 720)
+	if _, ok := home.AccessByRole(ui.RoleButton, "空间不足"); !ok {
+		t.Fatalf("a short scratch volume must surface on the home capsule: %q", home.Texts())
+	}
+	s.Dispatch(state.Event{Kind: state.Navigate, Page: state.LauncherSettings})
+	s.selectSettingsSection(state.SettingsNetwork)
+	tt := ui.NewTester(s.View, 1280, 1600)
 	text := strings.Join(tt.Texts(), "\n")
 	for _, want := range []string{"下载暂存卷最低所需：81920.0 MB", "下载暂存卷可用空间：40960.0 MB", "跨卷安装：", "可用空间不足"} {
 		if !strings.Contains(text, want) {
@@ -51,7 +58,8 @@ func TestDownloadCacheShortSourceVolumeHasExplicitBudgetLabel(t *testing.T) {
 }
 
 func TestDownloadCachePickerValidatesBeforePlanningAndShowsCrossVolumeNotice(t *testing.T) {
-	s := NewShell(cacheFixture())
+	m := cacheFixture()
+	s := NewShell(m)
 	defer s.Dispose()
 	calls := make(chan DownloadRequest, 3)
 	wake := make(chan struct{}, 4)
@@ -75,10 +83,14 @@ func TestDownloadCachePickerValidatesBeforePlanningAndShowsCrossVolumeNotice(t *
 			return state.Event{Kind: state.DownloadCacheLocated, Path: r.CacheRoot}
 		case state.EffectDownloadPlan:
 			return state.Event{Kind: state.DownloadPlanned, Message: "2.0.0", Body: "cross-volume", Needed: 40 << 20, Free: 80 << 20, Total: 20 << 20}
+		case state.EffectDownloadRun:
+			return state.Event{Kind: state.DownloadStarted, Token: r.Effect.Token}
 		}
 		return state.Event{}
 	})
-	tt := ui.NewTester(s.View, 1280, 720)
+	s.Dispatch(state.Event{Kind: state.Navigate, Page: state.LauncherSettings})
+	s.selectSettingsSection(state.SettingsNetwork)
+	tt := ui.NewTester(s.View, 1280, 1600)
 	if _, ok := tt.AccessByRole(ui.RoleButton, "选择下载暂存目录"); !ok {
 		t.Fatal("fresh install has no optional scratch selector")
 	}
@@ -100,16 +112,19 @@ func TestDownloadCachePickerValidatesBeforePlanningAndShowsCrossVolumeNotice(t *
 	if r.Effect.Kind != state.EffectDownloadPlan || r.CacheRoot != `E:\SyntheticScratch` {
 		t.Fatalf("fresh plan lost validated scratch location: %+v", r)
 	}
-	pumpDownloads(t, s, wake, func() bool { return s.Model.Download.AwaitingConfirmation })
+	pumpDownloads(t, s, wake, func() bool {
+		phase := s.Model.Download.Phase
+		return phase == state.DownloadPreparing || phase == state.DownloadRunning
+	})
 	tt.Frame()
-	text := strings.Join(tt.Texts(), "\n")
-	for _, want := range []string{"下载暂存目录：", `E:\SyntheticScratch`, "跨卷安装：", "安装卷最低所需：40.0 MB", "安装卷可用空间：80.0 MB"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("missing scratch presentation %q", want)
-		}
+	if _, ok := tt.Find("确认并开始"); ok {
+		t.Fatal("cross-volume plan fell back to the retired panel")
 	}
-	if _, ok := tt.AccessByRole(ui.RoleButton, "确认并开始"); !ok {
-		t.Fatal("cross-volume plan skipped explicit confirmation")
+	if !s.Model.Download.AwaitingConfirmation {
+		t.Fatal("an install plan waits for the dialog that owns the path choice")
+	}
+	if got := s.Model.Download.CacheRoot; got != `E:\SyntheticScratch` {
+		t.Fatalf("plan dropped the validated scratch root: %q", got)
 	}
 }
 

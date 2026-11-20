@@ -7,6 +7,7 @@ package session
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/nerv-base/Oddward/internal/cnlogin/accounts"
 	"github.com/nerv-base/Oddward/internal/cnlogin/cnproto"
@@ -50,12 +51,22 @@ type loginState struct {
 	action context.CancelFunc
 
 	setupErr error
+
+	// autoLogin is armed once per registration when the launcher already knows
+	// which saved account to use. The first login request consumes it; every
+	// later request asks in the window again.
+	autoLogin bool
+	// welcome is the greeting rendered by the banner surface.
+	welcome string
+	// banner is the helper process that shows the welcome banner above the game.
+	banner UI
 }
 
 // registered decrypts the boot configuration and builds the login client once
 // the game registered its application key.
 func (s *Session) registered(event HostEvent) {
 	s.endAction()
+	s.closeBanner()
 	s.st.busy = false
 	if s.st.client != nil {
 		s.st.client.Close()
@@ -109,6 +120,9 @@ func (s *Session) registered(event HostEvent) {
 		s.st.ack = acked
 	}
 	s.reloadAccounts()
+	// The launcher's account row already picked the account; greet the game's
+	// first login request with it instead of asking the user to pick again.
+	s.st.autoLogin = s.st.ack && hasAccount(s.st.accounts, s.st.lastID)
 	if !s.st.ack {
 		s.st.screen = "notice"
 	} else if s.st.screen == "" {
@@ -174,6 +188,16 @@ func (s *Session) refreshSMS() {
 	if s.ui != nil && s.st.screen == "phone" && s.model().SMSLabel != s.st.shownSMSLabel {
 		s.applyModel()
 	}
+}
+
+// show puts the login state on screen. An automatic attempt that failed must
+// still land on a window the user can act on, so open it when it is closed.
+func (s *Session) show() {
+	if s.ui == nil {
+		s.openUI()
+		return
+	}
+	s.applyModel()
 }
 
 // handleUI applies one event from the authored login window.
@@ -281,6 +305,8 @@ func (s *Session) loginPhone(event loginui.Event) {
 	}
 	client := s.st.client
 	admission := s.st.admission
+	// The banner greets the account even when the user chose not to save it.
+	label, _ := laohu.MaskPhone(event.Phone)
 	s.st.phone = event.Phone
 	s.st.remember = event.Remember
 	s.st.busy = true
@@ -323,7 +349,7 @@ func (s *Session) loginPhone(event loginui.Event) {
 				_ = pending.Rollback()
 			}
 		}
-		return s.delivered(result, saved)
+		return s.delivered(result, saved, label)
 	})
 }
 
@@ -333,10 +359,17 @@ func (s *Session) loginSaved(id string) {
 	}
 	if s.st.client == nil {
 		s.st.status = "登录服务尚未就绪，请稍后重试。"
-		s.applyModel()
+		s.show()
 		return
 	}
 	s.st.selected = id
+	label := ""
+	for _, account := range s.st.accounts {
+		if account.ID == id {
+			label = account.Label
+			break
+		}
+	}
 	s.st.busy = true
 	s.st.status = ""
 	s.st.pendingQuery = nil
@@ -372,7 +405,7 @@ func (s *Session) loginSaved(id string) {
 					s.st.screen = "phone"
 					s.st.selected = ""
 				}
-				s.applyModel()
+				s.show()
 			}
 		}
 		if validation.Status != laohu.Validated && !tolerated {
@@ -384,7 +417,7 @@ func (s *Session) loginSaved(id string) {
 					s.st.screen = "phone"
 					s.st.selected = ""
 				}
-				s.applyModel()
+				s.show()
 			}
 		}
 		result, err := deliver(ctx, s.deps.host, admission, client, identity)
@@ -392,7 +425,7 @@ func (s *Session) loginSaved(id string) {
 			return s.failed(err)
 		}
 		_ = s.deps.accounts.SetLast(id)
-		return s.delivered(result, false)
+		return s.delivered(result, false, label)
 	})
 }
 
@@ -464,13 +497,14 @@ func (s *Session) failed(err error) func() {
 		s.st.busy = false
 		s.st.pendingQuery = nil
 		s.st.status = message(err)
-		s.applyModel()
+		s.show()
 	}
 }
 
 // delivered runs after the game acknowledged SendLogin and any account commit
 // finished. Close the login window now; the game need not ask a pre-login query.
-func (s *Session) delivered(result *laohu.PreLoginResult, saved bool) func() {
+// The banner then greets the account that just logged in.
+func (s *Session) delivered(result *laohu.PreLoginResult, saved bool, label string) func() {
 	return func() {
 		s.st.preLogin = result
 		s.st.delivered = true
@@ -486,8 +520,47 @@ func (s *Session) delivered(result *laohu.PreLoginResult, saved bool) func() {
 			s.st.status = "登录成功，正在进入游戏。"
 		}
 		s.reloadAccounts()
+		// No window was ever shown for an automatic login, so closeUI has
+		// nothing to release; finish the SDK request here instead.
+		hadWindow := s.ui != nil
 		s.closeUI()
+		if !hadWindow {
+			s.deps.host.CompleteLoginRequest()
+		}
+		s.st.screen = "welcome"
+		s.st.welcome = welcomeText(label)
+		s.greet()
 	}
+}
+
+// welcomeText is the banner copy: the account label plus a greeting, or a
+// plain greeting when the account has no label yet.
+func welcomeText(label string) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return "欢迎登录"
+	}
+	return label + "，欢迎登录"
+}
+
+// greet spawns the banner surface above the game. A banner that fails to start
+// must never undo a delivered login, so its error is dropped.
+func (s *Session) greet() {
+	s.closeBanner()
+	banner, err := s.deps.welcome(s.ctx, s.model())
+	if err != nil {
+		return
+	}
+	s.st.banner = banner
+}
+
+func (s *Session) closeBanner() {
+	if s.st.banner == nil {
+		return
+	}
+	banner := s.st.banner
+	s.st.banner = nil
+	_ = banner.Close()
 }
 
 func validationMessage(status laohu.ValidationStatus) (string, bool) {

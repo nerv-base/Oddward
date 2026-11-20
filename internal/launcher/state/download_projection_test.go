@@ -105,19 +105,18 @@ func TestDownloadProjectionActionsExplainFailureAndRecovery(t *testing.T) {
 		}
 	}
 	m := plannedDownload(t, DownloadUpdate)
-	p := PresentDownload(m)
-	if !p.CanConfirm {
-		t.Fatal("offer has no confirmation")
+	if p := PresentDownload(m); p.CanConfirm || !p.CanCancel || p.StageText == "" {
+		t.Fatalf("a started transfer must stay cancellable: %+v", p)
 	}
-	m.Download.SpaceShort = true
-	m.Download.Note = "disk-short"
-	p = PresentDownload(m)
-	if p.CanConfirm || p.NextAction == "" || !p.SpaceShort {
+	short := downloadModel()
+	short, _ = Reduce(short, Event{Kind: DownloadRequest})
+	short, _ = Reduce(short, Event{Kind: DownloadPlanned, Token: short.Download.Request, Message: "v2", Total: 8 << 20, Needed: 64 << 20, Free: 1 << 20, Enabled: true})
+	if p := PresentDownload(short); p.CanConfirm || p.NextAction == "" || !p.SpaceShort {
 		t.Fatal("space shortage not actionable")
 	}
 	m = downloadModel()
 	m.Download.Preload = PreloadStateApplicable
-	p = PresentDownload(m)
+	p := PresentDownload(m)
 	if !p.CanApply {
 		t.Fatal("reconciled preload cannot apply")
 	}

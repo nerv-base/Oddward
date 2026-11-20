@@ -104,7 +104,6 @@ func reduceManaged(m Model, e Event) (Model, []Effect, bool) {
 		p.Downloaded, p.Total = 0, 0
 		m.Progress = 0
 		m.Overlay = NoOverlay
-		m.HomeDownloadsOpen = false
 		// The user asked to start the game, so the daily check-in may run now
 		// (when its switch is on). It is one more effect: the launch path never
 		// waits on it and a failed launch does not cancel it.
@@ -118,7 +117,7 @@ func reduceManaged(m Model, e Event) (Model, []Effect, bool) {
 			return reduceDownload(m, Event{Kind: OpenInstallPath})
 		}
 		if pendingGameInstall(m.Download) {
-			return reduceDownload(m, Event{Kind: OpenHomeDownloads})
+			return reduceDownload(m, Event{Kind: DownloadRequest, Enabled: true})
 		}
 		if !p.RiskAccepted {
 			m.Overlay = LaunchNotice

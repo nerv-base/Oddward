@@ -297,11 +297,9 @@ func TestRenderMockStateFrames(t *testing.T) {
 		{"34-component-running", func(s *Shell, _ *ui.Tester) {
 			loaded(s)
 			s.Model.NormalMode, s.Model.Managed = true, normalFixture(state.ManagedRunning).Managed
-			s.Model.Managed.Message = "登录组件运行中；请在组件窗口完成登录。游戏状态尚未确认。"
 		}},
 		{"35-normal-download", func(s *Shell, _ *ui.Tester) {
 			s.Model = downloadFixture(state.DownloadRunning, state.StageNetwork)
-			s.Model.HomeDownloadsOpen = false
 			s.Model.Download.Downloaded, s.Model.Download.Total = 6<<30, 14<<30
 			s.Model.Download.Rate, s.Model.Download.ETA = 18<<20, 435
 			s.Model.HomeAccounts = state.HomeAccountsState{Count: 2, Current: "a", Accounts: [state.MaxHomeAccounts]state.SavedAccount{{ID: "a", Label: "138****0000"}, {ID: "b", Label: "夜航星"}}}
@@ -309,7 +307,6 @@ func TestRenderMockStateFrames(t *testing.T) {
 		}},
 		{"37-normal-running", func(s *Shell, _ *ui.Tester) {
 			s.Model = downloadFixture(state.DownloadIdle, state.StageIdle)
-			s.Model.HomeDownloadsOpen = false
 			s.Model.Flow = state.Running
 			s.Model.Download.GameRunning = true
 			s.Model.Download.GameSince = time.Now().Add(-95 * time.Second)
@@ -318,7 +315,6 @@ func TestRenderMockStateFrames(t *testing.T) {
 		}},
 		{"36-normal-accounts", func(s *Shell, _ *ui.Tester) {
 			s.Model = downloadFixture(state.DownloadIdle, state.StageIdle)
-			s.Model.HomeDownloadsOpen = false
 			s.Model.HomeAccounts = state.HomeAccountsState{Count: 2, Current: "b", Open: true, Accounts: [state.MaxHomeAccounts]state.SavedAccount{{ID: "a", Label: "138****0000"}, {ID: "b", Label: "夜航星"}}}
 			loaded(s)
 		}},

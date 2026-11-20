@@ -39,6 +39,7 @@ type Model struct {
 	Remember          bool      `json:"remember,omitempty"`
 	CanBack           bool      `json:"canBack,omitempty"`
 	CanOfficial       bool      `json:"canOfficial,omitempty"`
+	Banner            string    `json:"banner,omitempty"`
 	Notice            []Section `json:"notice,omitempty"`
 	Accounts          []Account `json:"accounts,omitempty"`
 	SelectedAccountID string    `json:"selectedAccountId,omitempty"`
@@ -183,10 +184,19 @@ func windowRequestID(s string) (uint64, bool) {
 }
 func bounded(s string, n int) bool { return len(s) <= n && utf8.ValidString(s) }
 func validateModel(m Model) error {
-	if m.Screen != "notice" && m.Screen != "phone" && m.Screen != "accounts" {
+	if m.Screen != "notice" && m.Screen != "phone" && m.Screen != "accounts" && m.Screen != "welcome" {
 		return ErrProtocol
 	}
 	if !bounded(m.Title, 256) || !bounded(m.Subtitle, 512) || !bounded(m.Status, 4096) || !bounded(m.PrimaryLabel, 128) || !bounded(m.SMSLabel, 128) || !bounded(m.SelectedAccountID, 64) || len(m.Accounts) > 16 || len(m.Notice) > 8 {
+		return ErrProtocol
+	}
+	// The welcome banner is the only screen that carries text outside the login
+	// window, so the field is exclusive to it and must never arrive empty.
+	if m.Screen == "welcome" {
+		if m.Banner == "" || !bounded(m.Banner, 256) {
+			return ErrProtocol
+		}
+	} else if m.Banner != "" {
 		return ErrProtocol
 	}
 	if m.GameProcessID != 0 || m.GameCreationTime != "" {
