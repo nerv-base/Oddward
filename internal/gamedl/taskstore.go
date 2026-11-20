@@ -28,7 +28,9 @@ const (
 	Domain = "downloads"
 	// ImportVersion is the importer revision recorded once a legacy scan has
 	// been reconciled into the database.
-	ImportVersion = 1
+	// ImportVersion 2 registers every task mirror and honours the deletions an
+	// older build made, so a database filled by the first importer runs once more.
+	ImportVersion = 2
 
 	taskRecordSchema = 2
 	maxTaskBytes     = 16 << 20
@@ -881,9 +883,10 @@ func (s *Store) delete(ctx context.Context, id string) error {
 }
 
 type legacyTask struct {
-	path string
-	data []byte
-	task Task
+	path    string
+	data    []byte
+	task    Task
+	modTime time.Time
 }
 
 // ImportLegacy reconciles legacy task mirrors into the database. RunImport skips
@@ -970,71 +973,152 @@ func (s *Store) importLegacy(ctx context.Context) (string, string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", "", classify("import tasks", "", err)
 	}
-	files, err := s.scanLegacy()
+	files, present, err := s.scanLegacy()
 	if err != nil {
 		return "", "", err
 	}
 	source := filepath.Join(s.dir, "tasks")
-	if len(files) == 0 {
+	if !present {
+		// A missing directory is a fresh state root (or one that moved away), not
+		// an instruction to drop the tasks the database already holds.
 		return source, "no legacy task files", nil
 	}
-	keys := make([]string, 0, len(files))
-	seen := map[string]bool{}
-	representative := files[0]
+	// The mirror is a rollback aid, so a file newer than its row was written by
+	// another build after a rollback and is imported. A file older than its row is
+	// this build's own failed mirror write: the row stays authoritative and the
+	// mirror is rewritten from it, so a task never moves backwards.
+	type rowState struct{ updatedAt time.Time }
+	stored := map[string]rowState{}
 	for _, file := range files {
-		if !seen[file.task.InstallKey] {
-			seen[file.task.InstallKey] = true
-			keys = append(keys, file.task.InstallKey)
+		row, err := s.load(ctx, file.task.ID)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
 		}
-		if file.task.UpdatedAt.After(representative.task.UpdatedAt) ||
-			(file.task.UpdatedAt.Equal(representative.task.UpdatedAt) && file.task.ID > representative.task.ID) {
-			representative = file
+		if err != nil {
+			return "", "", err
 		}
+		stored[file.task.ID] = rowState{updatedAt: row.UpdatedAt}
 	}
-	sort.Strings(keys)
-	// A task store is opened per installation, but the table is shared. Deleting
-	// only the install keys seen in this state root replaces the rows this store
-	// owns and leaves other installations' tasks alone.
+	type mirrorWrite struct {
+		path     string
+		document []byte
+	}
+	imported := make([]Task, 0, len(files))
+	mirrors := make([]database.MirrorFile, 0, len(files))
+	var rewrites []mirrorWrite
+	for _, file := range files {
+		if row, ok := stored[file.task.ID]; ok && file.modTime.Before(row.updatedAt) {
+			document, err := mirrorDocument(file.task)
+			if err != nil {
+				return "", "", err
+			}
+			rewrites = append(rewrites, mirrorWrite{path: file.path, document: document})
+			mirrors = append(mirrors, database.MirrorFile{Path: file.path, Digest: database.Digest(document)})
+			continue
+		}
+		imported = append(imported, file.task)
+		mirrors = append(mirrors, database.MirrorFile{Path: file.path, Digest: database.Digest(file.data)})
+	}
+	// A task this directory used to hold and whose file is gone was retired by the
+	// previous build, so its row goes too.
+	retired, err := s.retiredTasks(ctx, files)
+	if err != nil {
+		return "", "", err
+	}
+	// Rows are replaced one task at a time, never by installation: a row whose
+	// mirror lags behind it is newer than every file of its installation and has to
+	// survive the pass.
 	err = s.db.Tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
-		args := make([]any, len(keys))
-		for i, key := range keys {
-			args[i] = key
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM download_tasks WHERE install_key IN (`+placeholders+`)`, args...); err != nil {
-			return err
-		}
-		for _, file := range files {
-			if err := putTask(ctx, tx, file.task); err != nil {
+		for _, task := range imported {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM download_tasks WHERE id = ?`, task.ID); err != nil {
+				return err
+			}
+			if err := putTask(ctx, tx, task); err != nil {
 				return err
 			}
 		}
-		return s.db.RecordMirror(ctx, tx, Domain, representative.path, database.Digest(representative.data))
+		for _, id := range retired {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM download_tasks WHERE id = ?`, id); err != nil {
+				return err
+			}
+		}
+		if err := s.db.DropMirrorsUnder(ctx, tx, Domain, filepath.Join(s.dir, "tasks")); err != nil {
+			return err
+		}
+		return s.db.RecordMirrors(ctx, tx, Domain, mirrors)
 	})
 	if err != nil {
-		return representative.path, "", err
+		return source, "", err
 	}
-	return representative.path, fmt.Sprintf("%d tasks", len(files)), nil
+	// The rewritten mirrors trail the commit: their digests are already recorded,
+	// so a failure only repeats the rewrite on the next start.
+	for _, write := range rewrites {
+		if err := database.WriteMirror(write.path, write.document); err != nil {
+			return source, "", fmt.Errorf("%s: %w", write.path, err)
+		}
+	}
+	return source, fmt.Sprintf("%d tasks", len(imported)), nil
 }
 
-func (s *Store) scanLegacy() ([]legacyTask, error) {
-	dir, err := openDirectory(s.root, "tasks")
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+// retiredTasks lists the task IDs this directory's mirror records still name but
+// whose files are gone.
+func (s *Store) retiredTasks(ctx context.Context, files []legacyTask) ([]string, error) {
+	prefix := filepath.Join(s.dir, "tasks") + string(os.PathSeparator)
+	rows, err := s.db.Query(ctx,
+		`SELECT path FROM compat_mirrors WHERE domain = ? AND substr(path, 1, length(?)) = ?`, Domain, prefix, prefix)
 	if err != nil {
 		return nil, err
+	}
+	defer rows.Close()
+	live := map[string]bool{}
+	for _, file := range files {
+		live[file.task.ID] = true
+	}
+	retired := []string{}
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		id := strings.TrimSuffix(filepath.Base(path), ".json")
+		if !live[id] && validID(id) {
+			retired = append(retired, id)
+		}
+	}
+	return retired, rows.Err()
+}
+
+// mirrorDocument renders the legacy file of one task, so a mirror that lags its
+// row is rewritten from the row instead of imported.
+func mirrorDocument(task Task) ([]byte, error) {
+	raw, err := json.Marshal(task)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(taskRecord{Schema: taskRecordSchema, Task: raw, CRC: crc32.ChecksumIEEE(raw)})
+}
+
+// scanLegacy reads the task mirrors of this state root. present reports whether
+// the directory exists at all, which is how a fresh state root is told apart from
+// a directory the previous build emptied.
+func (s *Store) scanLegacy() (files []legacyTask, present bool, err error) {
+	dir, err := openDirectory(s.root, "tasks")
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
 	}
 	entries, err := dir.ReadDir(-1)
 	dir.Close()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if len(entries) > maxTasks {
-		return nil, failure(ErrRecoveryRequired, "too many tasks", "tasks", nil)
+		return nil, false, failure(ErrRecoveryRequired, "too many tasks", "tasks", nil)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-	files := make([]legacyTask, 0, len(entries))
+	files = make([]legacyTask, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -1042,19 +1126,23 @@ func (s *Store) scanLegacy() ([]legacyTask, error) {
 		id := strings.TrimSuffix(entry.Name(), ".json")
 		path := s.mirrorPath(id)
 		if !validID(id) {
-			return nil, fmt.Errorf("%s: %w", path, failure(ErrPathUnsafe, "task ID", id, nil))
+			return nil, false, fmt.Errorf("%s: %w", path, failure(ErrPathUnsafe, "task ID", id, nil))
+		}
+		info, err := s.root.Lstat("tasks/" + entry.Name())
+		if err != nil {
+			return nil, false, fmt.Errorf("%s: %w", path, err)
 		}
 		data, err := readBounded(s.root, "tasks/"+entry.Name(), maxTaskBytes)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
+			return nil, false, fmt.Errorf("%s: %w", path, err)
 		}
 		task, err := decodeTaskRecord(data, path)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
+			return nil, false, fmt.Errorf("%s: %w", path, err)
 		}
-		files = append(files, legacyTask{path: path, data: data, task: task})
+		files = append(files, legacyTask{path: path, data: data, task: task, modTime: info.ModTime()})
 	}
-	return files, nil
+	return files, true, nil
 }
 
 func decodeTaskRecord(data []byte, path string) (Task, error) {

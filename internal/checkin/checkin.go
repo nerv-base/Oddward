@@ -346,9 +346,8 @@ func (s *Store) importLegacy(ctx context.Context) (source, detail string, err er
 
 // change applies one ledger change as a unit. It holds the ledger lease for the
 // whole change, and the mirror file is replaced inside the transaction that
-// carries the rows, so a refused commit leaves the file ahead of the ledger
-// instead of leaving the ledger ahead of the file the next start would reconcile
-// backwards.
+// carries the rows. A refused commit puts the previous bytes back, so a change
+// the caller was told had failed is never imported again on the next start.
 func (s *Store) change(ctx context.Context, apply func(context.Context, *sql.Tx) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -361,6 +360,10 @@ func (s *Store) change(ctx context.Context, apply func(context.Context, *sql.Tx)
 	}
 	defer func() { _ = lease.Release() }()
 	path := filepath.Join(s.dir, fileName)
+	previous, hadPrevious, err := database.MirrorSnapshot(path)
+	if err != nil {
+		return err
+	}
 	err = s.db.Tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := apply(ctx, tx); err != nil {
 			return err
@@ -381,6 +384,9 @@ func (s *Store) change(ctx context.Context, apply func(context.Context, *sql.Tx)
 		return s.db.MirrorInTx(ctx, tx, domain, path, mirror)
 	})
 	if err != nil {
+		if restoreErr := database.RestoreMirror(path, previous, hadPrevious); restoreErr != nil {
+			return fmt.Errorf("%w (the check-in mirror could not be restored: %v)", err, restoreErr)
+		}
 		return err
 	}
 	return nil

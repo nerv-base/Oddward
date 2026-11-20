@@ -17,6 +17,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/nerv-base/Oddward/internal/database"
 )
@@ -26,14 +27,16 @@ import (
 // make it unverifiable.
 type legacyRecord struct {
 	record
-	raw []byte
+	raw     []byte
+	modTime time.Time
 }
 
 // legacyAttachment is one .tjd file beside its record.
 type legacyAttachment struct {
-	id     string
-	center string
-	raw    []byte
+	id      string
+	center  string
+	raw     []byte
+	modTime time.Time
 }
 
 // legacyState is the device state read from the three protected state files. A
@@ -67,10 +70,31 @@ func (s *Store) ImportLegacy(ctx context.Context) error {
 	// Publish the index before the staleness check. A file another build changed,
 	// added or deleted changes the digest, so RunImport re-runs the importer
 	// instead of trusting rows that no longer describe the files.
+	changed, err := s.mirrorChanged(ctx)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		// The files are exactly what this build published. A row written after
+		// them is this build's own write whose file publication failed, so the
+		// rows are the authority and the files are repaired from them. Importing
+		// there would undo the account the caller was told had not been saved.
+		ahead, err := s.rowsAreAhead(ctx)
+		if err != nil {
+			return err
+		}
+		if ahead {
+			if err := s.republishFromRows(ctx); err != nil {
+				return err
+			}
+		}
+	}
+	// Publish the index before the staleness check: a file another build edited,
+	// added or deleted changes it and makes RunImport re-run the importer.
 	if err := s.refreshMirrorIndex(); err != nil {
 		return err
 	}
-	_, err := s.db.RunImport(ctx, accountsDomain, legacyVersion, s.importLegacy)
+	_, err = s.db.RunImport(ctx, accountsDomain, legacyVersion, s.importLegacy)
 	return err
 }
 
@@ -93,26 +117,31 @@ func (s *Store) importLegacy(ctx context.Context) (string, string, error) {
 		return "legacy-files", "no legacy account files", err
 	}
 	err = s.writeTx(ctx, func(ctx context.Context, tx *sql.Tx) (mirrorChange, error) {
-		if len(records) > 0 {
-			// The files describe the whole account set, so they replace it.
-			if _, err := tx.ExecContext(ctx, `DELETE FROM accounts`); err != nil {
+		// The files describe the whole account set, so they replace it. An empty
+		// set is the previous build deleting the last account, which must delete
+		// the row too: resurrecting removed credentials would be a leak, not a
+		// rescue. A directory with no legacy files at all returned above.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM accounts`); err != nil {
+			return mirrorChange{}, fmt.Errorf("accounts: import: %w", err)
+		}
+		insertAccount := `INSERT INTO accounts(id, label, identity_key, saved_at, protection, record, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?)`
+		for _, r := range records {
+			// updated_at is the file's own age, not the import time: a row written
+			// later than its file means this build's failed publication, and the row
+			// then wins. Stamping the import time would make every import look newer
+			// than the files and hide the next genuine rollback edit.
+			if _, err := tx.ExecContext(ctx, insertAccount,
+				r.ID, r.Label, identityColumn(r.ID, r.identityKey),
+				database.Stamp(r.SavedAt), protectionKind, r.raw,
+				database.Stamp(r.modTime)); err != nil {
 				return mirrorChange{}, fmt.Errorf("accounts: import: %w", err)
 			}
-			insertAccount := `INSERT INTO accounts(id, label, identity_key, saved_at, protection, record, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?)`
-			for _, r := range records {
-				if _, err := tx.ExecContext(ctx, insertAccount,
-					r.ID, r.Label, identityColumn(r.ID, r.identityKey),
-					database.Stamp(r.SavedAt), protectionKind, r.raw,
-					database.Stamp(s.now())); err != nil {
-					return mirrorChange{}, fmt.Errorf("accounts: import: %w", err)
-				}
-			}
-			insertAttachment := `INSERT INTO account_tajiduo(account_id, center_uid, file, updated_at) VALUES(?, ?, ?, ?)`
-			for _, a := range attachments {
-				if _, err := tx.ExecContext(ctx, insertAttachment,
-					a.id, a.center, a.raw, database.Stamp(s.now())); err != nil {
-					return mirrorChange{}, fmt.Errorf("accounts: import: %w", err)
-				}
+		}
+		insertAttachment := `INSERT INTO account_tajiduo(account_id, center_uid, file, updated_at) VALUES(?, ?, ?, ?)`
+		for _, a := range attachments {
+			if _, err := tx.ExecContext(ctx, insertAttachment,
+				a.id, a.center, a.raw, database.Stamp(a.modTime)); err != nil {
+				return mirrorChange{}, fmt.Errorf("accounts: import: %w", err)
 			}
 		}
 		if err := s.replaceState(ctx, tx, state); err != nil {
@@ -193,6 +222,12 @@ func (s *Store) readLegacyAccounts() ([]legacyRecord, []legacyAttachment, error)
 	sort.Strings(recordNames)
 	sort.Strings(attachmentNames)
 
+	times := make(map[string]time.Time)
+	for _, e := range entries {
+		if info, err := e.Info(); err == nil {
+			times[e.Name()] = info.ModTime()
+		}
+	}
 	records := make([]legacyRecord, 0, len(recordNames))
 	ids := make(map[string]bool, len(recordNames))
 	identities := make(map[string]string, len(recordNames))
@@ -213,7 +248,7 @@ func (s *Store) readLegacyAccounts() ([]legacyRecord, []legacyAttachment, error)
 			identities[r.identityKey] = name
 		}
 		ids[id] = true
-		records = append(records, legacyRecord{record: r, raw: raw})
+		records = append(records, legacyRecord{record: r, raw: raw, modTime: times[name]})
 	}
 	attachments := make([]legacyAttachment, 0, len(attachmentNames))
 	for _, name := range attachmentNames {
@@ -233,7 +268,7 @@ func (s *Store) readLegacyAccounts() ([]legacyRecord, []legacyAttachment, error)
 		if f, err := parseTajiduo(id, raw); err == nil {
 			center = f.CenterUID
 		}
-		attachments = append(attachments, legacyAttachment{id: id, center: center, raw: raw})
+		attachments = append(attachments, legacyAttachment{id: id, center: center, raw: raw, modTime: times[name]})
 	}
 	return records, attachments, nil
 }

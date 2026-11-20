@@ -25,7 +25,8 @@ const (
 	// PreloadDomain is this package's preload row in compat_mirrors.
 	PreloadDomain = "preload"
 	// PreloadImportVersion is the preload.json shape ImportLegacy understands.
-	PreloadImportVersion = 1
+	// PreloadImportVersion 2 registers every preload mirror for the same reason.
+	PreloadImportVersion = 2
 )
 
 const (
@@ -421,12 +422,12 @@ func (s PreloadStore) ImportLegacy(ctx context.Context) (string, string, error) 
 			tracked = mirror
 		}
 	}
-	digest := tracked.digest
 	type mirrorWrite struct {
 		path     string
 		document []byte
 	}
 	var rewrites []mirrorWrite
+	recorded := make([]database.MirrorFile, 0, len(mirrors))
 	if err := s.db.Tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		for _, mirror := range mirrors {
 			stored, found, err := readPreloadEntry(ctx, tx, s.StateRoot, mirror.record.Branch, mirror.record.Version)
@@ -443,10 +444,9 @@ func (s PreloadStore) ImportLegacy(ctx context.Context) (string, string, error) 
 				}
 				if database.Digest(document) != mirror.digest {
 					rewrites = append(rewrites, mirrorWrite{path: mirror.path, document: document})
-					if mirror.path == tracked.path {
-						digest = database.Digest(document)
-					}
+					mirror.digest = database.Digest(document)
 				}
+				recorded = append(recorded, database.MirrorFile{Path: mirror.path, Digest: mirror.digest})
 				continue
 			}
 			// The plan column stays NULL: the advisory payload of an older build is
@@ -454,8 +454,12 @@ func (s PreloadStore) ImportLegacy(ctx context.Context) (string, string, error) 
 			if err := putPreloadRecord(ctx, tx, s.StateRoot, mirror.record, nil); err != nil {
 				return fmt.Errorf("%s: %w", mirror.path, err)
 			}
+			recorded = append(recorded, database.MirrorFile{Path: mirror.path, Digest: mirror.digest})
 		}
-		return s.db.RecordMirror(ctx, tx, PreloadDomain, tracked.path, digest)
+		if err := s.db.DropMirrorsUnder(ctx, tx, PreloadDomain, filepath.Join(s.StateRoot, "preload")); err != nil {
+			return err
+		}
+		return s.db.RecordMirrors(ctx, tx, PreloadDomain, recorded)
 	}); err != nil {
 		return "", "", err
 	}

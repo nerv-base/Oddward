@@ -26,7 +26,9 @@ const (
 	InstallDomain = "install"
 	// InstallImportVersion is the install.json shape ImportLegacy understands. It
 	// changes when the importer learns a legacy document it did not migrate before.
-	InstallImportVersion = 1
+	// InstallImportVersion 2 registers every installation mirror, so a database
+	// filled by the first importer runs once more and learns the untracked files.
+	InstallImportVersion = 2
 )
 
 // installFileName is the legacy record kept per installation.
@@ -323,12 +325,12 @@ func (s *Store) ImportLegacy(ctx context.Context) (string, string, error) {
 			tracked = mirror
 		}
 	}
-	digest := tracked.digest
 	type mirrorWrite struct {
 		path     string
 		document []byte
 	}
 	var rewrites []mirrorWrite
+	recorded := make([]database.MirrorFile, 0, len(mirrors))
 	now := time.Now().UTC()
 	if err := s.db.Tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		for _, mirror := range mirrors {
@@ -346,17 +348,22 @@ func (s *Store) ImportLegacy(ctx context.Context) (string, string, error) {
 				}
 				if database.Digest(document) != mirror.digest {
 					rewrites = append(rewrites, mirrorWrite{path: mirror.path, document: document})
-					if mirror.path == tracked.path {
-						digest = database.Digest(document)
-					}
+					mirror.digest = database.Digest(document)
 				}
+				// Every installation keeps its own mirror; a rolled-back build can
+				// edit any of them, so all of them are tracked.
+				recorded = append(recorded, database.MirrorFile{Path: mirror.path, Digest: mirror.digest})
 				continue
 			}
 			if err := putInstallRecord(ctx, tx, mirror.record, now); err != nil {
 				return fmt.Errorf("%s: %w", mirror.path, err)
 			}
+			recorded = append(recorded, database.MirrorFile{Path: mirror.path, Digest: mirror.digest})
 		}
-		return s.db.RecordMirror(ctx, tx, InstallDomain, tracked.path, digest)
+		if err := s.db.DropMirrorsUnder(ctx, tx, InstallDomain, s.stateRoot); err != nil {
+			return err
+		}
+		return s.db.RecordMirrors(ctx, tx, InstallDomain, recorded)
 	}); err != nil {
 		return "", "", err
 	}

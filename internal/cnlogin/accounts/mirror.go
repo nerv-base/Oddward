@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/nerv-base/Oddward/internal/database"
 )
@@ -32,7 +33,7 @@ const (
 	// migration_state.
 	accountsDomain = "accounts"
 	// legacyVersion is the version of the on-disk layout the importer reads.
-	legacyVersion = 1
+	legacyVersion = 2
 
 	mirrorIndexName    = "mirrors.json"
 	mirrorIndexVersion = 1
@@ -215,4 +216,147 @@ func (s *Store) refreshMirrorIndex() error {
 		return fmt.Errorf("accounts: write mirror index: %w", err)
 	}
 	return nil
+}
+
+// mirrorChanged reports whether the legacy files differ from what this build last
+// published. The recorded digest covers the index file, which lists every mirror
+// file, so an edit, an addition and a deletion all change it.
+func (s *Store) mirrorChanged(ctx context.Context) (bool, error) {
+	mirrors, err := s.db.Mirrors(ctx, accountsDomain)
+	if err != nil {
+		return false, err
+	}
+	if len(mirrors) == 0 {
+		return true, nil
+	}
+	recorded := mirrors[0]
+	files, err := s.mirrorSnapshot()
+	if err != nil {
+		return false, err
+	}
+	index, err := mirrorIndexBytes(files)
+	if err != nil {
+		return false, err
+	}
+	return database.Digest(index) != recorded.Digest, nil
+}
+
+// rowsAreAhead reports whether the rows were written after the newest mirror
+// file. A committed write whose file publication failed leaves exactly that
+// state, and the rows then win: the alternative is importing the older file back
+// over the account the user just saved.
+func (s *Store) rowsAreAhead(ctx context.Context) (bool, error) {
+	var rows sql.NullInt64
+	// account_state is not consulted: this build does not republish the device
+	// state files from rows, so their age must not decide the rule.
+	for _, query := range []string{
+		`SELECT max(updated_at) FROM accounts`,
+		`SELECT max(updated_at) FROM account_tajiduo`,
+	} {
+		var stamp sql.NullInt64
+		if err := s.db.Reader().QueryRowContext(ctx, query).Scan(&stamp); err != nil {
+			return false, fmt.Errorf("accounts: read row age: %w", err)
+		}
+		if stamp.Int64 > rows.Int64 {
+			rows = stamp
+		}
+	}
+	if !rows.Valid {
+		return false, nil
+	}
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return false, fmt.Errorf("accounts: read legacy directory: %w", err)
+	}
+	var newest time.Time
+	for _, e := range entries {
+		if !isMirrorName(e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			return false, fmt.Errorf("accounts: inspect %s: %w", e.Name(), err)
+		}
+		if info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+	}
+	if newest.IsZero() {
+		// Nothing to reconcile: the directory holds no mirror file at all.
+		return false, nil
+	}
+	return rows.Int64 > newest.UnixNano(), nil
+}
+
+// republishFromRows rewrites the account and attachment mirrors from the rows and
+// records the new index. The device state files are left as they are: their rows
+// are written by the same path, and rewriting them needs the protector the rows
+// deliberately do not store.
+func (s *Store) republishFromRows(ctx context.Context) error {
+	files, err := s.mirrorSnapshot()
+	if err != nil {
+		return err
+	}
+	rows, err := s.db.Reader().QueryContext(ctx, `SELECT id, record FROM accounts`)
+	if err != nil {
+		return fmt.Errorf("accounts: read rows: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id string
+		var raw []byte
+		if err := rows.Scan(&id, &raw); err != nil {
+			return fmt.Errorf("accounts: read rows: %w", err)
+		}
+		files[id+recordExt] = raw
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("accounts: read rows: %w", err)
+	}
+	rows, err = s.db.Reader().QueryContext(ctx, `SELECT account_id, file FROM account_tajiduo`)
+	if err != nil {
+		return fmt.Errorf("accounts: read attachments: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id string
+		var raw []byte
+		if err := rows.Scan(&id, &raw); err != nil {
+			return fmt.Errorf("accounts: read attachments: %w", err)
+		}
+		files[id+tajiduoExt] = raw
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("accounts: read attachments: %w", err)
+	}
+	stored, err := s.mirrorSnapshot()
+	if err != nil {
+		return err
+	}
+	change := mirrorChange{write: map[string][]byte{}}
+	for name, data := range files {
+		if name == subjectFileName || name == lastFileName || name == noticeFileName {
+			continue
+		}
+		change.write[name] = data
+	}
+	for name := range stored {
+		if name == subjectFileName || name == lastFileName || name == noticeFileName {
+			continue
+		}
+		if _, ok := files[name]; !ok {
+			change.remove = append(change.remove, name)
+		}
+	}
+	sort.Strings(change.remove)
+	if err := s.publishMirrors(change, files); err != nil {
+		return err
+	}
+	index, err := mirrorIndexBytes(files)
+	if err != nil {
+		return err
+	}
+	return s.db.Tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		return s.db.RecordMirror(ctx, tx, accountsDomain, s.mirrorPath(mirrorIndexName), database.Digest(index))
+	})
 }

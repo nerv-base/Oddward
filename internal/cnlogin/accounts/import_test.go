@@ -40,6 +40,48 @@ func rowSnapshot(t *testing.T, s *Store) string {
 	return b.String()
 }
 
+// The previous build can delete the only saved account while leaving the device
+// state behind. The files are the whole account set, so an empty set means the
+// account is gone; keeping the row would resurrect credentials the user removed.
+func TestImportLegacyHonoursDeletingTheLastAccount(t *testing.T) {
+	p := newFakeProtector(t)
+	l := newLegacyDir(t, p)
+	id := strings.Repeat("a", 32)
+	l.account(id, "主号", time.Date(2026, 3, 4, 5, 6, 7, 8, time.UTC), sampleSecret(1))
+	l.last(id)
+	s := l.store()
+	if err := s.ImportLegacy(t.Context()); err != nil {
+		t.Fatalf("ImportLegacy: %v", err)
+	}
+	if list, _ := mustList(t, s); len(list) != 1 {
+		t.Fatalf("imported %d accounts, want 1", len(list))
+	}
+
+	if err := os.Remove(filepath.Join(l.dir, id+recordExt)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ImportLegacy(t.Context()); err != nil {
+		t.Fatalf("ImportLegacy after the delete: %v", err)
+	}
+	if list, corrupt := mustList(t, s); len(list) != 0 || corrupt != 0 {
+		t.Fatalf("accounts after deleting the only one: %v (corrupt %d)", list, corrupt)
+	}
+	attachments, err := s.db.Query(t.Context(), `SELECT count(*) FROM account_tajiduo`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer attachments.Close()
+	var kept int
+	if attachments.Next() {
+		if err := attachments.Scan(&kept); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if kept != 0 {
+		t.Fatalf("kept %d orphan attachments", kept)
+	}
+}
+
 func TestImportLegacyMigrationParity(t *testing.T) {
 	p := newFakeProtector(t)
 	l := newLegacyDir(t, p)
@@ -447,5 +489,57 @@ func TestIdentityKeyUniqueIndex(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "UNIQUE") {
 		t.Fatalf("constraint error = %v, want a UNIQUE violation", err)
+	}
+}
+
+// A write that committed and then failed to publish its file leaves the rows
+// newer than every mirror. Importing the older file back would undo the save the
+// caller was told had failed, so the rows win and the files are repaired.
+func TestImportLegacyRepairsMirrorsFromNewerRows(t *testing.T) {
+	l := newLegacyDir(t, newFakeProtector(t))
+	idA := strings.Repeat("a", 32)
+	l.account(idA, "A", time.Date(2026, 3, 4, 0, 0, 0, 0, time.UTC), sampleSecret(1))
+	s := l.store()
+	if err := s.ImportLegacy(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	// The account is renamed in the database and its file publication fails, so
+	// the row carries the new label and a newer timestamp than the file.
+	idB := strings.Repeat("b", 32)
+	l.account(idB, "B", time.Date(2026, 3, 5, 0, 0, 0, 0, time.UTC), sampleSecret(2))
+	document, err := os.ReadFile(filepath.Join(l.dir, idB+recordExt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The committed write never reached the disk: the file is gone.
+	if err := os.Remove(filepath.Join(l.dir, idB+recordExt)); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().UTC().Add(time.Hour)
+	if _, err := s.db.Exec(t.Context(),
+		`INSERT INTO accounts(id, label, identity_key, saved_at, protection, record, updated_at)
+		 VALUES(?, ?, ?, ?, ?, ?, ?)`,
+		idB, "B", keylessIdentity(idB), database.Stamp(later), protectionKind, document,
+		database.Stamp(later)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(l.dir, idB+recordExt)); err == nil {
+		t.Fatalf("the mirror should not exist before the repair: %v", err)
+	}
+
+	if err := s.ImportLegacy(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	list, corrupt, err := s.List()
+	if err != nil || corrupt != 0 || len(list) != 2 {
+		t.Fatalf("List = %+v corrupt=%d err=%v", list, corrupt, err)
+	}
+	if _, err := os.Stat(filepath.Join(l.dir, idB+recordExt)); err != nil {
+		t.Fatalf("the repair did not publish the file: %v", err)
+	}
+	if stale, err := s.db.MirrorStale(t.Context(), accountsDomain); err != nil || stale {
+		t.Fatalf("repair left the mirror stale: %v %v", stale, err)
 	}
 }

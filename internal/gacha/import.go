@@ -59,13 +59,13 @@ func (s *Store) ImportLegacy(ctx context.Context) error {
 // read without rewriting a file. One unreadable file fails the whole import, so
 // neither any file nor any row changes.
 func (s *Store) importArchives(ctx context.Context) (source, detail string, err error) {
-	files, err := s.scanArchives(ctx)
+	files, present, err := s.scanArchives(ctx)
 	if err != nil {
 		return s.dir, "", err
 	}
-	if len(files) == 0 {
-		// A missing or empty directory is a fresh profile, not an instruction to
-		// drop archives the database already holds.
+	if !present {
+		// A missing directory is a fresh profile (or a state root that was moved
+		// away), not an instruction to drop archives the database already holds.
 		return s.dir, "no legacy archives", nil
 	}
 	now := time.Now().UTC()
@@ -95,21 +95,21 @@ func (s *Store) importArchives(ctx context.Context) (source, detail string, err 
 // scanArchives reads every archive file. Non-archive entries are ignored like
 // the file store ignored them, but an archive-shaped file that cannot be decoded
 // fails the scan with an error naming that file.
-func (s *Store) scanArchives(ctx context.Context) ([]legacyArchive, error) {
+func (s *Store) scanArchives(ctx context.Context) ([]legacyArchive, bool, error) {
 	if err := checkLocalPath(ctx, s.dir, true); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	entries, err := os.ReadDir(s.dir)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	files := []legacyArchive{}
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		name := entry.Name()
 		if !strings.HasSuffix(name, ".json") || !entry.Type().IsRegular() {
@@ -122,11 +122,11 @@ func (s *Store) scanArchives(ctx context.Context) ([]legacyArchive, error) {
 		path := filepath.Join(s.dir, name)
 		archive, data, err := readArchiveFile(ctx, path, roleID)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
+			return nil, false, fmt.Errorf("%s: %w", path, err)
 		}
 		files = append(files, legacyArchive{roleID: roleID, path: path, archive: archive, data: data})
 	}
-	return files, ctx.Err()
+	return files, true, ctx.Err()
 }
 
 // mirrorsChanged reports whether a recorded archive mirror no longer matches its

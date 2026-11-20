@@ -192,8 +192,8 @@ func TestImportLegacyReconstructsEveryTaskField(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(source, "running-task.json") {
-		t.Fatalf("mirror source=%q, want the newest task mirror", source)
+	if source != filepath.Join(state, "tasks") {
+		t.Fatalf("mirror source=%q, want the task directory", source)
 	}
 	if detail != "3 tasks" {
 		t.Fatalf("import detail=%q", detail)
@@ -613,5 +613,106 @@ func TestThrottledProgressUnderReportsAndRecoverUsesBitmap(t *testing.T) {
 	mu.Unlock()
 	if first != 1 {
 		t.Fatalf("first chunk requested %d times after recovery, want 1", first)
+	}
+}
+
+// Every task mirror has to be registered, not just the newest one. A rolled-back
+// build can edit any of them, and a stale record the database never tracked is a
+// state change that would never be reconciled.
+func TestImportLegacyRegistersEveryTaskMirror(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	state := t.TempDir()
+	store, err := gamedl.NewStore(db, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	tasks := importFixtures(t)
+	for _, task := range tasks {
+		writeTaskMirror(t, state, task, false)
+	}
+	if _, _, err = store.ImportLegacy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mirrors, err := db.Mirrors(ctx, gamedl.Domain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mirrors) != len(tasks) {
+		t.Fatalf("registered %d of %d task mirrors", len(mirrors), len(tasks))
+	}
+
+	// The preload task is neither the newest nor the first document, so the
+	// importer used to leave its mirror untracked.
+	edited := tasks[1]
+	edited.Purpose = "older-build"
+	edited.UpdatedAt = edited.UpdatedAt.Add(time.Hour)
+	writeTaskMirror(t, state, edited, false)
+	if stale, err := db.MirrorStale(ctx, gamedl.Domain); err != nil || !stale {
+		t.Fatalf("edited untracked mirror reported stale=%v err=%v", stale, err)
+	}
+	if _, _, err = store.ImportLegacy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Load(ctx, edited.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compareTask(t, edited, got)
+}
+
+// The mirror is a rollback aid, so a file older than the committed row is this
+// build's own failed mirror write, not an edit from another build. Importing it
+// would move a task backwards.
+func TestImportLegacyKeepsRowsNewerThanTheirMirror(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	state := t.TempDir()
+	store, err := gamedl.NewStore(db, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	task := importFixtures(t)[0]
+	writeTaskMirror(t, state, task, false)
+	if _, _, err = store.ImportLegacy(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// A committed write whose mirror never landed: the row says staged and is
+	// newer, the file still says running and is older.
+	committed := task
+	committed.State = gamedl.StateStaged
+	committed.UpdatedAt = task.UpdatedAt.Add(2 * time.Hour)
+	if _, err = db.Exec(ctx,
+		`UPDATE download_tasks SET state = ?, updated_at = ? WHERE id = ?`,
+		int64(committed.State), committed.UpdatedAt.UnixNano(), task.ID); err != nil {
+		t.Fatal(err)
+	}
+	staleFile := task
+	staleFile.Purpose = "older-build"
+	writeTaskMirror(t, state, staleFile, false)
+	path := filepath.Join(state, "tasks", staleFile.ID+".json")
+	older := task.UpdatedAt.Add(-time.Hour)
+	if err = os.Chtimes(path, older, older); err != nil {
+		t.Fatal(err)
+	}
+	if stale, err := db.MirrorStale(ctx, gamedl.Domain); err != nil || !stale {
+		t.Fatalf("stale file reported stale=%v err=%v", stale, err)
+	}
+	if _, _, err = store.ImportLegacy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Load(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != gamedl.StateStaged || got.Purpose != task.Purpose {
+		t.Fatalf("import moved the task back to %v/%q", got.State, got.Purpose)
+	}
+	// The mirror now describes the row again, so the domain is no longer stale.
+	if stale, err := db.MirrorStale(ctx, gamedl.Domain); err != nil || stale {
+		t.Fatalf("mirror left stale=%v err=%v", stale, err)
 	}
 }

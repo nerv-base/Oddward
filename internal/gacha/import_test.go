@@ -262,6 +262,34 @@ func TestImportLegacyWithoutFilesKeepsArchives(t *testing.T) {
 	}
 }
 
+// Deleting the only archive in the previous build leaves an empty directory
+// behind. That is a real deletion, not a missing profile: keeping the row would
+// resurrect an archive the user removed.
+func TestImportLegacyHonoursDeletingTheLastArchive(t *testing.T) {
+	ctx := context.Background()
+	s, _, dir := newTestStore(t)
+	archive := fixtureArchive()
+	if err := s.Save(ctx, archive); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, archive.RoleID+".json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ImportLegacy(ctx); err != nil {
+		t.Fatalf("ImportLegacy: %v", err)
+	}
+	if _, err := s.Load(ctx, archive.RoleID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("archive survived its deletion: %v", err)
+	}
+	roles, err := s.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(roles) != 0 {
+		t.Fatalf("roles after deleting the only archive: %v", roles)
+	}
+}
+
 // stableDump returns every row that an idempotent import must not change,
 // excluding the bookkeeping timestamps and autoincrement identifiers.
 func stableDump(t *testing.T, db *database.DB) []string {

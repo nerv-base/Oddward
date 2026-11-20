@@ -4,6 +4,7 @@ package gameinstall
 import (
 	"context"
 	"crypto/md5"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -320,8 +321,17 @@ func TestInstallImportReconcilesChangedMirror(t *testing.T) {
 		t.Fatal(err)
 	}
 	mirrors, err := s.db.Mirrors(ctx, InstallDomain)
-	if err != nil || len(mirrors) != 1 || mirrors[0].Path != installMirrorPath(stateRoot, newer) {
-		t.Fatalf("tracked mirror: %+v %v", mirrors, err)
+	if err != nil || len(mirrors) != 2 {
+		t.Fatalf("tracked mirrors: %+v %v", mirrors, err)
+	}
+	tracked := false
+	for _, mirror := range mirrors {
+		if mirror.Path == installMirrorPath(stateRoot, newer) {
+			tracked = true
+		}
+	}
+	if !tracked {
+		t.Fatalf("newer installation is not tracked: %+v", mirrors)
 	}
 	// A rolled-back build rewrites the tracked mirror and exits.
 	path := installMirrorPath(stateRoot, newer)
@@ -375,8 +385,8 @@ func TestInstallImportCorruptMirrorLeavesRowsUntouched(t *testing.T) {
 		t.Fatalf("record before the corrupt import: %v", err)
 	}
 	mirrors, err := s.db.Mirrors(ctx, InstallDomain)
-	if err != nil || len(mirrors) != 1 {
-		t.Fatalf("tracked mirror: %+v %v", mirrors, err)
+	if err != nil || len(mirrors) != 2 {
+		t.Fatalf("tracked mirrors: %+v %v", mirrors, err)
 	}
 	path := mirrors[0].Path
 	if err := os.WriteFile(path, []byte(`{"schema": 2,`), 0600); err != nil {
@@ -699,5 +709,149 @@ func TestPreloadListReadsTheRowsNotTheMirrors(t *testing.T) {
 	}
 	if listed[0].UpdatedAt.Before(listed[1].UpdatedAt) {
 		t.Fatalf("List is not newest first: %v", listed)
+	}
+}
+
+// Every installation mirror has to be registered. Otherwise a rolled-back build
+// editing an installation that was not imported last is invisible to the staleness
+// check, and its edits never reach the database.
+func TestInstallImportRegistersEveryMirror(t *testing.T) {
+	ctx := context.Background()
+	stateRoot, older, newer := legacyInstallStateRoot(t)
+	s := newStore(t, dbtest.Open(t), stateRoot)
+	if _, _, err := s.ImportLegacy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mirrors, err := s.db.Mirrors(ctx, InstallDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mirrors) != 2 {
+		t.Fatalf("registered %d of 2 installation mirrors", len(mirrors))
+	}
+	if stale, err := s.db.MirrorStale(ctx, InstallDomain); err != nil || stale {
+		t.Fatalf("fresh mirrors reported stale=%v err=%v", stale, err)
+	}
+
+	// Edit the installation the importer did not track: the older one.
+	olderPath := installMirrorPath(stateRoot, older)
+	data, err := os.ReadFile(olderPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var changed InstallRecord
+	if err := json.Unmarshal(data, &changed); err != nil {
+		t.Fatal(err)
+	}
+	changed.Version = "0.9.1"
+	document, err := installJSON(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(olderPath, document, 0600); err != nil {
+		t.Fatal(err)
+	}
+	modified := time.Now().UTC().Add(2 * time.Minute)
+	if err := os.Chtimes(olderPath, modified, modified); err != nil {
+		t.Fatal(err)
+	}
+	if stale, err := s.db.MirrorStale(ctx, InstallDomain); err != nil || !stale {
+		t.Fatalf("edited untracked mirror reported stale=%v err=%v", stale, err)
+	}
+	ran, err := s.db.RunImport(ctx, InstallDomain, InstallImportVersion, s.ImportLegacy)
+	if err != nil || !ran {
+		t.Fatalf("reconcile: ran=%v err=%v", ran, err)
+	}
+	entry, found, err := readInstallEntry(ctx, s.db.Reader(), older)
+	if err != nil || !found {
+		t.Fatalf("record after reconcile: %v", err)
+	}
+	if entry.record.Version != "0.9.1" {
+		t.Fatalf("version = %q, want the edited mirror", entry.record.Version)
+	}
+	_ = newer
+}
+
+// The same freshness rule as installations: a preload mirror older than its
+// committed row is this build's own failed write, not another build's edit.
+func TestPreloadImportRegistersEveryMirror(t *testing.T) {
+	ctx := context.Background()
+	stateRoot := t.TempDir()
+	store, err := NewPreloadStore(dbtest.Open(t), stateRoot, stateRoot, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, record := legacyPreloadRecord(t)
+	first, second := record, record
+	first.Version = "1.3.0"
+	second.Version = "1.4.0"
+	firstPath := writePreloadMirror(t, stateRoot, first, time.Now().UTC())
+	writePreloadMirror(t, stateRoot, second, time.Now().UTC().Add(time.Minute))
+	if _, _, err = store.ImportLegacy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mirrors, err := store.db.Mirrors(ctx, PreloadDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mirrors) != 2 {
+		t.Fatalf("registered %d of 2 preload mirrors", len(mirrors))
+	}
+
+	edited := first
+	edited.TaskID = record.TaskID + "-edited"
+	writePreloadMirror(t, stateRoot, edited, time.Now().UTC().Add(3*time.Minute))
+	if stale, err := store.db.MirrorStale(ctx, PreloadDomain); err != nil || !stale {
+		t.Fatalf("edited untracked mirror reported stale=%v err=%v", stale, err)
+	}
+	if _, _, err = store.ImportLegacy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Load(ctx, edited.Branch, edited.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TaskID != edited.TaskID {
+		t.Fatalf("task id = %q, want %q", got.TaskID, edited.TaskID)
+	}
+	_ = firstPath
+}
+
+// A database filled by the first importer only registered one mirror per domain.
+// Raising the importer version has to re-run it even though no file changed, so
+// the untracked mirrors of an upgraded installation become visible.
+func TestInstallImportRerunsWhenTheRecordedImporterIsOlder(t *testing.T) {
+	ctx := context.Background()
+	stateRoot, _, _ := legacyInstallStateRoot(t)
+	s := newStore(t, dbtest.Open(t), stateRoot)
+	if _, _, err := s.ImportLegacy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Rewind to what the previous build recorded: one mirror and importer 1.
+	if err := s.db.Tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM compat_mirrors WHERE domain = ?`, InstallDomain); err != nil {
+			return err
+		}
+		return s.db.RecordMirror(ctx, tx, InstallDomain, installMirrorPath(stateRoot, "legacy"), "digest")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.SetMigrationState(ctx, InstallDomain, database.MigrationDone, "legacy", "", 1); err != nil {
+		t.Fatal(err)
+	}
+	ran, err := s.db.RunImport(ctx, InstallDomain, InstallImportVersion, s.ImportLegacy)
+	if err != nil || !ran {
+		t.Fatalf("re-run: ran=%v err=%v", ran, err)
+	}
+	mirrors, err := s.db.Mirrors(ctx, InstallDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mirrors) != 2 {
+		t.Fatalf("re-run registered %d of 2 mirrors", len(mirrors))
+	}
+	state, found, err := s.db.MigrationState(ctx, InstallDomain)
+	if err != nil || !found || state.Version != InstallImportVersion {
+		t.Fatalf("state = %+v found=%v err=%v", state, found, err)
 	}
 }

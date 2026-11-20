@@ -24,7 +24,9 @@ const Domain = "gacha"
 
 // ImportVersion is the importer generation recorded for Domain. Bump it when
 // the importer learns to read a legacy document it did not read before.
-const ImportVersion = 1
+// ImportVersion 2 honours the archive a rolled-back build deleted instead of
+// treating an empty directory as "keep everything".
+const ImportVersion = 2
 
 // Where an archive row first came from. It is bookkeeping for tracing a
 // migration; the archive itself is identical either way.
@@ -175,6 +177,10 @@ func (s *Store) Save(ctx context.Context, a Archive) error {
 		return err
 	}
 	now := time.Now().UTC()
+	previous, hadPrevious, err := database.MirrorSnapshot(name)
+	if err != nil {
+		return err
+	}
 	err = s.db.Tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := putArchive(ctx, tx, canonical, sourceSaved, now); err != nil {
 			return err
@@ -185,9 +191,9 @@ func (s *Store) Save(ctx context.Context, a Archive) error {
 		}
 		// The mirror is serialized from the stored archive, not from the input:
 		// records the database already held are part of the file a rollback build
-		// has to see. It is written before the commit so that a refused commit
-		// leaves the file ahead of the rows, which the next start imports, instead
-		// of leaving the rows ahead and reverting them on the next start.
+		// has to see. It is written inside the transaction; a refused commit puts
+		// the previous bytes back below, so a reported failure never reappears as
+		// an import on the next start.
 		mirror, err := ExportOddward(stored, now)
 		if err != nil {
 			return err
@@ -195,6 +201,9 @@ func (s *Store) Save(ctx context.Context, a Archive) error {
 		return s.db.MirrorInTx(ctx, tx, archiveDomain(canonical.RoleID), name, mirror)
 	})
 	if err != nil {
+		if restoreErr := database.RestoreMirror(name, previous, hadPrevious); restoreErr != nil {
+			return fmt.Errorf("%w (the gacha mirror could not be restored: %v)", err, restoreErr)
+		}
 		return err
 	}
 	return nil
