@@ -9,8 +9,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -81,15 +83,56 @@ func (db *DB) MirrorInTx(ctx context.Context, tx *sql.Tx, domain, path string, d
 // because a rejecting fn still leaves the mirror written.
 func (db *DB) MirrorThenCommit(ctx context.Context, domain, path string, data []byte, fn func(context.Context, *sql.Tx) error) error {
 	digest := Digest(data)
+	previous, hadPrevious, err := MirrorSnapshot(path)
+	if err != nil {
+		return fmt.Errorf("database: read %s mirror: %w", domain, err)
+	}
 	if err := WriteMirror(path, data); err != nil {
 		return fmt.Errorf("database: write %s mirror: %w", domain, err)
 	}
-	return db.Tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+	err = db.Tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := fn(ctx, tx); err != nil {
 			return err
 		}
 		return db.RecordMirror(ctx, tx, domain, path, digest)
 	})
+	if err != nil {
+		// The rows were not committed, so the file must not keep the rejected
+		// value: leaving it ahead would let the next start import a write the
+		// caller was told had failed. A restore that fails in turn leaves the
+		// file newer than the rows, which the importer resolves in favour of the
+		// file: the error says so.
+		if restoreErr := RestoreMirror(path, previous, hadPrevious); restoreErr != nil {
+			return fmt.Errorf("%w (the %s mirror could not be restored: %v)", err, domain, restoreErr)
+		}
+		return err
+	}
+	return nil
+}
+
+// MirrorSnapshot reads the bytes of a legacy file so a caller can put them back
+// when its transaction is rejected. A missing file is reported as absent.
+func MirrorSnapshot(path string) ([]byte, bool, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return data, true, nil
+}
+
+// RestoreMirror puts a snapshot back, or removes the file when the snapshot says
+// it did not exist before.
+func RestoreMirror(path string, data []byte, present bool) error {
+	if !present {
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	return WriteMirror(path, data)
 }
 
 // WriteMirror replaces the legacy file with data through a private temporary file
@@ -129,6 +172,47 @@ func WriteMirror(path string, data []byte) error {
 		return err
 	}
 	return protectFile(path)
+}
+
+// MirrorFile is one legacy file a domain publishes, with the digest of the bytes
+// it wrote.
+type MirrorFile struct {
+	Path   string
+	Digest string
+}
+
+// RecordMirrors records many files in one statement. A domain that owns a
+// directory calls it after DropMirrorsUnder so the records describe exactly the
+// files that exist.
+func (db *DB) RecordMirrors(ctx context.Context, tx *sql.Tx, domain string, files []MirrorFile) error {
+	if len(files) == 0 {
+		return nil
+	}
+	at := db.now().UnixNano()
+	values := strings.TrimSuffix(strings.Repeat("(?, ?, ?, ?),", len(files)), ",")
+	args := make([]any, 0, len(files)*4)
+	for _, file := range files {
+		args = append(args, domain, file.Path, file.Digest, at)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO compat_mirrors(domain, path, digest, mirrored_at) VALUES `+values+`
+		ON CONFLICT(domain, path) DO UPDATE SET digest = excluded.digest, mirrored_at = excluded.mirrored_at`,
+		args...); err != nil {
+		return fmt.Errorf("database: record %s mirrors: %w", domain, err)
+	}
+	return nil
+}
+
+// DropMirrorsUnder forgets every file a domain recorded beneath dir, so a file
+// the previous build deleted stops being reported as changed forever.
+func (db *DB) DropMirrorsUnder(ctx context.Context, tx *sql.Tx, domain, dir string) error {
+	prefix := dir + string(os.PathSeparator)
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM compat_mirrors WHERE domain = ? AND substr(path, 1, length(?)) = ?`,
+		domain, prefix, prefix); err != nil {
+		return fmt.Errorf("database: drop %s mirrors: %w", domain, err)
+	}
+	return nil
 }
 
 // MirrorStale reports whether any legacy file of domain was changed by another

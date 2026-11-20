@@ -93,10 +93,11 @@ func (db *DB) SetMigrationState(ctx context.Context, domain, status, source, det
 // migration record.
 type ImportFunc func(ctx context.Context) (source, detail string, err error)
 
-// RunImport runs a domain's legacy import when it has not completed yet, and again
-// whenever the domain's mirror file was changed by another build (the stub rolled
-// back to a version that does not know the database, and that version may have
-// accepted new data).
+// RunImport runs a domain's legacy import when it has not completed yet, when an
+// importer of a newer version is asking (a newer importer knows fields the older
+// one dropped), and again whenever the domain's mirror file was changed by another
+// build (the stub rolled back to a version that does not know the database, and
+// that version may have accepted new data).
 //
 // It reports whether fn ran. A failed import is recorded and returned; the caller
 // decides whether the domain can continue with the rows it already has.
@@ -109,7 +110,7 @@ func (db *DB) RunImport(ctx context.Context, domain string, version int, fn Impo
 	if err != nil {
 		return false, err
 	}
-	if found && state.Status == MigrationDone && !stale {
+	if found && state.Status == MigrationDone && state.Version >= version && !stale {
 		return false, nil
 	}
 	if err := db.SetMigrationState(ctx, domain, MigrationRunning, "", "", version); err != nil {

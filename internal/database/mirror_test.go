@@ -146,7 +146,7 @@ func TestMirrorStaleSeesEveryFileOfTheDomain(t *testing.T) {
 	}
 }
 
-func TestMirrorThenCommitLeavesFileAheadWhenTransactionFails(t *testing.T) {
+func TestMirrorThenCommitRestoresTheFileWhenTransactionFails(t *testing.T) {
 	db := dbtest.Open(t)
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "legacy.json")
@@ -156,15 +156,19 @@ func TestMirrorThenCommitLeavesFileAheadWhenTransactionFails(t *testing.T) {
 	}
 
 	// The second save writes the mirror, then its transaction is rejected. The
-	// file is ahead of the rows, which is exactly what a reconcile must see.
+	// previous bytes have to come back: a file left ahead would be imported on the
+	// next start and apply a write the caller was told had failed.
 	boom := errors.New("constraint")
 	second := []byte(`{"n":2}`)
 	err := db.MirrorThenCommit(ctx, "settings", path, second, func(context.Context, *sql.Tx) error { return boom })
 	if !errors.Is(err, boom) {
 		t.Fatalf("second commit: err = %v, want boom", err)
 	}
-	if stale, err := db.MirrorStale(ctx, "settings"); err != nil || !stale {
-		t.Fatalf("file ahead of rows: stale = %v, err = %v", stale, err)
+	if got, err := os.ReadFile(path); err != nil || string(got) != string(first) {
+		t.Fatalf("mirror after a refused commit = %q, err = %v", got, err)
+	}
+	if stale, err := db.MirrorStale(ctx, "settings"); err != nil || stale {
+		t.Fatalf("refused commit left the mirror stale: %v, err = %v", stale, err)
 	}
 }
 
@@ -296,5 +300,32 @@ func TestRunImportRecordsFailureAndRetries(t *testing.T) {
 	})
 	if err != nil || !ran || runs != 1 {
 		t.Fatalf("retry: ran = %v, runs = %d, err = %v", ran, runs, err)
+	}
+}
+
+// An importer that learned about a new field must run again even though its
+// mirror files did not change; otherwise the rows keep the older projection.
+func TestRunImportRerunsWhenTheImporterVersionAdvances(t *testing.T) {
+	db := dbtest.Open(t)
+	ctx := context.Background()
+	runs := 0
+	importOnce := func(context.Context) (string, string, error) {
+		runs++
+		return "legacy", "", nil
+	}
+	if ran, err := db.RunImport(ctx, "settings", 1, importOnce); err != nil || !ran {
+		t.Fatalf("first import: ran=%v err=%v", ran, err)
+	}
+	if ran, err := db.RunImport(ctx, "settings", 1, importOnce); err != nil || ran {
+		t.Fatalf("unchanged import: ran=%v err=%v", ran, err)
+	}
+	if ran, err := db.RunImport(ctx, "settings", 2, importOnce); err != nil || !ran {
+		t.Fatalf("newer importer: ran=%v err=%v", ran, err)
+	}
+	if runs != 2 {
+		t.Fatalf("importer ran %d times, want 2", runs)
+	}
+	if ran, err := db.RunImport(ctx, "settings", 2, importOnce); err != nil || ran {
+		t.Fatalf("settled importer: ran=%v err=%v", ran, err)
 	}
 }
