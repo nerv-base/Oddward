@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -33,9 +32,9 @@ var (
 	errLaunch    = errors.New("elevatedipc: elevated host launch failed")
 )
 
-// Start creates a private server and invokes this executable with runas and
-// Mode, pipe name, parent PID and raw creation FILETIME. Both endpoints verify
-// OS process identities before exchanging readiness bytes. ctx only controls
+// Start creates a private server and invokes this image with runas and Mode,
+// pipe name, parent PID and raw creation FILETIME. Both endpoints verify OS
+// process identities before exchanging readiness bytes. ctx only controls
 // setup; the returned connection must be closed by its owner. Closing it never
 // terminates a process. No application request is sent by this package.
 func Start(ctx context.Context) (io.ReadWriteCloser, error) {
@@ -59,10 +58,11 @@ func start(ctx context.Context, launch launchFunc, elevated bool) (io.ReadWriteC
 	if err != nil {
 		return nil, err
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return nil, errLaunch
-	}
+	// The host must be the image this process is running. os.Executable() keeps
+	// naming the path this process was created with, and a build that replaces
+	// the file renames the running image instead: that path then holds other code
+	// and the peer identity check would reject it.
+	exe := local.image
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		return nil, errTransport

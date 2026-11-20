@@ -25,6 +25,10 @@ func TestSyntheticChild(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		action := os.Args[i+1]
+		if action == "renamed-image" {
+			testRenamedImage(t, ctx)
+			return
+		}
 		c, err := accept(ctx, os.Args[i+2:], false)
 		if action == "reject" {
 			if c != nil {
@@ -56,6 +60,8 @@ func TestSyntheticChild(t *testing.T) {
 
 func syntheticLaunch(t *testing.T) launchFunc { return childLaunch(t, "duplex") }
 
+// childLaunch starts this test binary as the synthetic host. Failures are
+// reported through the test instead of Fatal: launch runs in its own goroutine.
 func childLaunch(t *testing.T, action string) launchFunc {
 	t.Helper()
 	return func(exe string, args []string) (windows.Handle, error) {
@@ -63,23 +69,13 @@ func childLaunch(t *testing.T, action string) launchFunc {
 			t.Error("unexpected host arguments")
 		}
 		argv := append([]string{exe, "-test.run=^TestSyntheticChild$", "--", "--elevatedipc-test-child", action}, args[1:]...)
-		quoted := make([]string, len(argv))
-		for i, arg := range argv {
-			quoted[i] = windows.EscapeArg(arg)
-		}
-		command, err := windows.UTF16FromString(strings.Join(quoted, " "))
+		process, err := spawnChild(exe, argv)
 		if err != nil {
 			return 0, err
 		}
-		startup := windows.StartupInfo{Cb: uint32(unsafe.Sizeof(windows.StartupInfo{}))}
-		var pi windows.ProcessInformation
-		if err := windows.CreateProcess(windows.StringToUTF16Ptr(exe), &command[0], nil, nil, false, windows.CREATE_NO_WINDOW, nil, nil, &startup, &pi); err != nil {
-			return 0, err
-		}
-		windows.CloseHandle(pi.Thread)
 		var observer windows.Handle
-		if err := windows.DuplicateHandle(windows.CurrentProcess(), pi.Process, windows.CurrentProcess(), &observer, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
-			windows.CloseHandle(pi.Process)
+		if err := windows.DuplicateHandle(windows.CurrentProcess(), process, windows.CurrentProcess(), &observer, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+			windows.CloseHandle(process)
 			return 0, err
 		}
 		t.Cleanup(func() {
@@ -94,6 +90,26 @@ func childLaunch(t *testing.T, action string) launchFunc {
 				t.Errorf("synthetic child exit: %d, %v", code, err)
 			}
 		})
-		return pi.Process, nil
+		return process, nil
 	}
+}
+
+// spawnChild runs exe with argv and returns the process handle, which the caller
+// owns.
+func spawnChild(exe string, argv []string) (windows.Handle, error) {
+	quoted := make([]string, len(argv))
+	for i, arg := range argv {
+		quoted[i] = windows.EscapeArg(arg)
+	}
+	command, err := windows.UTF16FromString(strings.Join(quoted, " "))
+	if err != nil {
+		return 0, err
+	}
+	startup := windows.StartupInfo{Cb: uint32(unsafe.Sizeof(windows.StartupInfo{}))}
+	var pi windows.ProcessInformation
+	if err := windows.CreateProcess(windows.StringToUTF16Ptr(exe), &command[0], nil, nil, false, windows.CREATE_NO_WINDOW, nil, nil, &startup, &pi); err != nil {
+		return 0, err
+	}
+	windows.CloseHandle(pi.Thread)
+	return pi.Process, nil
 }
