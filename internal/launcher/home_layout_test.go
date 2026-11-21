@@ -8,6 +8,7 @@ import (
 	"math"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 
@@ -72,6 +73,67 @@ func TestNativeUnlocatedHomeHasSeparateDownloadAndLocateActions(t *testing.T) {
 	}
 	if err := tt.Click(locateLabel); err != nil || s.Model.Overlay != state.LocateGame {
 		t.Fatalf("locate action: %v, overlay=%v", err, s.Model.Overlay)
+	}
+}
+
+// The media lane reveals over the bottom strip, which is exactly where the
+// first-run locate link hangs. Reaching for the link must not open the lane
+// under it, and once the lane is up the link must still own its pixels.
+func TestUnlocatedLocateActionOutranksMediaLane(t *testing.T) {
+	m := state.InitialNormal()
+	m.Managed.Phase = state.ManagedUnlocated
+	s := NewShell(m)
+	defer s.Dispose()
+	tt := ui.NewTester(s.View, 1024, 631)
+	locate, ok := tt.AccessByRole(ui.RoleButton, "定位游戏")
+	if !ok {
+		t.Fatal("unlocated home lost its locate action")
+	}
+	x := locate.Bounds.X + locate.Bounds.W/2
+	y := locate.Bounds.Y + locate.Bounds.H - 2
+	if y < 631-consoleHeight {
+		t.Fatalf("locate action no longer reaches into the media lane: %+v", locate.Bounds)
+	}
+	tt.Move(x, y)
+	tt.Frame()
+	if s.mediaBarShown() {
+		t.Fatalf("pointer on the locate action revealed the media lane: bar=%v", s.Model.Bar)
+	}
+	tt.Move(600, 629)
+	tt.Frame()
+	if !s.mediaBarShown() {
+		t.Fatal("pointer in the bottom strip did not reveal the media lane")
+	}
+	tt.Move(x, y)
+	tt.Frame()
+	if !s.mediaBarShown() {
+		t.Fatalf("the lane must keep its leave grace under the approaching pointer: bar=%v", s.Model.Bar)
+	}
+	tt.ClickAt(x, y)
+	if s.Model.Overlay != state.LocateGame {
+		t.Fatalf("the media lane swallowed the lower half of the locate action: overlay=%v", s.Model.Overlay)
+	}
+}
+
+// F6 is the keyboard path to the lane. A pointer resting on the locate link
+// suppresses the automatic reveal, so the explicit one must still hold.
+func TestUnlocatedLocateActionDoesNotBlockF6Reveal(t *testing.T) {
+	m := state.InitialNormal()
+	m.Managed.Phase = state.ManagedUnlocated
+	s := NewShell(m)
+	defer s.Dispose()
+	tt := ui.NewTester(s.View, 1024, 631)
+	locate, ok := tt.AccessByRole(ui.RoleButton, "定位游戏")
+	if !ok {
+		t.Fatal("unlocated home lost its locate action")
+	}
+	tt.Move(locate.Bounds.X+locate.Bounds.W/2, locate.Bounds.Y+locate.Bounds.H-2)
+	tt.Frame()
+	tt.Key(0, ui.KeyF6)
+	// Outlast the pointer-leave grace: focus, not the pointer, must hold it.
+	tt.Advance(700 * time.Millisecond)
+	if s.Model.Bar != state.MediaBarVisible {
+		t.Fatalf("F6 reveal collapsed under the locate pointer: bar=%v", s.Model.Bar)
 	}
 }
 

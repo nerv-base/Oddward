@@ -370,8 +370,7 @@ func (s *Shell) hero(c *ui.Context) {
 	}
 }
 
-func (s *Shell) action(c *ui.Context) {
-	p := state.Present(s.Model)
+func (s *Shell) action(c *ui.Context, p state.Presentation) {
 	s.homeStamina(c)
 	s.newsCard(c)
 	if s.Model.NormalMode {
@@ -389,9 +388,22 @@ func (s *Shell) action(c *ui.Context) {
 	s.footer(c)
 }
 
+// locateActionBounds is the first-run link's box: bottom-right, just under
+// the download capsule, and touching the strip the media lane reveals over.
+// updateMediaBar reads the same box so the lane never opens under the link.
+func locateActionBounds(width, height float32) ui.Rect {
+	return ui.Rect{
+		X: width - dockRight - homeDockHeight - homeDockPrimaryWidth,
+		Y: height - homeBottom + locateActionGap,
+		W: homeDockPrimaryWidth,
+		H: downloadStatusHeight,
+	}
+}
+
 func (s *Shell) locateExistingAction(c *ui.Context) {
-	ui.Row(c.Key("locate-existing-row")).Absolute().Right(dockRight+homeDockHeight).
-		Bottom(homeBottom-downloadStatusHeight-locateActionGap).Size(homeDockPrimaryWidth, downloadStatusHeight).
+	width, height := c.Size()
+	r := locateActionBounds(width, height)
+	ui.Row(c.Key("locate-existing-row")).Absolute().Left(r.X).Top(r.Y).Size(r.W, r.H).
 		Justify(ui.End).AlignItems(ui.Center).Children(func() {
 		ui.Text(c, "已下载游戏？点击").FontSize(locateActionTextSize).TextColor(paper).SingleLine().PassThrough()
 		const label = "定位游戏"

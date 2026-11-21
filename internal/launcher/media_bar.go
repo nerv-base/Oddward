@@ -28,9 +28,15 @@ func (s *Shell) updateMediaBar(c *ui.Context, root ui.Element) {
 		}
 		return
 	}
-	_, y, inside := root.PointerPosition()
+	x, y, inside := root.PointerPosition()
 	bounds := root.Bounds()
 	near := inside && bounds.H > 0 && y >= bounds.H-consoleHeight
+	if near && s.locateShown {
+		// The first-run link hangs into this strip. Do not open the lane under
+		// a control the user is already reaching for.
+		link := locateActionBounds(bounds.W, bounds.H)
+		near = x < link.X || x >= link.X+link.W || y < link.Y || y >= link.Y+link.H
+	}
 	s.Dispatch(state.Event{Kind: state.MediaBarActivity, Enabled: near, Focused: s.mediaFocus.FocusWithin(c), Now: c.Now()})
 	if s.Model.Overlay == state.NoOverlay {
 		if c.Shortcut(0, ui.KeyF6) {
