@@ -61,9 +61,6 @@ func (s *Shell) homeDock(c *ui.Context, primary state.Presentation) {
 			})
 		})
 	})
-	if primary.LocateExisting {
-		s.locateExistingAction(c)
-	}
 }
 
 // homePreloadChip is the only preload surface on the home page. It carries its

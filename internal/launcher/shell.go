@@ -118,6 +118,10 @@ type Shell struct {
 	RoleAvatar *ui.Bitmap
 	// staminaOpen keeps the home daily-note popover open across frames.
 	staminaOpen bool
+	// locateShown is the first-run link this frame's home built. It hangs in
+	// the strip the media lane reveals over, so View paints it after the lane
+	// and the lane ignores pointer moves over it.
+	locateShown bool
 	// Accent is the launch tone derived from the poster (PosterAccent); the
 	// zero value keeps the default tone.
 	Accent          ui.Color
@@ -609,6 +613,7 @@ func (s *Shell) tick(c *ui.Context) {
 
 func (s *Shell) View(c *ui.Context) {
 	s.viewportW, s.viewportH = c.Size()
+	s.locateShown = false
 	s.syncBackground()
 	tone := s.tone()
 	s.theme.Accent, s.theme.Focus, s.theme.InactiveAccent = tone, tone, tone
@@ -631,8 +636,10 @@ func (s *Shell) View(c *ui.Context) {
 		}
 		switch s.Model.Page {
 		case state.Home:
+			p := state.Present(s.Model)
+			s.locateShown = p.LocateExisting
 			s.hero(c)
-			s.action(c)
+			s.action(c, p)
 		case state.WishAnalysis:
 			s.wishPage(c, s.wishProjection())
 			s.footer(c)
@@ -648,8 +655,12 @@ func (s *Shell) View(c *ui.Context) {
 		s.updateMediaBar(c, root)
 		s.topbar(c)
 		s.mediaBar(c)
-		// Fixed side chrome must remain clickable above the revealed fullwidth
-		// media lane. Modal isolation is applied last by overlay below.
+		// The first-run link hangs in the same bottom strip as the media lane.
+		// Paint it after the lane, like the side chrome, so the lane can never
+		// cover its pointer. Modal isolation is applied last by overlay below.
+		if s.locateShown {
+			s.locateExistingAction(c)
+		}
 		s.navigation(c)
 	})
 	s.overlay(c)
