@@ -246,9 +246,14 @@ $h = Get-Content artifacts\overlay-poc\host.json -Raw | ConvertFrom-Json
 
 结论：
 
-- WPF payload 约占 **62.31 MiB EXE / 62.13 MiB ZIP**；
-- PoC 两个进程合计 **14.00 MiB EXE / 5.97 MiB ZIP**，相比完整产品少
-  **71.13 MiB EXE / 65.73 MiB ZIP**；
+- WPF payload 约占 **62.31 MiB EXE / 62.13 MiB ZIP**（完整 85.13 − 无 payload 22.82）；
+- 测试用 PoC 两个进程合计 **14.00 MiB EXE / 5.97 MiB ZIP**；其中
+  `overlay-host.exe` 只是测试宿主，不进入产品；
+- 若按迁移后产品 = 无 WPF payload 启动器 + `overlay-poc.exe` 估算：
+  **33.51 MiB EXE / 14.09 MiB ZIP**，比当前完整 WPF 版少
+  **51.62 MiB EXE / 57.61 MiB ZIP**；
+- 若把测试宿主也算入，合计 36.82 MiB EXE / 15.54 MiB ZIP，比完整 WPF 版少
+  48.31 MiB EXE / 56.16 MiB ZIP；
 - ZIP 列只是 Deflate 压缩后的归档对比，不是 `build-release.ps1` 的安装器格式；
   正式安装包请用同一脚本按实际打包方式复测。
 
