@@ -94,6 +94,8 @@ pwsh -File scripts/build-launcher.ps1
 
 这组命令生成开发版，启动器自更新处于关闭状态。分发构建产物时请保留随附的许可证并提供对应源码。工具链位置、自更新条件和打包流程见[构建与发布](docs/building.md)。
 
+登录界面从 WPF 迁移到 MyGo Native UI 的可行性验证、自动化测试和体积对比见 [MyGo Overlay PoC](docs/mygo-overlay-poc.md)。实验入口是 `cmd/overlay-poc` 与 `scripts/test-overlay-poc.ps1`，不进入发行流程。
+
 ## 反馈与贡献
 
 反馈时请附上 Oddward 版本、Windows 版本和复现步骤，并隐去手机号、验证码和其他账号信息。账号文件和原始日志请留在本机。[问题反馈](https://github.com/nerv-base/Oddward/issues) · [安全问题报告](SECURITY.md)
