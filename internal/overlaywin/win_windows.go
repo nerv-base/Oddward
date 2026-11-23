@@ -29,11 +29,13 @@ var (
 	procEnumWindows              = user32.NewProc("EnumWindows")
 	procGetWindowDpiAwareness    = user32.NewProc("GetWindowDpiAwarenessContext")
 	procSetThreadDpiAwareness    = user32.NewProc("SetThreadDpiAwarenessContext")
+	procDpiContextsEqual         = user32.NewProc("AreDpiAwarenessContextsEqual")
 	procSetForegroundWindow      = user32.NewProc("SetForegroundWindow")
 	procSystemParametersInfo     = user32.NewProc("SystemParametersInfoW")
 	procSetLastError             = kernel32.NewProc("SetLastError")
 	dwmapi                       = windows.NewLazySystemDLL("dwmapi.dll")
 	procDwmGetWindowAttribute    = dwmapi.NewProc("DwmGetWindowAttribute")
+	procDwmSetWindowAttribute    = dwmapi.NewProc("DwmSetWindowAttribute")
 )
 
 const (
@@ -41,8 +43,12 @@ const (
 	GWLExStyle = -20
 	GWLOwner   = -8
 
-	WSChild = 0x40000000
-	WSPopup = 0x80000000
+	WSChild       = 0x40000000
+	WSPopup       = 0x80000000
+	WSCaption     = 0x00C00000
+	WSSysMenu     = 0x00080000
+	WSMinimizeBox = 0x00020000
+	WSMaximizeBox = 0x00010000
 
 	WSExTransparent = 0x00000020
 	WSExToolWindow  = 0x00000080
@@ -54,6 +60,7 @@ const (
 	SWPFrameChanged  = 0x0020
 
 	DWMWACloaked = 14
+	DWMWACloak   = 13
 )
 
 // Rect is a rectangle in physical pixels.
@@ -165,6 +172,15 @@ func SetOwner(own, target uintptr) error {
 
 // SetChild reparents own into target as a WS_CHILD window and sizes it to the
 // target client area. This mirrors the broker's embed_overlay sequence.
+//
+// SetParent returns the previous parent, which is NULL for a top-level window,
+// so a zero result is success and only the last error tells otherwise.
+//
+// The top-level decoration is removed with the popup style: a child window
+// with WS_CAPTION has its caption painted by the user32 non-client code over
+// the client area, unlike a top-level frameless window whose frame comes from
+// DWM. MyGo keeps WS_CAPTION on a frameless window for snapping, so an
+// embedded window must drop it here.
 func SetChild(own, target uintptr, client Rect) error {
 	style, err := Style(own)
 	if err != nil {
@@ -173,11 +189,14 @@ func SetChild(own, target uintptr, client Rect) error {
 	if style&WSChild != 0 {
 		return errors.New("overlay: window is already a child")
 	}
-	if err := setLong(own, GWLStyle, style&^WSPopup|WSChild); err != nil {
+	style = style&^(WSPopup|WSCaption|WSSysMenu|WSMinimizeBox|WSMaximizeBox) | WSChild
+	if err := setLong(own, GWLStyle, style); err != nil {
 		return err
 	}
-	if ok, _, err := procSetParent.Call(own, target); ok == 0 {
-		return fmt.Errorf("overlay: SetParent: %w", err)
+	procSetLastError.Call(0)
+	old, _, callErr := procSetParent.Call(own, target)
+	if old == 0 && callErr != nil && callErr != windows.ERROR_SUCCESS {
+		return fmt.Errorf("overlay: SetParent: %w", callErr)
 	}
 	if got := Parent(own); got != target {
 		return fmt.Errorf("overlay: parent readback %#x, want %#x", got, target)
@@ -217,6 +236,18 @@ func DPI(hwnd uintptr) uintptr {
 	return v
 }
 
+// SameDPI reports whether two windows share one DPI awareness context.
+// GetDpiForWindow alone is not enough: two contexts can report the same DPI
+// and still differ, and a window may not be DPI aware at all.
+func SameDPI(a, b uintptr) bool {
+	ca, cb := DPI(a), DPI(b)
+	if ca == 0 || cb == 0 {
+		return ca == cb
+	}
+	ok, _, _ := procDpiContextsEqual.Call(ca, cb)
+	return ok != 0
+}
+
 // WithThreadDPI runs fn with the thread's DPI awareness context set to the
 // target window's context, then restores the previous one. It must run on the
 // thread that creates the overlay window. Only synchronous Win32 work belongs
@@ -250,6 +281,21 @@ func IsCloaked(hwnd uintptr) bool {
 	var cloaked uint32
 	procDwmGetWindowAttribute.Call(hwnd, DWMWACloaked, uintptr(unsafe.Pointer(&cloaked)), unsafe.Sizeof(cloaked))
 	return cloaked != 0
+}
+
+// Uncloak clears a DWM cloak that hides hwnd. It must be called while hwnd is
+// still top-level: DWM refuses DWMWA_CLOAK on a WS_CHILD window with E_HANDLE,
+// so a cloak that survives reparenting can never be cleared. It reports
+// whether hwnd is uncloaked afterwards.
+func Uncloak(hwnd uintptr) error {
+	off := int32(0)
+	if hr, _, _ := procDwmSetWindowAttribute.Call(hwnd, DWMWACloak, uintptr(unsafe.Pointer(&off)), unsafe.Sizeof(off)); hr != 0 {
+		return fmt.Errorf("overlay: DwmSetWindowAttribute(DWMWA_CLOAK, 0): %#x", hr)
+	}
+	if IsCloaked(hwnd) {
+		return errors.New("overlay: window is still cloaked")
+	}
+	return nil
 }
 
 // Candidate checks the window-level half of the identity contract: visible,

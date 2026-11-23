@@ -196,6 +196,17 @@ func (p *poc) createWindow(hostHWND uintptr) error {
 	if hwnd == 0 {
 		return fmt.Errorf("overlay: window has no HWND")
 	}
+	if p.mode == "child" {
+		// MyGo cloaks a native UI window until its first frame draws, and DWM
+		// refuses DWMWA_CLOAK on a WS_CHILD window (E_HANDLE): a cloak that
+		// survives the reparent can never be cleared, and the overlay stays
+		// invisible. Clear it while the window is still top-level, at opacity
+		// 0 so nothing shows meanwhile (docs/mygo-overlay-poc.md).
+		if err := p.uncloakBeforeBind(w); err != nil {
+			w.Close()
+			return err
+		}
+	}
 	if err := p.bind(hostHWND, hwnd); err != nil {
 		w.Close()
 		return err
@@ -206,10 +217,33 @@ func (p *poc) createWindow(hostHWND uintptr) error {
 	p.bound = true
 	p.place(hostHWND, hwnd)
 	w.ShowInactive()
+	w.SetOpacity(1)
 	p.visible = true
 	if p.screen == "banner" {
 		p.applyBanner()
 	}
+	return nil
+}
+
+// uncloakBeforeBind makes MyGo reveal the window while it is still top-level,
+// which is the only moment DWM accepts clearing the cloak of a window that is
+// about to become a child of another process.
+func (p *poc) uncloakBeforeBind(w *mygo.Window) error {
+	w.SetOpacity(0)
+	w.ShowInactive()
+	deadline := time.Now().Add(2 * time.Second)
+	for overlaywin.IsCloaked(w.NativeHandle()) {
+		if time.Now().After(deadline) {
+			// MyGo's reveal runs on its own goroutine; clear it ourselves
+			// while the window is still top-level.
+			if err := overlaywin.Uncloak(w.NativeHandle()); err != nil {
+				return fmt.Errorf("overlay: child binding needs an uncloaked window: %w", err)
+			}
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	w.Hide()
 	return nil
 }
 
@@ -218,6 +252,9 @@ func (p *poc) bind(hostHWND, hwnd uintptr) error {
 	case "owner":
 		return overlaywin.SetOwner(hwnd, hostHWND)
 	case "child":
+		if !overlaywin.SameDPI(hwnd, hostHWND) {
+			return fmt.Errorf("overlay: host and overlay DPI awareness contexts differ")
+		}
 		client, err := overlaywin.ClientRectOf(hostHWND)
 		if err != nil {
 			return err
