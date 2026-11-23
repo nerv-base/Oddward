@@ -1,16 +1,3 @@
-From e08752daa6fe84e0a080e79b1a3f7f2593cb7a08 Mon Sep 17 00:00:00 2001
-From: Oddward PoC <poc@oddward.invalid>
-Date: Mon, 23 Nov 2026 09:56:14 +0800
-Subject: [PATCH] fix(windows): uncloak a native UI window before it becomes a
- child
-
----
- internal/e2e/child_uncloak_windows_test.go | 82 ++++++++++++++++++++++
- internal/windows/win32.go                  |  7 ++
- internal/windows/window.go                 | 17 +++++
- 3 files changed, 106 insertions(+)
- create mode 100644 internal/e2e/child_uncloak_windows_test.go
-
 diff --git a/internal/e2e/child_uncloak_windows_test.go b/internal/e2e/child_uncloak_windows_test.go
 new file mode 100644
 index 0000000..913b575
@@ -152,6 +139,3 @@ index c35873b..7073d63 100644
  	case wmWindowPosChanging:
  		pos := (*windowPos)(native(lp))
  		if pos.Flags&swpShowWindow != 0 && w.surface != nil {
--- 
-2.54.0.windows.1
-
