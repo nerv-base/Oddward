@@ -6,6 +6,8 @@
 
 **面向《异环》国服官方渠道的 Windows 非官方启动器**
 
+[![Listed in Awesome NTE](https://raw.githubusercontent.com/zzstar101/awesome-nte/main/assets/badge-listed.svg)](https://github.com/zzstar101/awesome-nte)
+
 [下载安装](https://github.com/nerv-base/Oddward/releases/latest) · [界面截图](#界面截图) · [开始使用](#开始使用) · [从源码构建](#从源码构建) · [问题反馈](https://github.com/nerv-base/Oddward/issues)
 
 </div>
