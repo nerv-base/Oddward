@@ -21,12 +21,14 @@ cmd/launcher
 |---|---|
 | `cmd/launcher` | 命令行、素材、依赖注入及主窗口 |
 | `cmd/stub` | 安装版按版本启动与回退 |
+| `cmd/overlay-host`、`cmd/overlay-poc` | 登录界面迁移可行性的实验入口与模拟游戏窗口宿主，不进入发行流程，见 [MyGo Overlay PoC](mygo-overlay-poc.md) |
 | `internal/branding` | 原创图标的 SVG、PNG、ICO 源资源及 Go 嵌入数据 |
 | `internal/launcher/state` | Model、Event、Reduce、Present，以及抽卡页、签到页与游戏数据页规则 |
 | `internal/launcher` | MyGo 视图、Shell 和副作用调度 |
 | `internal/launcher/system` | 登录、设置、网络、更新、档案、签到等系统适配 |
 | `internal/cnlogin` | 国服登录、加密账号库、游戏启动及 SDK 会话 |
 | `internal/checkin` | 逐日签到记录、自动开关及跨进程互斥 |
+| `internal/overlaywin` | Overlay PoC 的 Windows 窗口适配：进程身份、WinEvent 监听与 HWND 绑定 |
 | `compat/loginui` | 自包含 WPF 登录窗口和窗口呈现 |
 | `internal/game`、`gamelocate` | 只读安装检查与用户所选目录规范化 |
 | `internal/gameres` | 游戏资源元数据解析、补丁图和 baseTag 下载计划 |

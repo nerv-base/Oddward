@@ -1,0 +1,141 @@
+diff --git a/internal/e2e/child_uncloak_windows_test.go b/internal/e2e/child_uncloak_windows_test.go
+new file mode 100644
+index 0000000..913b575
+--- /dev/null
++++ b/internal/e2e/child_uncloak_windows_test.go
+@@ -0,0 +1,82 @@
++//go:build windows && (amd64 || arm64)
++
++package e2e
++
++import (
++	"syscall"
++	"testing"
++
++	"github.com/egoist/mygo"
++	win "github.com/egoist/mygo/internal/windows"
++	"github.com/egoist/mygo/ui"
++)
++
++var (
++	childTestUser32           = syscall.NewLazyDLL("user32.dll")
++	procChildGetWindowLongPtr = childTestUser32.NewProc("GetWindowLongPtrW")
++	procChildSetWindowLongPtr = childTestUser32.NewProc("SetWindowLongPtrW")
++	procChildSetParent        = childTestUser32.NewProc("SetParent")
++	procChildSetWindowPos     = childTestUser32.NewProc("SetWindowPos")
++)
++
++const (
++	childTestWSChild       = 0x40000000
++	childTestWSPopup       = 0x80000000
++	childTestGWLStyle      = ^uintptr(15) // -16
++	childTestSWPNoZOrder   = 0x0004
++	childTestSWPNoActivate = 0x0010
++	childTestSWPFrame      = 0x0020
++)
++
++// TestChildWindowUncloak checks that a native UI window, cloaked until its
++// first frame draws, can still uncloak when an embedder turns it into a
++// WS_CHILD of another window before showing it: DWM refuses DWMWA_CLOAK on a
++// WS_CHILD window with E_HANDLE, so a cloak that survives the reparent would
++// hide the window forever.
++func TestChildWindowUncloak(t *testing.T) {
++	host := newWindow(t, mygo.WindowOptions{
++		Title:   "ChildHost",
++		Width:   800,
++		Height:  600,
++		Content: ui.View(func(c *ui.Context) { c.Root().Background(ui.RGB(30, 30, 30)) }),
++	})
++	eventually(t, "the host window shows", host.IsVisible)
++
++	child := newWindow(t, mygo.WindowOptions{
++		Title:       "ChildOverlay",
++		Width:       320,
++		Height:      240,
++		Frameless:   true,
++		Transparent: true,
++		Hidden:      true,
++		Content: ui.View(func(c *ui.Context) {
++			theme := ui.DarkTheme()
++			theme.Background = ui.RGBA(0, 0, 0, 0)
++			c.SetTheme(theme)
++			ui.Column(c).Fill().Background(ui.RGBA(0xE3, 0xE3, 0xE3, 1))
++		}),
++	})
++
++	// Reparent while hidden, as an embedder that binds before showing does.
++	mygo.RunOnMain(func() {
++		hwnd := child.NativeHandle()
++		style, _, _ := procChildGetWindowLongPtr.Call(hwnd, childTestGWLStyle)
++		style = style&^childTestWSPopup | childTestWSChild
++		procChildSetWindowLongPtr.Call(hwnd, childTestGWLStyle, style)
++		procChildSetParent.Call(hwnd, host.NativeHandle())
++		procChildSetWindowPos.Call(hwnd, 0, 0, 0, 320, 240,
++			childTestSWPNoZOrder|childTestSWPNoActivate|childTestSWPFrame)
++	})
++	child.ShowInactive()
++
++	eventually(t, "the child window uncloaks and draws its first frame", func() bool {
++		cloaked, drawn := win.TestCloaked(child.NativeHandle())
++		return !cloaked && drawn
++	})
++	if !child.IsVisible() {
++		t.Error("the child window is not visible")
++	}
++	if !win.TestSurfaceComposed(child.NativeHandle()) {
++		t.Error("the child window's native UI does not show through DirectComposition")
++	}
++}
+diff --git a/internal/windows/win32.go b/internal/windows/win32.go
+index 24155e0..bb883f3 100644
+--- a/internal/windows/win32.go
++++ b/internal/windows/win32.go
+@@ -267,6 +267,8 @@ const (
+ 	wmSettingChange     = 0x001A
+ 	wmGetMinMaxInfo     = 0x0024
+ 	wmWindowPosChanging = 0x0046
++	wmStyleChanging     = 0x007C
++	wmStyleChanged      = 0x007D
+ 	wmSetIcon           = 0x0080
+ 	wmNCCalcSize        = 0x0083
+ 	wmNCHitTest         = 0x0084
+@@ -551,6 +553,11 @@ var _ = [1]struct{}{}[unsafe.Sizeof(devMode{})-220]
+ // enumCurrentSettings asks EnumDisplaySettingsW for the mode in use.
+ const enumCurrentSettings = 0xFFFFFFFF
+ 
++// styleStruct is the old and new style of WM_STYLECHANGING and WM_STYLECHANGED.
++type styleStruct struct {
++	Old, New uint32
++}
++
+ type windowPos struct {
+ 	HWnd, InsertAfter uintptr
+ 	X, Y, CX, CY      int32
+diff --git a/internal/windows/window.go b/internal/windows/window.go
+index c35873b..7073d63 100644
+--- a/internal/windows/window.go
++++ b/internal/windows/window.go
+@@ -739,6 +739,23 @@ func (w *window) message(m uint32, wp, lp uintptr) (uintptr, bool) {
+ 			procFillRect.Call(wp, uintptr(unsafe.Pointer(&r)), brush)
+ 		}
+ 		return 1, true
++	case wmStyleChanging:
++		// A window that becomes a child of another, as an external embedder
++		// makes it (SetWindowLongPtr(GWL_STYLE, WS_CHILD) then SetParent),
++		// can no longer be cloaked or uncloaked: DWM refuses DWMWA_CLOAK on a
++		// child window with E_HANDLE. Native UI cloaks its window until the
++		// first frame draws, and a window reparented while hidden gets no
++		// WM_PAINT, so the cloak would stay forever and the window would never
++		// show: clear it before the window is a child. Nothing drew yet, so
++		// there is nothing to hide, and a window that keeps the cloak because
++		// its first frame has not drawn shows no pixels either way.
++		if w.surface != nil && w.surface.cloaked {
++			ss := (*styleStruct)(native(lp))
++			if ss.New&wsChild != 0 && ss.Old&wsChild == 0 {
++				w.surface.uncloak()
++			}
++		}
++		return 0, false
+ 	case wmWindowPosChanging:
+ 		pos := (*windowPos)(native(lp))
+ 		if pos.Flags&swpShowWindow != 0 && w.surface != nil {
