@@ -5,10 +5,11 @@
 
 ## 结论
 
-**CONDITIONAL GO**。MyGo v0.10.0 已具备把登录窗口与欢迎横幅做成纯 Native UI 的能力：
-透明窗口、圆角卡片、输入框、文本选择与剪贴板、欢迎横幅淡入淡出、无焦点/鼠标穿透、
-PID + 创建时间校验、WinEvent 监听、最小化隐藏与 HWND 重建恢复，都已在真实 Win32
-窗口上通过自动化验证（owner 模式 33/33、native child 模式 19/19）。
+**CONDITIONAL GO**。MyGo v0.10.0（以及 main `c16fc5b`）已具备把登录窗口与欢迎横幅
+做成纯 Native UI 的能力：透明窗口、圆角卡片、输入框、文本选择与剪贴板、欢迎横幅
+淡入淡出、无焦点/鼠标穿透、PID + 创建时间校验、WinEvent 监听、最小化隐藏与 HWND
+重建恢复，都已在真实 Win32 窗口上通过自动化验证（owner 模式 33/33；native child
+v0.10.0 + 应用侧兼容 19/19、main 20/20）。
 
 native child（`WS_CHILD` + `SetParent`）路线最初表现为“窗口关系与几何正确、客户区
 无像素”。经本轮根因定位，这不是 DirectComposition 不支持子窗口，而是 **MyGo
@@ -21,9 +22,10 @@ v0.10.0 的缺陷**：Native UI 窗口创建时被 DWM cloak，而 Windows 不�
 
 1. **Oddward 侧工作区（已验证）**：在仍为顶层窗口时先 `ShowInactive` + 轮询/调用
    uncloak，再 `SetParent`；同时移除子窗口残留的 `WS_CAPTION|WS_SYSMENU` 等顶层
-   装饰。`cmd/overlay-poc -mode child` 使用此路径，19/19 自动化通过。
-2. **MyGo 上游最小修复（已在独立实验分支验证）**：在 `WM_STYLECHANGING` 检测
-   `WS_CHILD` 置位时提前 uncloak，补丁和回归测试见第 8.1 节；不依赖应用侧时序。
+   装饰。`cmd/overlay-poc -mode child` 使用此路径，v0.10.0 上 19/19 自动化通过。
+2. **MyGo 上游修复（已合入 main）**：`da8a9a1`（PR #2248）在
+   `WM_STYLECHANGING` 检测 `WS_CHILD` 置位时提前 uncloak。用 main `c16fc5b` 实测，
+   `-child-uncloak=false` 时 child 20/20、owner 33/33 通过，不依赖应用侧时序。
 
 但中文 IME 端到端、150%/200% DPI、真实受限 Broker 权限模型、真实游戏全屏/无边框
 场景仍未在本环境验证，见「未测试项」。在这些条件满足前，不应直接用 MyGo 替换
@@ -49,7 +51,7 @@ v0.10.0 的缺陷**：Native UI 窗口创建时被 DWM cloak，而 Windows 不�
 | CPU/GPU | NVIDIA GeForce RTX 5070 Ti Laptop GPU（Direct3D 11 / DirectComposition） |
 | 显示 | 2560×1440，测试窗口所在显示器 DPI 96（100%） |
 | Go | go1.27.3 windows/amd64（项目内 `.tools/go1.27.3`） |
-| MyGo | v0.10.0（`github.com/egoist/mygo v0.10.0`） |
+| MyGo | 基线 v0.10.0（`github.com/egoist/mygo v0.10.0`）；最新 main 对照 `c16fc5b`（2026-11-24） |
 | .NET SDK（仅现有 WPF 构建） | 10.0.303 |
 | 测试宿主 | `cmd/overlay-host.exe`，独立 Win32 进程，`OddwardOverlayHost-<pid>` 窗口类 |
 | 测试入口 | `cmd/overlay-poc.exe`，独立 MyGo 进程 |
@@ -135,8 +137,11 @@ pwsh -File scripts/go.ps1 build -trimpath -tags mygo_noinspector `
 # 全自动真实窗口测试（会构建并运行 host + overlay，owner 模式 33 项断言）
 pwsh -File scripts/test-overlay-poc.ps1
 
-# native child 模式自动化（PrintWindow 像素断言，19 项；不依赖桌面输入）
+# native child 模式自动化（PrintWindow 像素断言，19 项；加 -child-uncloak=false 时 20 项）
 pwsh -File scripts/test-overlay-child.ps1
+
+# 用本地 MyGo main 检出跑 child + owner；临时替换 go.mod 后自动恢复
+pwsh -File scripts/test-overlay-mygo-main.ps1 -MyGo artifacts/mygo-main
 
 # 体积对比（会重新构建 WPF 内嵌版、无 payload 版、PoC，并做 ZIP 压缩）
 pwsh -File scripts/size-overlay-poc.ps1
@@ -161,8 +166,9 @@ $h = Get-Content artifacts\overlay-poc\host.json -Raw | ConvertFrom-Json
 
 `-host-created` 是必填项：缺失或与目标进程的创建时间不一致时，`overlay-poc`
 直接失败退出，不会创建或绑定窗口。`-mode child` 用于验证 native child 路线：
-启动时会先在顶层状态解除 DWM cloak，再交给 `SetParent`；未打上游补丁的
-MyGo v0.10.0 必须走这条应用侧路径（见第 8.1 节）。
+默认 `-child-uncloak=true` 会先在顶层状态解除 DWM cloak，再交给 `SetParent`；
+固定 MyGo v0.10.0 时必须走这条应用侧路径。用包含 `da8a9a1` 的 MyGo main 时可加
+`-child-uncloak=false`，由框架自己在 `WM_STYLECHANGING` 中清除 cloak（见第 8.1 节）。
 
 ## 5. 实测结果
 
@@ -176,8 +182,8 @@ MyGo v0.10.0 必须走这条应用侧路径（见第 8.1 节）。
 > 2026-11-23 的 native child 根因实验期间测试桌面被系统锁定（`GetForegroundWindow()==0`，
 > `LogonUI` 处于前台），屏幕 `GetPixel` 与合成输入不可用；此时重跑 owner 脚本会在
 > 像素/输入步骤被环境阻断（5/7 后停止），不是产品回归。child 脚本改用
-> `PrintWindow` 与窗口控制通道，因此在锁屏下仍能完整跑完（19/19）。解锁后应重跑
-> owner 脚本恢复 33/33 证据。
+> `PrintWindow` 与窗口控制通道，因此在锁屏下仍能完整跑完（19/19）。解锁后已重跑
+> owner 脚本并恢复 33/33 证据。
 
 | 分组 | 通过项 |
 |---|---|
@@ -192,7 +198,8 @@ MyGo v0.10.0 必须走这条应用侧路径（见第 8.1 节）。
 | 清理 | overlay 退出、host 退出、进程表无 `overlay-poc`/`overlay-host` |
 | 欢迎横幅 | screen=banner、文本正确；`ex=0x82801a8` 含 `TRANSPARENT|TOOLWINDOW|NOACTIVATE`（测试脚本为压过桌面窗口额外加了 `WS_EX_TOPMOST`，PoC 自身为 `0x82801a0`）；淡入到 opacity 1；点击穿透到宿主；`WindowFromPoint` 根窗口为宿主；前台窗口保持宿主；淡出后自行退出 |
 
-`scripts/test-overlay-child.ps1` 最后一次运行：**19/19 通过**（报告
+`scripts/test-overlay-child.ps1` 在 v0.10.0 基线（默认 `uncloakBeforeBind`）：
+**19/19 通过**；最新 main 构建（`-child-uncloak=false`）为 **20/20 通过**（报告
 `artifacts/overlay-poc/child-report.json`）。child 模式不依赖屏幕像素或合成输入，
 使用宿主/overlay 控制通道 + `PrintWindow(PW_RENDERFULLCONTENT)`：
 
@@ -205,6 +212,23 @@ MyGo v0.10.0 必须走这条应用侧路径（见第 8.1 节）。
 | 窗口同步 | 宿主缩放到 984×661 后 overlay 矩形同步，标题栏像素 `(492,100)=(30,31,34)` 仍正确 |
 | 生命周期 | 最小化隐藏、恢复显示；宿主 HWND 重建后 `recreates=1`、parent 更新、渲染恢复 |
 | 清理 | overlay 与宿主均正常退出，精确 PID 无残留 |
+
+**MyGo 最新 main 对照（2026-11-24）**
+
+MyGo main 已包含上游修复 `da8a9a1 fix(windows): uncloak native UI before window becomes a child (#2248)`。
+使用 `artifacts/mygo-main`（`origin/main`，HEAD `c16fc5b`）构建 PoC，并显式加
+`-child-uncloak=false` 跳过 Oddward 侧的 `uncloakBeforeBind` 兼容逻辑：
+
+| 组合 | child 结果 | owner 结果 | 关键证据 |
+|---|---|---|---|
+| v0.10.0 + `-child-uncloak=false` | **13/20 FAIL** | — | 外层 `cloak=1`、`MyGoSurface cloak=5`，卡片像素采到宿主背景 `(32,24,16)` |
+| v0.10.0 + 默认 `uncloakBeforeBind` | **19/19 PASS** | 33/33 PASS | 绑定前 uncloak，`cloak=0`，卡片 `(227,227,227)` |
+| main `c16fc5b` + `-child-uncloak=false` | **20/20 PASS** | **33/33 PASS** | `child_uncloak=False`，`cloak=0`，卡片 `(227,227,227)`，缩放/重建后仍渲染 |
+
+main 构建的 `overlay-poc-main.exe` 为 11,329,024 B（10.80 MiB），ZIP 4,794,320 B
+（4.57 MiB）；比 v0.10.0 基线大约 +0.11 MiB。结论：上游修复在实际 HWND 上生效，
+child 路线不再依赖 Oddward 的绑定前 uncloak，但 v0.10.0（当前 `go.mod` 固定版本）
+仍需应用侧兼容。
 
 ### 5.2 渲染证据
 
@@ -227,7 +251,7 @@ MyGo v0.10.0 必须走这条应用侧路径（见第 8.1 节）。
 | 受限 Broker 权限模型 | PoC 直连 Win32；真实 `embed_overlay`/`bind_overlay` 在受限宿主中执行 | 在真实 Broker 会话中验证同 SID、同会话、隐藏窗口、同 DPI、失败回滚 |
 | 用户拖动窗口过程中的闪烁 | 自动化只能移动/缩放，不能可靠量化帧抖动 | 人工拖动/缩放并录屏观察 |
 | 资源句柄计数 | 只验证进程退出与 hook 回调；未统计 GDI/USER 句柄增长 | 长时压测 `GetGuiResources` 与 `GetProcessHandleCount` |
-| 子窗口的真实鼠标/键盘注入 | 自动化会话处于锁屏桌面，无法注入真实输入；已用 `ChildWindowFromPointEx` 验证命中测试，用 `PrintWindow` 验证渲染 | 解锁桌面上重跑 child 模式并注入点击/按键，验证输入不泄漏给宿主 |
+| 子窗口的真实鼠标/键盘注入 | child 自动化目前用控制通道 + `PrintWindow`，未实现跨进程合成输入；已用 `ChildWindowFromPointEx` 验证命中测试 | 解锁桌面上补测 child 模式点击/按键，验证输入不泄漏给宿主 |
 | 子窗口 150%/200% DPI | 同 DPI 校验只在 96 DPI 下通过 | 在 150%/200% 下重跑 child 测试并检查坐标/像素 |
 
 ### 5.4 平台限制
@@ -259,7 +283,7 @@ MyGo v0.10.0 必须走这条应用侧路径（见第 8.1 节）。
 | 横幅自退出 | helper `Close()` | 淡出后 `App.Quit()` | PASS |
 | PID+创建时间校验 | `GameOverlay` | `overlaywin.Identity` | PASS（模拟宿主） |
 | owner 绑定 | `setOwner` | `SetWindowLongPtr(GWLP_HWNDPARENT)` | PASS |
-| native child 绑定 | 首选 `embed_overlay` | `SetParent` + `WS_CHILD` + 绑定前 uncloak + 去标题栏 | PASS（19/19；依赖应用侧时序，上游补丁见 8.1） |
+| native child 绑定 | 首选 `embed_overlay` | `SetParent` + `WS_CHILD` + 绑定前 uncloak + 去标题栏 | PASS：v0.10.0 19/19（应用侧时序）；main `c16fc5b` 20/20（框架自动 uncloak，见 8.1） |
 | WinEvent 监听 | 3 类事件 | 4 类事件，回调数 > 0 | PASS |
 | 位置/尺寸同步 | 50 ms timer + hook | 50 ms ticker + hook | PASS |
 | 最小化隐藏/恢复 | `IsIconic` | `Watcher.State` | PASS |
@@ -277,29 +301,30 @@ MyGo v0.10.0 必须走这条应用侧路径（见第 8.1 节）。
 | 产物 | EXE 字节 | EXE MiB | ZIP 字节 | ZIP MiB |
 |---|---:|---:|---:|---:|
 | 当前完整 WPF 内嵌 `oddward-wpf.exe` | 89,267,712 | 85.13 | 75,184,132 | 71.70 |
-| 不含 WPF payload 的 `launcher-nopayload.exe` | 23,927,808 | 22.82 | 10,039,822 | 9.57 |
-| PoC `overlay-poc.exe` | 11,212,288 | 10.69 | 4,745,235 | 4.53 |
-| PoC 测试宿主 `overlay-host.exe` | 3,475,968 | 3.31 | 1,516,581 | 1.45 |
+| 不含 WPF payload 的 `launcher-nopayload.exe` | 23,927,808 | 22.82 | 10,039,840 | 9.57 |
+| PoC `overlay-poc.exe` | 11,214,848 | 10.70 | 4,747,276 | 4.53 |
+| PoC 测试宿主 `overlay-host.exe` | 3,475,968 | 3.31 | 1,516,578 | 1.45 |
 
 结论：
 
 - WPF payload 约占 **62.31 MiB EXE / 62.13 MiB ZIP**（完整 85.13 − 无 payload 22.82）；
-- 测试用 PoC 两个进程合计 **14.00 MiB EXE / 5.98 MiB ZIP**；其中
+- 测试用 PoC 两个进程合计 **14.01 MiB EXE / 5.98 MiB ZIP**；其中
   `overlay-host.exe` 只是测试宿主，不进入产品；
 - 若按迁移后产品 = 无 WPF payload 启动器 + `overlay-poc.exe` 估算：
-  **33.51 MiB EXE / 14.10 MiB ZIP**，比当前完整 WPF 版少
-  **51.62 MiB EXE / 57.60 MiB ZIP**；
-- 若把测试宿主也算入，合计 36.82 MiB EXE / 15.55 MiB ZIP，比完整 WPF 版少
-  48.31 MiB EXE / 56.15 MiB ZIP；
+  **33.52 MiB EXE / 14.10 MiB ZIP**，比当前完整 WPF 版少
+  **51.61 MiB EXE / 57.60 MiB ZIP**；
+- 若把测试宿主也算入，合计 36.83 MiB EXE / 15.55 MiB ZIP，比完整 WPF 版少
+  48.30 MiB EXE / 56.15 MiB ZIP；
 - ZIP 列只是 Deflate 压缩后的归档对比，不是 `build-release.ps1` 的安装器格式；
   正式安装包请用同一脚本按实际打包方式复测。
 
 ## 8. MyGo 缺陷与上游建议
 
-### 8.1 native child 首次绑定不渲染（已定位：MYGO BUG）
+### 8.1 native child 首次绑定不渲染（已定位：MYGO BUG；main 已修复）
 
 **结论**：这是 **MyGo v0.10.0 的缺陷**，不是 DirectComposition 不支持子窗口，也不是
-Oddward 的 `SetParent` 用法错误。DirectComposition 的 `CreateTargetForHwnd` 支持
+Oddward 的 `SetParent` 用法错误。MyGo main 的 `da8a9a1`（PR #2248）已经修复；
+v0.10.0 仍需 Oddward 侧兼容或升级版本。DirectComposition 的 `CreateTargetForHwnd` 支持
 `WS_CHILD` 窗口；真正的限制在 DWM：**任何 `WS_CHILD` 窗口都不能再设置或清除
 `DWMWA_CLOAK`**，而 MyGo 在创建 Native UI 窗口时先 cloak，等首帧绘制后才 uncloak。
 隐藏窗口被外部 `SetParent` 到可见宿主后，`IsWindowVisible` 已为真，`ShowInactive`
@@ -341,7 +366,7 @@ Oddward 的 `SetParent` 用法错误。DirectComposition 的 `CreateTargetForHwn
 - MyGo 内部日志（实验副本）在 `reveal composed` 后打印
   `mygo-dbg: uncloak hwnd=0x3a072e hr=0x80070006 err=The handle is invalid.`。
 
-**根因代码路径（MyGo v0.10.0，upstream main 同）**
+**根因代码路径（MyGo v0.10.0；main `c16fc5b` 的 `da8a9a1` 已修复）**
 
 - `internal/windows/surface.go:224` `newSurface` 创建时调用 `s.cloak()`；
   `:304` `dwmwaCloak = 13`；`:318` `uncloak()` 是唯一清除入口。
@@ -362,11 +387,18 @@ Oddward 的 `SetParent` 用法错误。DirectComposition 的 `CreateTargetForHwn
 在仍为顶层窗口时 `ShowInactive()`，轮询 `IsCloaked` 至 0（最多 2 s），再
 `SetChild`；绑定后 `place`、`ShowInactive`、`SetOpacity(1)`。同时 `SetChild` 去掉
 `WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_MAXIMIZEBOX`，否则 user32 会在子窗口
-客户区上绘制经典标题栏。`scripts/test-overlay-child.ps1` 19/19 通过。
+客户区上绘制经典标题栏。`scripts/test-overlay-child.ps1` 在 v0.10.0 上 19/19 通过；
+main 上以 `-child-uncloak=false` 验证框架修复时 20/20 通过。
 
-**上游最小修复（实验分支，未提交上游）**
+**上游修复状态**
 
-在 `internal/windows/window.go` 的窗口过程增加：
+MyGo main 已合入同思路修复 `da8a9a1 fix(windows): uncloak native UI before window becomes a child (#2248)`：
+在 `WM_STYLECHANGING` 中检测 `WS_CHILD` 置位前 uncloak，并在 `uncloak()` 中按 HRESULT
+成功与否维护 `cloaked` 状态、清理 `timerUncloak`。本次用 main `c16fc5b` 实测
+`-child-uncloak=false` 通过 20/20，说明无需应用侧 workaround。
+
+以下为本仓库保留的最小复现补丁（`docs/mygo-child-uncloak.patch`，基于上游 `a0eaaaa`；
+与 main 合入版本等价，差异是本地版本还保留了额外的 `wmStyleChanged` 常量但未使用）。核心改动：
 
 ```go
 case wmStyleChanging: // 0x007C
@@ -383,8 +415,9 @@ case wmStyleChanging: // 0x007C
 `type styleStruct struct{ Old, New uint32 }`。回归测试
 `internal/e2e/child_uncloak_windows_test.go`：无补丁时在 60 s 守卫内失败
 （`the child window uncloaks and draws its first frame never happened`）；有补丁时
-0.32–1.05 s 通过。完整补丁在 `docs/mygo-child-uncloak.patch`，实验仓库在
-`artifacts/mygo-main` 的 `fix/child-uncloak` 分支，commit `e08752d`，未 push、未提交上游。
+0.32–1.05 s 通过。完整补丁在 `docs/mygo-child-uncloak.patch`；本地复现分支为
+`artifacts/mygo-main` 的 `fix/child-uncloak`，commit `e08752d`。上游 main 已合入
+`da8a9a1`（PR #2248），本文以此为准；本地分支只用于复现和回归，不再单独提交。
 
 **建议上游修复位置**
 
@@ -409,7 +442,8 @@ case wmStyleChanging: // 0x007C
 
 ## 9. 迁移计划（若继续）
 
-1. **先决条件**：采用上游 `WM_STYLECHANGING` 补丁（推荐），或在正式适配层保留
+1. **先决条件**：升级到包含 `da8a9a1` 的 MyGo main/后续版本（推荐，PoC 已用
+   `c16fc5b` 验证 20/20）；若继续固定 v0.10.0，则在正式适配层保留
    `uncloakBeforeBind` + 去顶层装饰的应用侧处理，并在真实游戏窗口上复测 child 路线；
 2. 把 `internal/overlaywin` 的 identity/watcher/HWND 操作收敛为正式适配层，
    只通过 `internal/cnlogin/broker` 的 `BindOverlay`/`EmbedOverlay` 使用，不直接
@@ -426,7 +460,8 @@ case wmStyleChanging: // 0x007C
 - 测试日志：`artifacts/overlay-poc/test-run.log`
 - 截图：`artifacts/overlay-poc/login2.png`、`artifacts/probe/*.png`
 - 体积报告：`artifacts/size/size-report.json`
-- MyGo 回归实验：`docs/mygo-child-uncloak.patch`（可直接应用到 upstream `a0eaaaa`），实验仓库在 `artifacts/mygo-main` 的 `fix/child-uncloak` 分支（本地，不随 PR 提交）
+- MyGo 最新 main 测试日志：`artifacts/overlay-poc/child-main-run.log`、`artifacts/overlay-poc/owner-main-run.log`
+- MyGo 回归实验：`docs/mygo-child-uncloak.patch`（可直接应用到 upstream `a0eaaaa`），实验仓库在 `artifacts/mygo-main`；上游 main 已合入 `da8a9a1`（PR #2248）
 
 这些文件均位于 `.gitignore` 的 `artifacts/` 下，不随 PR 提交；PR 以本文的表格和
 可复现脚本作为测试证据。

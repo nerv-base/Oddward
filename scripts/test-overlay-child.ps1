@@ -12,7 +12,8 @@
 
 param(
     [switch]$SkipBuild,
-    [switch]$KeepRunning
+    [switch]$KeepRunning,
+    [string[]]$ExtraOverlayArgs = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -147,7 +148,7 @@ function Start-Host {
 function Start-ChildOverlay([uint64]$hostHwnd) {
     $script:overlayPort = Get-FreePort
     $ovArgs = @('-host', "$hostHwnd", '-host-pid', "$($script:hostProc.Id)",
-        '-host-created', $script:hostCreated, '-mode', 'child', '-control', "$($script:overlayPort)")
+        '-host-created', $script:hostCreated, '-mode', 'child', '-control', "$($script:overlayPort)") + $ExtraOverlayArgs
     $script:overlayProc = Start-Process -FilePath (Join-Path $out 'overlay-poc.exe') -ArgumentList $ovArgs -PassThru `
         -RedirectStandardOutput (Join-Path $out 'child-overlay.out') -RedirectStandardError (Join-Path $out 'child-overlay.err')
     $script:overlayPid = $script:overlayProc.Id
@@ -224,6 +225,9 @@ try {
     $style = [OverlayChildWin]::Style($outer)
     $ex = [OverlayChildWin]::ExStyle($outer)
     Add-Check 'child mode bound' ($s.mode -eq 'child' -and $s.bound) "mode=$($s.mode) bound=$($s.bound)"
+    if ($ExtraOverlayArgs -contains '-child-uncloak=false') {
+        Add-Check 'child uncloak workaround disabled' (-not $s.child_uncloak) "child_uncloak=$($s.child_uncloak)"
+    }
     Add-Check 'outer is a WS_CHILD of host' (($style -band 0x40000000) -ne 0 -and $parent -eq $hostHwnd) ("style=0x{0:X} parent=0x{1:X}" -f $style, $parent.ToInt64())
     Add-Check 'caption removed from child' (($style -band 0x00C00000) -eq 0) ("style=0x{0:X}" -f $style)
     $r = [OverlayChildWin]::WindowRect($outer)

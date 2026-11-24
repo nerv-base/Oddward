@@ -33,9 +33,10 @@ type poc struct {
 	win  *mygo.Window
 	hwnd uintptr
 
-	identity overlaywin.Identity
-	mode     string // owner or child
-	watcher  *overlaywin.Watcher
+	identity     overlaywin.Identity
+	mode         string // owner or child
+	childUncloak bool   // clear MyGo's first-frame cloak before binding as a child
+	watcher      *overlaywin.Watcher
 
 	screen   string // login or banner
 	phone    string
@@ -73,13 +74,14 @@ func main() {
 		hostPID  = flag.Uint("host-pid", 0, "target host PID (used when -host is 0)")
 		hostMade = flag.String("host-created", "", "expected host creation time (decimal FILETIME)")
 		mode     = flag.String("mode", "owner", "binding mode: owner or child")
+		uncloak  = flag.Bool("child-uncloak", true, "clear MyGo's first-frame cloak before child binding (needed on v0.10.0; latest main does it itself)")
 		control  = flag.Int("control", 0, "control TCP port on 127.0.0.1")
 		banner   = flag.String("banner", "", "start in welcome-banner mode with this text")
 		duration = flag.Duration("duration", 0, "exit after this duration")
 	)
 	flag.Parse()
 
-	p := &poc{screen: "login", mode: *mode}
+	p := &poc{screen: "login", mode: *mode, childUncloak: *uncloak}
 	if *banner != "" {
 		p.screen = "banner"
 		p.banner = *banner
@@ -196,12 +198,13 @@ func (p *poc) createWindow(hostHWND uintptr) error {
 	if hwnd == 0 {
 		return fmt.Errorf("overlay: window has no HWND")
 	}
-	if p.mode == "child" {
-		// MyGo cloaks a native UI window until its first frame draws, and DWM
-		// refuses DWMWA_CLOAK on a WS_CHILD window (E_HANDLE): a cloak that
-		// survives the reparent can never be cleared, and the overlay stays
-		// invisible. Clear it while the window is still top-level, at opacity
-		// 0 so nothing shows meanwhile (docs/mygo-overlay-poc.md).
+	if p.mode == "child" && p.childUncloak {
+		// MyGo v0.10.0 cloaks a native UI window until its first frame draws,
+		// and DWM refuses DWMWA_CLOAK on a WS_CHILD window (E_HANDLE): a cloak
+		// that survives the reparent can never be cleared, and the overlay
+		// stays invisible. Clear it while the window is still top-level, at
+		// opacity 0 so nothing shows meanwhile (docs/mygo-overlay-poc.md).
+		// MyGo main has the same fix built in; -child-uncloak=false exercises it.
 		if err := p.uncloakBeforeBind(w); err != nil {
 			w.Close()
 			return err
@@ -611,7 +614,7 @@ func (p *poc) snapshot() map[string]any {
 	style, _ := overlaywin.Style(p.hwnd)
 	ex, _ := overlaywin.ExStyle(p.hwnd)
 	return map[string]any{
-		"ok": true, "hwnd": p.hwnd, "mode": p.mode,
+		"ok": true, "hwnd": p.hwnd, "mode": p.mode, "child_uncloak": p.childUncloak,
 		"screen": p.screen, "phone": p.phone, "captcha": p.captcha,
 		"remember": p.remember, "focused": p.focused,
 		"sel_phone": p.selPhone, "sel_captcha": p.selCaptcha,
