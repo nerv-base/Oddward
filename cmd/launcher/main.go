@@ -56,7 +56,7 @@ func main() {
 	gameRoot := flag.String("game-root", "", "initial selected game path; read-only revalidation, never automatic launch")
 	dataDir := flag.String("data-dir", "", "optional absolute private launcher data directory (settings and accounts)")
 	demo := flag.Bool("demo", false, "explicit memory-only game-state preview; normal entry does not simulate launch")
-	loginUI := flag.String("login-ui", os.Getenv("ODDWARD_LOGIN_UI"), "login window: built-in MyGo by default, wpf for an -EmbedWPF build, or a separately published helper path")
+	loginUI := flag.String("login-ui", os.Getenv("ODDWARD_LOGIN_UI"), "optional explicit path to a login window helper; defaults to built-in MyGo (--cnlogin-ui)")
 	flag.Parse()
 	settingsPath, cachePath, err := nativeDataPaths(*dataDir)
 	if err != nil {
@@ -178,12 +178,11 @@ func main() {
 		s.HomeAccountUse = func(_ context.Context, id string) error {
 			return accountStore.SetLast(id)
 		}
-		loginUIOverride := *loginUI
+		loginUIExe, loginUIArgs := resolveLoginUI(executable, *loginUI)
 		s.ManagedBackend = system.NativeManagedBackend{
-			Downloads: downloads,
-			ResolveLoginUI: func() (string, []string, error) {
-				return resolveLoginUI(executable, loginUIOverride)
-			},
+			Downloads:       downloads,
+			LoginUI:         loginUIExe,
+			LoginUIArgs:     loginUIArgs,
 			Accounts:        accountStore,
 			HTTPClient:      &http.Client{Transport: network},
 			LauncherVersion: buildinfo.Version,

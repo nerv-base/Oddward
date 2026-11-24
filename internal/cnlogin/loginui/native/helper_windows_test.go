@@ -933,14 +933,25 @@ func TestNativeHelperSystemDPIAndOwnerFallback(t *testing.T) {
 		t.Fatal("expected WithThreadDPI to match System-aware host DPI context")
 	}
 
-	client, err := overlaywin.ClientRectOf(host.hwnd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ovRect, err := overlaywin.RectOf(ov)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var client, ovRect overlaywin.Rect
+	func() {
+		// Query both System-DPI-aware windows in their own DPI context so an
+		// unaware go test runner does not virtualize odd physical heights into
+		// off-by-one GetClientRect vs GetWindowRect edges.
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		if err := overlaywin.WithThreadDPI(host.hwnd, func() error {
+			var err error
+			client, err = overlaywin.ClientRectOf(host.hwnd)
+			if err != nil {
+				return err
+			}
+			ovRect, err = overlaywin.RectOf(ov)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}()
 	if ovRect != client {
 		t.Fatalf("owner overlay rect %+v != host client %+v", ovRect, client)
 	}

@@ -10,9 +10,8 @@ import (
 	"github.com/nerv-base/Oddward/internal/branding"
 )
 
-// Design dimensions and color tokens matched to the authored WPF LoginSurface
-// and LoginVisuals specifications so every screen preserves Oddward's brand
-// visual language with pure MyGo Native UI vectors and system fonts.
+// Design dimensions and color tokens for Oddward's login card and welcome
+// banner rendered with pure MyGo Native UI vectors and system fonts.
 const (
 	cardWidth       float32 = 420
 	cardHeight      float32 = 520
@@ -125,8 +124,7 @@ func BannerColors(highContrast, transparencyEnabled bool) (bg, border, fg ui.Col
 }
 
 // OverlayCardScale computes the uniform zoom factor that fits the 420×520 card
-// inside 90% of the client width and 80% of the client height, matching WPF's
-// Viewbox layout.
+// inside 90% of the client width and 80% of the client height.
 func OverlayCardScale(clientW, clientH float32) float32 {
 	if clientW <= 0 || clientH <= 0 {
 		return 1

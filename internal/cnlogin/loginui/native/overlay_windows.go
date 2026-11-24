@@ -42,7 +42,7 @@ type controller struct {
 	tickStop    chan struct{}
 	tickRunning bool
 
-	// Per-target binding state (mirrors GameOverlay.cs).
+	// Per-target binding state.
 	preferEmbedding     bool
 	gameWindow          uintptr
 	destroyedParent     uintptr
@@ -401,11 +401,11 @@ func (c *controller) refresh() {
 		c.hasPlaced = false
 	}
 	// Both login windows and welcome banners prefer native child embedding
-	// (embed_overlay), matching WPF's GameOverlay behavior so the surface
-	// composites reliably above fullscreen, borderless or topmost game windows
-	// while the broker falls back to owner mode on DPI context mismatch.
-	// Welcome banners retain WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW
-	// | WS_EX_NOACTIVATE so clicks pass straight through the WS_CHILD subtree.
+	// (embed_overlay) so the surface composites reliably above fullscreen,
+	// borderless or topmost game windows while the broker falls back to owner
+	// mode on DPI context mismatch. Welcome banners retain WS_EX_LAYERED |
+	// WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE so clicks pass
+	// straight through the WS_CHILD subtree.
 	if c.preferEmbedding && !c.ownerRequested {
 		c.requestBinding("embed_overlay")
 		return

@@ -172,7 +172,7 @@ func (s State) CanSendSMS() bool {
 	return s.CanAct() && s.Model.Screen == "phone" && s.Model.CanSendSMS
 }
 
-// Title returns the rendered heading title with WPF-matching fallbacks.
+// Title returns the rendered heading title with screen-specific fallbacks.
 func (s State) Title() string {
 	if s.Model.Title != "" {
 		return s.Model.Title
@@ -187,7 +187,7 @@ func (s State) Title() string {
 	}
 }
 
-// PrimaryLabel returns the primary button label with WPF-matching fallbacks.
+// PrimaryLabel returns the primary button label with screen-specific fallbacks.
 func (s State) PrimaryLabel() string {
 	if s.Model.PrimaryLabel != "" {
 		return s.Model.PrimaryLabel
@@ -198,7 +198,7 @@ func (s State) PrimaryLabel() string {
 	return "登录"
 }
 
-// SMSLabel returns the SMS action button label with WPF-matching fallback.
+// SMSLabel returns the SMS action button label with default fallback.
 func (s State) SMSLabel() string {
 	if s.Model.SMSLabel != "" {
 		return s.Model.SMSLabel

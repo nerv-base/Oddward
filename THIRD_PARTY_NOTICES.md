@@ -9,8 +9,8 @@ In this repository the texts are under `licenses/`. Standalone launcher builds
 put this notice and the texts in `licenses/` next to the executable. Installed
 and update-package builds put them in the versioned application's `licenses/`
 directory. Paths in the tables below are relative to that license directory.
-`Oddward.LICENSE.txt` and `loginui/LICENSES.md` are also copied there at build
-time from the repository's `LICENSE` and helper's attribution notice.
+`Oddward.LICENSE.txt` is also copied there at build time from the repository's
+`LICENSE`.
 
 ## Go executable components
 
@@ -85,37 +85,6 @@ licensed under the Unicode License V3. The complete text is in
 `licenses/unicode/LICENSE.txt`; the upstream notice is at
 <https://www.unicode.org/license.txt>.
 
-## Self-contained login window
-
-The original Oddward login helper uses .NET SDK `10.0.303` to publish the
-`win-x64` runtime packs below at version `10.0.11`. The SDK itself is a build
-tool; the runtime and Windows Desktop Framework are carried in the embedded
-helper payload. The runtime-pack license files were copied from the exact
-packages restored from NuGet.org, not from a moving repository branch.
-
-| Component | Included text |
-| --- | --- |
-| `Microsoft.NETCore.App.Runtime.win-x64` `10.0.11` | `dotnet/microsoft.netcore.app.runtime.win-x64/LICENSE.TXT`, `dotnet/microsoft.netcore.app.runtime.win-x64/THIRD-PARTY-NOTICES.TXT` |
-| `Microsoft.WindowsDesktop.App.Runtime.win-x64` `10.0.11` | `dotnet/microsoft.windowsdesktop.app.runtime.win-x64/LICENSE.txt` |
-| WPF third-party notices for that Windows Desktop build | `dotnet/microsoft.windowsdesktop.app.runtime.win-x64/wpf-THIRD-PARTY-NOTICES.txt` |
-| Windows Forms third-party notices for that Windows Desktop build | `dotnet/microsoft.windowsdesktop.app.runtime.win-x64/winforms-THIRD-PARTY-NOTICES.txt` |
-
-The two runtime packs' NuGet metadata identifies repository
-`https://github.com/dotnet/dotnet`, commit
-`e2f47b0110ed922f21a1522da67279133ce28f32`. Their primary licenses are MIT,
-Copyright (c) .NET Foundation and Contributors. The Windows Desktop package
-contains `LICENSE` but no separate third-party-notices file, so its WPF and
-Windows Forms notices are included verbatim from that exact repository commit:
-
-- <https://raw.githubusercontent.com/dotnet/dotnet/e2f47b0110ed922f21a1522da67279133ce28f32/src/wpf/THIRD-PARTY-NOTICES.TXT>
-- <https://raw.githubusercontent.com/dotnet/dotnet/e2f47b0110ed922f21a1522da67279133ce28f32/src/winforms/THIRD-PARTY-NOTICES.TXT>
-
-Upstream aggregate notices are retained in full, including their original
-links and descriptions; an entry in those aggregate notices does not by itself
-mean that every listed component is used by Oddward. The helper's own
-`loginui/LICENSES.md` preserves original-code attribution and historical
-upstream attribution separately.
-
 ## Icon resource build tool
 
 [`github.com/akavel/rsrc` `v0.10.2`](https://github.com/akavel/rsrc/tree/v0.10.2)
@@ -131,8 +100,8 @@ ordinary builds link the checked-in icon data without running the generator.
 source URL, original path, original-byte SHA-256 and a SHA-256 normalized only
 for UTF-8 BOM and CRLF differences. Texts are copied without abridgement or
 rewriting. Recheck this inventory, actual dependency closure and source hashes
-when changing Go, module or .NET runtime versions. The license-copy script
-checks the normalized hashes before preparing the distribution directory.
+when changing Go or module versions. The license-copy script checks the
+normalized hashes before preparing the distribution directory.
 
 Proprietary game SDKs, game binaries, logos, videos, fonts and other game media
 are not distributed by this license bundle. Their owners' terms remain

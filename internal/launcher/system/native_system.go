@@ -40,9 +40,10 @@ func RunLoginUI(args []string) (bool, int) {
 // image invoked with loginui.Mode); the main launcher window never draws a
 // login form for this path.
 type NativeManagedBackend struct {
-	// ResolveLoginUI selects the helper and its fixed role arguments when the
-	// user starts the game. A missing optional helper is a preparation error.
-	ResolveLoginUI func() (string, []string, error)
+	// LoginUI is the absolute path of the isolated login window helper.
+	LoginUI string
+	// LoginUIArgs are fixed internal role arguments passed to LoginUI.
+	LoginUIArgs []string
 	// Accounts is the saved-account store. It is required.
 	Accounts *accounts.Store
 	// HTTPClient is the launcher's shared transport.
@@ -64,21 +65,10 @@ func (b NativeManagedBackend) Prepare(ctx context.Context, root string, progress
 	if b.Accounts == nil {
 		return nil, errors.New("账号存储不可用，请检查应用数据目录权限")
 	}
-	var (
-		loginUI     string
-		loginUIArgs []string
-		err         error
-	)
-	if b.ResolveLoginUI != nil {
-		loginUI, loginUIArgs, err = b.ResolveLoginUI()
-		if err != nil {
-			return nil, err
-		}
-	}
-	if strings.TrimSpace(loginUI) == "" {
+	if strings.TrimSpace(b.LoginUI) == "" {
 		return nil, errors.New("登录窗口组件缺失，请重新安装启动器")
 	}
-	if info, err := os.Stat(loginUI); err != nil || !info.Mode().IsRegular() {
+	if info, err := os.Stat(b.LoginUI); err != nil || !info.Mode().IsRegular() {
 		return nil, errors.New("登录窗口组件缺失，请重新安装启动器")
 	}
 	found, err := gamelocate.Inspect(ctx, root)
@@ -93,8 +83,8 @@ func (b NativeManagedBackend) Prepare(ctx context.Context, root string, progress
 	plan, err := session.Prepare(ctx, session.Config{
 		Root:            found.Root,
 		ElevatedHost:    true,
-		LoginUI:         loginUI,
-		LoginUIArgs:     loginUIArgs,
+		LoginUI:         b.LoginUI,
+		LoginUIArgs:     b.LoginUIArgs,
 		Accounts:        b.Accounts,
 		HTTPClient:      b.HTTPClient,
 		LauncherVersion: b.LauncherVersion,

@@ -25,7 +25,7 @@ func (s *nativeEmbedFailure) frameChanged(w uintptr) error {
 }
 
 // Only this process's hidden STATIC fixtures are changed. This does not verify
-// cross-integrity hosting, real WPF rendering, game movement or foreground focus.
+// cross-integrity hosting, real MyGo rendering, game movement or foreground focus.
 func TestNativeEmbedHiddenWindowParentStyleDPIAndRecovery(t *testing.T) {
 	for _, mode := range []string{"child", "child-owned", "child-overlapped", "recover", "recover-owned", "recover-overlapped"} {
 		t.Run(mode, func(t *testing.T) {

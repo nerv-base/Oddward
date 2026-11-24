@@ -28,13 +28,13 @@ gofmt -l cmd internal tools
 
 使用项目内工具链时，可将最后一条替换为 `.tools/go1.27.3/go/bin/gofmt.exe -l cmd internal tools`。格式和 tidy 检查应无输出。
 
-默认登录窗口与欢迎横幅使用纯 Go + MyGo Native UI（`internal/cnlogin/loginui/native`），由 `go test` 直接覆盖；仅当修改临时 WPF 回退代码时才需要运行 `pwsh -File compat/loginui/Test.ps1`。删除代码或调整包结构时，补充架构文档中的[静态检查](docs/architecture.md#静态检查)。[Windows CI](.github/workflows/windows.yml)负责纯 Go 检查、启动器及安装布局构建。
+登录窗口与欢迎横幅使用纯 Go + MyGo Native UI（`internal/cnlogin/loginui/native`），由 `go test` 直接覆盖。删除代码或调整包结构时，补充架构文档中的[静态检查](docs/architecture.md#静态检查)。[Windows CI](.github/workflows/windows.yml)负责测试、静态检查、启动器及安装布局构建。
 
 ## 提交与 PR
 
 - 一个 PR 聚焦一项改动，说明问题、实现和测试范围。
 - 不把编译成功或合成测试等同于真实游戏结果。
-- 新增原创 Go、C#、PowerShell 文件添加 `SPDX-License-Identifier: GPL-3.0-or-later`。
+- 新增原创 Go、PowerShell 文件添加 `SPDX-License-Identifier: GPL-3.0-or-later`。
 - 更新签名公钥和发布流程由维护者管理；不提交任何签名私钥。
 
 提交贡献即表示同意以 [GPL-3.0-or-later](LICENSE) 发布，并确认有权提交相关内容。第三方代码必须保留原声明，记录到 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

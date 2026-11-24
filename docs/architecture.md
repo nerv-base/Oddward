@@ -21,7 +21,6 @@ cmd/launcher
 |---|---|
 | `cmd/launcher` | 命令行、素材、依赖注入、主窗口与隔离登录界面角色（`--cnlogin-ui`） |
 | `cmd/stub` | 安装版按版本启动与回退 |
-| `cmd/overlay-host`、`cmd/overlay-poc` | 登录界面迁移的独立实验入口与模拟游戏窗口宿主，不进入发行流程，见 [MyGo Overlay PoC](mygo-overlay-poc.md) |
 | `internal/branding` | 原创图标的 SVG、PNG、ICO 源资源及 Go 嵌入数据 |
 | `internal/launcher/state` | Model、Event、Reduce、Present，以及抽卡页、签到页与游戏数据页规则 |
 | `internal/launcher` | MyGo 视图、Shell 和副作用调度 |
@@ -31,7 +30,6 @@ cmd/launcher
 | `internal/cnlogin/loginui/native` | 纯 Go + MyGo Native UI 登录窗口与欢迎横幅独立助手进程实现（`--cnlogin-ui`） |
 | `internal/checkin` | 逐日签到记录、自动开关及跨进程互斥 |
 | `internal/overlaywin` | Windows 窗口与进程身份适配：PID＋创建时间校验、WinEvent 监听、DPI 上下文与 HWND 绑定 |
-| `compat/loginui` | 临时保留的 Phase 3 WPF 登录回退助手（需 `-login-ui=wpf` 或 `-EmbedWPF` 显式启用，待真机《异环》验收后移除） |
 | `internal/game`、`gamelocate` | 只读安装检查与用户所选目录规范化 |
 | `internal/gameres` | 游戏资源元数据解析、补丁图和 baseTag 下载计划 |
 | `internal/process` | PID＋创建时间的进程身份及退出观察 |
@@ -54,7 +52,7 @@ cmd/launcher
 
 颜色和尺寸集中在 `internal/launcher/view.go`，强调色使用 `s.tone()`。共享控件放在 `controls.go`。素材以 contain 方式呈现，不假设宽高比；无障碍标签、高对比度及减少动态效果应覆盖每个可交互页面。主页体力卡内嵌官方「本性像素」「都市活力」图标，版权与来源见 `THIRD_PARTY_NOTICES.md`。
 
-应用图标统一来自 `internal/branding`：主窗口与内置 MyGo 登录助手通过 MyGo `SetIcon` 设置任务栏图标，导航栏与登录卡片使用单色 SVG（`symbol.svg`），临时 WPF 回退助手通过项目资源引用同源图像。两个 Go 入口链接已提交的 Windows/amd64 COFF 图标资源，安装器直接使用同一 ICO；修改 ICO 后用 `scripts/update-icons.ps1` 再生成 COFF。
+应用图标统一来自 `internal/branding`：主窗口与内置 MyGo 登录助手通过 MyGo `SetIcon` 设置任务栏图标，导航栏与登录卡片使用单色 SVG（`symbol.svg`）。两个 Go 入口链接已提交的 Windows/amd64 COFF 图标资源，安装器直接使用同一 ICO；修改 ICO 后用 `scripts/update-icons.ps1` 再生成 COFF。
 
 ## 国服登录
 
@@ -65,7 +63,7 @@ cmd/launcher
 - `elevatedipc`、`broker`：受限宿主启动、私有 IPC、身份校验及请求转发。
 - `laohu`、`bootcfg`、`cnproto`：登录客户端、配置解析和 SDK 消息编码。
 - `accounts`：DPAPI、私有目录权限及账号保存事务。
-- `loginui`：与独立登录 UI 助手的有界帧通信（默认拉起同一 `oddward.exe --cnlogin-ui` 隔离进程，也兼容临时 WPF 回退助手）。
+- `loginui`：与独立登录 UI 助手（`oddward.exe --cnlogin-ui`）的有界帧通信。
 - `loginui/state` 与 `loginui/native`：纯 Go + MyGo Native UI 登录窗口与欢迎横幅状态机、DirectComposition 渲染及 Win32 窗口生命周期控制。
 
 主 UI、登录 UI 助手（`--cnlogin-ui`）、账号库和 HTTP 登录均为普通权限。`--cnlogin-ui` 在 `cmd/launcher` 最早阶段分流，拒绝多余参数及非管道标准流，不打开数据库、账号库或主界面。受限宿主只持有游戏与 SDK 会话，不接受任意命令、账号文件或任意进程操作。窗口嵌入仅作用于本次会话的登录窗口和欢迎横幅，核对进程身份、窗口、隐藏状态与 DPI 后才完成绑定，并将 MyGo 无边框顶层装饰位（`WS_CAPTION|WS_SYSMENU|...`）随 `WS_POPUP` 一并清除；助手等待精确 `window_bound` 确认及原生关系检查后才显示。
@@ -147,7 +145,7 @@ HTTP 使用统一网络设置。媒体下载限制来源、重定向、大小及
 
 ## 依赖与许可
 
-Go 模块固定在 `go.mod` / `go.sum`（其中 MyGo 固定到包含 PR #2248 native child uncloak 修复的不可变伪版本 `v0.10.1-0.20261124041827-c16fc5b6d8ed`）。默认构建与运行不依赖 .NET SDK 或 WPF 运行库；仅在 Phase 3 临时回退或对比构建（`-EmbedWPF` / `compat/loginui/Test.ps1`）时使用固定在 `compat/loginui/global.json` 的 .NET SDK。当前主要依赖为 MyGo、purego、go-text/typesetting、golang.org/x 系列包，以及纯 Go 的 `modernc.org/sqlite`（静态链接 SQLite，不需要额外的 DLL 或运行库）。
+Go 模块固定在 `go.mod` / `go.sum`（其中 MyGo 固定到包含 PR #2248 native child uncloak 修复的不可变伪版本 `v0.10.1-0.20261124041827-c16fc5b6d8ed`）。当前主要依赖为 MyGo、purego、go-text/typesetting、golang.org/x 系列包，以及纯 Go 的 `modernc.org/sqlite`（静态链接 SQLite，不需要额外的 DLL 或运行库）。
 
 版本、来源和完整声明统一维护在 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) 与 `licenses/`。新增依赖前需核对许可证；发行构建会携带这些声明。官方游戏 SDK 与媒体不纳入源码或发行包。
 

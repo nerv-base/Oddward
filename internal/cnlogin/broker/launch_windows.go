@@ -52,7 +52,7 @@ func startClient(ctx context.Context, conn io.ReadWriteCloser, root string) (*Cl
 
 // Run is called only by cmd/launcher's internal elevatedipc.Mode branch, before
 // UI initialization. args are the arguments after Mode. It owns no accounts,
-// HTTP client, WPF process, or cross-process store. Once a game exists, Run
+// HTTP client, login UI process, or cross-process store. Once a game exists, Run
 // retains the SDK host and game resources until its real exit even after EOF.
 func Run(ctx context.Context, args []string) error {
 	conn, err := elevatedipc.Accept(ctx, args)

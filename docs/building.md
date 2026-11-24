@@ -3,8 +3,7 @@
 ## 环境
 
 - Windows 10/11 x64、PowerShell 7。
-- Go **1.27.3 windows/amd64**（默认纯 Go + MyGo Native UI 构建与 CI 无需 .NET SDK）。
-- （仅 Phase 3 临时 WPF 回退对比需要）.NET SDK **10.0.303**，由 `compat/loginui/global.json` 固定。
+- Go **1.27.3 windows/amd64**。
 - 创建安装器时还需要 Inno Setup 6。本机请自行安装，或通过 `ODDWARD_ISCC` 指定 `ISCC.exe`；`scripts/install-inno.ps1` 会查找已有安装，仅在 CI 环境允许自动安装。
 
 从 [Go 官方下载页](https://go.dev/dl/) 获取工具链并核对官方校验值。可以安装到 PATH，也可以将压缩包解压到项目的 `.tools/go1.27.3`，使 Go 位于 `.tools/go1.27.3/go/bin/go.exe`。
@@ -23,7 +22,7 @@ pwsh -File scripts/build-launcher.ps1
 
 默认构建脚本会：
 
-1. 使用 `mygo_noinspector` 标签构建纯 Go + MyGo Native UI Windows GUI 程序（内置 `--cnlogin-ui` 隔离登录窗口与欢迎横幅角色，无需 .NET SDK，不嵌入 WPF payload）。
+1. 使用 `mygo_noinspector` 标签构建纯 Go + MyGo Native UI Windows GUI 程序（内置 `--cnlogin-ui` 隔离登录窗口与欢迎横幅角色）。
 2. 将许可证与第三方声明一同放入输出目录。
 
 可以通过 `-Output` 指定目标文件。分发时保留输出目录中的许可证文件，不要只拿走可执行文件。
@@ -33,21 +32,6 @@ pwsh -File scripts/build-launcher.ps1 -Output artifacts/local/Oddward.exe
 ```
 
 不传 `-Version` 的产物为开发构建，不检查更新。
-
-## 临时 WPF 回退（Phase 3 验收期）
-
-在真实《异环》环境完成全量验收前，`compat/loginui` 仍作为临时回退保留。如需构建带嵌入式 WPF 回退的对比产物或运行 WPF 回归测试（需安装 .NET SDK 10.0.303）：
-
-```powershell
-pwsh -File scripts/build-launcher.ps1 -EmbedWPF
-.\artifacts\native-launcher\oddward.exe -login-ui=wpf
-
-# 单独构建与测试 WPF 回退助手
-pwsh -File compat/loginui/Build.ps1
-pwsh -File compat/loginui/Test.ps1
-```
-
-也可以通过 `-login-ui <path>` 指向任意已发布的 `Oddward.LoginUi.exe`。默认不传 `-login-ui` 时，启动器始终使用内置纯 Go + MyGo Native UI（`oddward.exe --cnlogin-ui`）。
 
 ## 应用图标
 
@@ -69,7 +53,7 @@ pwsh -File scripts/go.ps1 vet ./...
 pwsh -File scripts/go.ps1 mod tidy -diff
 ```
 
-修改 WPF 时还应运行 `compat/loginui/Test.ps1`。窗口回归需要可交互的 Windows 桌面；CI 的无游戏构建不能替代本机窗口检查。
+窗口回归需要可交互的 Windows 桌面；CI 的无游戏构建不能替代真实游戏环境检查。
 
 ## 本地数据
 

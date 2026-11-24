@@ -87,9 +87,8 @@ pwsh -File scripts/go.ps1 test ./internal/launcher/ -run 'TestRenderMockStateFra
 
 ## 构建
 
-- **发行构建**：`pwsh -File scripts/build-launcher.ps1 [-Version X.Y.Z]` 默认使用 `mygo_noinspector` 标签构建纯 Go + MyGo Native UI（内置 `--cnlogin-ui` 隔离登录窗口与欢迎横幅，无需 .NET SDK），同时输出完整许可证；不带版本号的开发构建不检查更新。仅 Phase 3 临时回退对比时传 `-EmbedWPF`（需 .NET SDK 10.0.303，使用 `mygo_noinspector loginui_embed` 标签嵌入 `compat/loginui`）。
+- **发行构建**：`pwsh -File scripts/build-launcher.ps1 [-Version X.Y.Z]` 使用 `mygo_noinspector` 标签构建纯 Go + MyGo Native UI（内置 `--cnlogin-ui` 隔离登录窗口与欢迎横幅），同时输出完整许可证；不带版本号的开发构建不检查更新。
 - **完整发布包**：`pwsh -File scripts/build-release.ps1 -Version X.Y.Z` 产出安装布局、签名更新包和安装器；`-Unsigned -NoInstaller` 用于本地打包。正式流程由 `vX.Y.Z` 标签触发，只创建草稿 Release。私钥通过 `ODDWARD_UPDATE_KEY` 提供。
-- 修改临时 WPF 回退（`compat/loginui`）后运行 `pwsh -File compat/loginui/Test.ps1`。默认使用内置 MyGo 登录窗口；传 `-login-ui=wpf`（`-EmbedWPF` 构建或 exe 旁的 `login-compat\Oddward.LoginUi.exe`）或 `-login-ui <path>` 可切换临时 WPF 助手。
 - `e2e` 标签仅供测试使用。临时 Go 实验应放入被忽略的独立模块，避免进入产品的 `./...`。
 - 具体命令与输出布局见 [构建文档](docs/building.md)。测试结果应说明覆盖范围，不把合成测试等同于真实游戏结果。
 

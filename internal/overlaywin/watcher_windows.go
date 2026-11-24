@@ -24,16 +24,6 @@ const (
 	wineventOutOfContext = 0x0000
 )
 
-// State is a snapshot of the target game window.
-type State struct {
-	HWND      uintptr
-	Valid     bool
-	Visible   bool
-	Minimized bool
-	Client    Rect
-	DPI       uintptr
-}
-
 // Watcher tracks one verified game process and its main window. OUTOFCONTEXT
 // WinEvent hooks react to move, resize, show, hide, minimize and destroy
 // immediately without DLL injection; callers may pair hooks with a low-rate
@@ -41,9 +31,7 @@ type State struct {
 type Watcher struct {
 	identity Identity
 
-	hwnd      atomic.Uintptr
 	hooks     []uintptr
-	callbacks atomic.Uint64
 	installed atomic.Bool
 	onEvent   atomic.Pointer[func()]
 }
@@ -108,36 +96,6 @@ func (w *Watcher) Uninstall() {
 	w.installed.Store(false)
 }
 
-// CallbackCount reports how many WinEvent callbacks this watcher observed.
-func (w *Watcher) CallbackCount() uint64 { return w.callbacks.Load() }
-
-// State reads the current target window state. It is safe from any goroutine.
-func (w *Watcher) State() State {
-	hwnd := w.hwnd.Load()
-	if !CandidateOf(hwnd, w.identity.PID) {
-		hwnd = FindMainWindow(w.identity.PID)
-		w.hwnd.Store(hwnd)
-	}
-	if hwnd == 0 || !IsWindow(hwnd) {
-		return State{Valid: false}
-	}
-	st := State{HWND: hwnd, Valid: true, DPI: DPI(hwnd)}
-	if !Visible(hwnd) {
-		return st
-	}
-	if Minimized(hwnd) {
-		st.Minimized = true
-		return st
-	}
-	client, err := ClientRectOf(hwnd)
-	if err != nil || client.Empty() {
-		return st
-	}
-	st.Visible = true
-	st.Client = client
-	return st
-}
-
 var (
 	hookOnce            sync.Once
 	hookCallback        uintptr
@@ -158,11 +116,9 @@ func winEventProc(hook uintptr, event uint32, hwnd uintptr, idObject int32, idCh
 		return 0
 	}
 	// Ignore accessibility descendants and windows from other processes.
-	cur := w.hwnd.Load()
-	if hwnd != 0 && hwnd != cur && ProcessOfWindow(hwnd) != w.identity.PID {
+	if hwnd != 0 && ProcessOfWindow(hwnd) != w.identity.PID {
 		return 0
 	}
-	w.callbacks.Add(1)
 	if fn := w.onEvent.Load(); fn != nil && *fn != nil {
 		(*fn)()
 	}

@@ -39,7 +39,6 @@ var (
 	procSetLastError             = kernel32.NewProc("SetLastError")
 	dwmapi                       = windows.NewLazySystemDLL("dwmapi.dll")
 	procDwmGetWindowAttribute    = dwmapi.NewProc("DwmGetWindowAttribute")
-	procDwmSetWindowAttribute    = dwmapi.NewProc("DwmSetWindowAttribute")
 )
 
 const (
@@ -72,7 +71,6 @@ const (
 	SWPFrameChanged  = 0x0020
 
 	DWMWACloaked = 14
-	DWMWACloak   = 13
 
 	spiGetClientAreaAnimation = 0x1042
 )
@@ -342,19 +340,6 @@ func IsCloaked(hwnd uintptr) bool {
 	var cloaked uint32
 	hr, _, _ := procDwmGetWindowAttribute.Call(hwnd, DWMWACloaked, uintptr(unsafe.Pointer(&cloaked)), unsafe.Sizeof(cloaked))
 	return hr == 0 && cloaked != 0
-}
-
-// Uncloak clears a DWM cloak that hides hwnd. It must be called while hwnd is
-// still top-level: DWM refuses DWMWA_CLOAK on a WS_CHILD window with E_HANDLE.
-func Uncloak(hwnd uintptr) error {
-	off := int32(0)
-	if hr, _, _ := procDwmSetWindowAttribute.Call(hwnd, DWMWACloak, uintptr(unsafe.Pointer(&off)), unsafe.Sizeof(off)); hr != 0 {
-		return fmt.Errorf("overlay: DwmSetWindowAttribute(DWMWA_CLOAK, 0): %#x", hr)
-	}
-	if IsCloaked(hwnd) {
-		return errors.New("overlay: window is still cloaked")
-	}
-	return nil
 }
 
 // Candidate checks the window-level half of the identity contract: visible,

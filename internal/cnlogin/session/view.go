@@ -12,7 +12,7 @@ import (
 	"github.com/nerv-base/Oddward/internal/cnlogin/loginui"
 )
 
-// model renders the current login state for the authored WPF window.
+// model renders the current login state for the isolated login window.
 func (s *Session) model() loginui.Model {
 	m := loginui.Model{
 		Screen:      s.st.screen,
