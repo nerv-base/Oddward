@@ -322,6 +322,108 @@ func TestRenderMockStateFrames(t *testing.T) {
 			s.Poster, s.Logo, s.Slogan, s.News, s.Accent = nil, nil, nil, nil, ui.Color{}
 			loaded(s)
 		}},
+		{"38-gallery-empty", func(s *Shell, _ *ui.Tester) {
+			s.Model.Page = state.Gallery
+			s.Model.Gallery.Initialized = true
+			s.Model.Gallery.Phase = state.GalleryReady
+		}},
+		{"39-gallery-grid", func(s *Shell, _ *ui.Tester) {
+			s.WishLocation = time.FixedZone("CST", 8*3600)
+			s.Model.Page = state.Gallery
+			s.Model.Gallery.Initialized = true
+			s.Model.Gallery.Phase = state.GalleryReady
+			s.Model.Gallery.Watching = true
+			s.Model.Gallery.TotalCount = 4
+			s.Model.Gallery.FilteredCount = 4
+			s.Model.Gallery.CachedCount = 2
+			s.Model.Gallery.ExportedCount = 1
+			s.Model.Gallery.ArchivedCount = 1
+			s.Model.Gallery.ArchiveBytes = 1_825_842
+			s.gallery.assets = sampleGalleryAssets()
+			s.gallery.uids = []string{"100001", "200002"}
+			s.gallery.hasUnknownUID = true
+			s.gallery.rowsRev++
+			fb := newFakeGalleryBackend(s.gallery.assets...)
+			s.GalleryBackend = fb
+			for _, a := range s.gallery.assets {
+				if !a.Invalid && a.Available {
+					px, _, _ := fb.DecodeThumbnail(s.ctx, a, galleryThumbEdgeL1)
+					s.gallery.images.remember(galleryThumbKey{assetID: a.ID, edge: galleryThumbEdgeL1}, ui.NewBitmap(px))
+				}
+			}
+		}},
+		{"40-gallery-viewer", func(s *Shell, _ *ui.Tester) {
+			s.WishLocation = time.FixedZone("CST", 8*3600)
+			s.Model.Page = state.Gallery
+			s.Model.Gallery.Initialized = true
+			s.Model.Gallery.Phase = state.GalleryReady
+			s.Model.Gallery.TotalCount = 4
+			s.Model.Gallery.FilteredCount = 4
+			s.Model.Gallery.CachedCount = 2
+			s.Model.Gallery.ExportedCount = 1
+			s.Model.Gallery.ArchivedCount = 1
+			s.Model.Gallery.ViewerOpen = true
+			s.Model.Gallery.ViewerID = 1
+			s.gallery.assets = sampleGalleryAssets()
+			s.gallery.rowsRev++
+			fb := newFakeGalleryBackend(s.gallery.assets...)
+			s.GalleryBackend = fb
+			px, _ := fb.DecodeOriginal(s.ctx, s.gallery.assets[0])
+			s.gallery.images.viewerAssetID = 1
+			s.gallery.images.viewerBitmap = ui.NewBitmap(px)
+			s.gallery.images.viewerIsFull = true
+		}},
+		{"41-gallery-settings", func(s *Shell, _ *ui.Tester) {
+			s.WishLocation = time.FixedZone("CST", 8*3600)
+			s.Model.Page = state.Gallery
+			s.Model.Gallery.Initialized = true
+			s.Model.Gallery.Phase = state.GalleryReady
+			s.Model.Gallery.SettingsOpen = true
+			s.Model.Gallery.EffectiveArchive = `C:\Users\Player\Pictures\Oddward\Gallery`
+			s.Model.Gallery.TotalCount = 4
+			s.Model.Gallery.FilteredCount = 4
+			s.Model.Gallery.CachedCount = 2
+			s.Model.Gallery.ExportedCount = 1
+			s.Model.Gallery.ArchivedCount = 1
+			s.Model.Gallery.ArchiveBytes = 1_825_842
+			s.Model.Gallery.ThumbCacheBytes = 68 << 20
+			s.gallery.assets = sampleGalleryAssets()
+			s.gallery.rowsRev++
+			fb := newFakeGalleryBackend(s.gallery.assets...)
+			s.GalleryBackend = fb
+			for _, a := range s.gallery.assets {
+				if !a.Invalid && a.Available {
+					px, _, _ := fb.DecodeThumbnail(s.ctx, a, galleryThumbEdgeL1)
+					s.gallery.images.remember(galleryThumbKey{assetID: a.ID, edge: galleryThumbEdgeL1}, ui.NewBitmap(px))
+				}
+			}
+		}},
+		{"42-gallery-settings-cache", func(s *Shell, _ *ui.Tester) {
+			s.WishLocation = time.FixedZone("CST", 8*3600)
+			s.Model.Page = state.Gallery
+			s.Model.Gallery.Initialized = true
+			s.Model.Gallery.Phase = state.GalleryReady
+			s.Model.Gallery.SettingsOpen = true
+			s.Model.Gallery.EffectiveArchive = `C:\Users\Player\Pictures\Oddward\Gallery`
+			s.Model.Gallery.TotalCount = 4
+			s.Model.Gallery.FilteredCount = 4
+			s.Model.Gallery.CachedCount = 2
+			s.Model.Gallery.ExportedCount = 1
+			s.Model.Gallery.ArchivedCount = 1
+			s.Model.Gallery.ArchiveBytes = 1_825_842
+			s.Model.Gallery.ThumbCacheBytes = 68 << 20
+			s.gallery.settingsTab = gallerySettingsTabCache
+			s.gallery.assets = sampleGalleryAssets()
+			s.gallery.rowsRev++
+			fb := newFakeGalleryBackend(s.gallery.assets...)
+			s.GalleryBackend = fb
+			for _, a := range s.gallery.assets {
+				if !a.Invalid && a.Available {
+					px, _, _ := fb.DecodeThumbnail(s.ctx, a, galleryThumbEdgeL1)
+					s.gallery.images.remember(galleryThumbKey{assetID: a.ID, edge: galleryThumbEdgeL1}, ui.NewBitmap(px))
+				}
+			}
+		}},
 	}
 	only := os.Getenv("ODDWARD_STATES_ONLY")
 	for _, f := range frames {

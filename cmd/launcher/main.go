@@ -106,6 +106,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	galleryBackend, err := system.NewGalleryBackend(db, dataRoot)
+	if err != nil {
+		log.Printf("gallery backend unavailable: %v", err)
+	} else {
+		defer galleryBackend.Close()
+	}
 	// The production backends are built before the window exists: adopting the
 	// records of an older build has to finish before the interface can read or
 	// write any of them.
@@ -133,6 +139,9 @@ func main() {
 		s.WishLinkBackend = tajiduoBackend
 		s.CheckInBackend = tajiduoBackend
 		s.WishBackend, s.WishLocation = wishArchives, time.Local
+		if galleryBackend != nil {
+			s.GalleryBackend = galleryBackend
+		}
 		s.GameDownloads = downloads
 		prefs := saved.Downloads
 		if prefs == (launchsettings.Downloads{}) {
@@ -321,6 +330,53 @@ func main() {
 					log.Printf("open folder %q: %v", path, err)
 				}
 			}()
+		}
+		s.RevealFile = func(path string) {
+			if path == "" {
+				return
+			}
+			go mygo.Shell.ShowItemInFolder(path)
+		}
+		s.WriteClipboardImage = func(pngData []byte) error {
+			return mygo.Clipboard.WriteImage(pngData)
+		}
+		s.PickGalleryDirectory = func(ctx context.Context, title string) (string, error) {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{Parent: w, Title: title, ButtonLabel: "选择文件夹", Directory: true})
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", ctxErr
+			}
+			if err != nil {
+				return "", err
+			}
+			if len(paths) == 0 {
+				return "", nil
+			}
+			return paths[0], nil
+		}
+		s.PickGalleryExportFile = func(ctx context.Context, suggested string) (string, error) {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(suggested)), ".")
+			if ext == "" {
+				ext = "png"
+			}
+			path, err := mygo.Dialog.Save(mygo.SaveDialogOptions{
+				Parent:      w,
+				Title:       "导出摄影作品",
+				DefaultPath: suggested,
+				Filters:     []mygo.FileFilter{{Name: strings.ToUpper(ext), Extensions: []string{ext}}, {Name: "图片", Extensions: []string{"png", "jpg", "jpeg", "webp", "bmp"}}},
+			})
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", ctxErr
+			}
+			if err != nil {
+				return "", err
+			}
+			return path, nil
 		}
 		installTray(w, s)
 		w.Invalidate()

@@ -22,9 +22,10 @@ cmd/launcher
 | `cmd/launcher` | 命令行、素材、依赖注入及主窗口 |
 | `cmd/stub` | 安装版按版本启动与回退 |
 | `internal/branding` | 原创图标的 SVG、PNG、ICO 源资源及 Go 嵌入数据 |
-| `internal/launcher/state` | Model、Event、Reduce、Present，以及抽卡页、签到页与游戏数据页规则 |
+| `internal/launcher/state` | Model、Event、Reduce、Present，以及抽卡页、签到页、游戏数据页与海特洛相册规则 |
 | `internal/launcher` | MyGo 视图、Shell 和副作用调度 |
-| `internal/launcher/system` | 登录、设置、网络、更新、档案、签到等系统适配 |
+| `internal/launcher/system` | 登录、设置、网络、更新、档案、签到、海特洛相册等系统适配 |
+| `internal/gallery` | 海特洛相册：目录发现、增量扫描、ReadDirectoryChangesW 监听、内容寻址归档、崩溃恢复与分级缩略图缓存 |
 | `internal/cnlogin` | 国服登录、加密账号库、游戏启动及 SDK 会话 |
 | `internal/checkin` | 逐日签到记录、自动开关及跨进程互斥 |
 | `compat/loginui` | 自包含 WPF 登录窗口和窗口呈现 |
@@ -117,6 +118,15 @@ HTTP 使用统一网络设置。媒体下载限制来源、重定向、大小及
 游戏信息面板只显示服务器返回的字段：本性像素、都市活力、每日活跃度、周本剩余，以及角色名、等级、鉴别等级等。角色头像是按 `roleHome` 返回的头像 id 从官方社区 CDN 读取的公开图片，失败时回退到姓名首字。接口只提供当前值与上限，没有提供恢复时间、备用池、溢出资源或派遣数据；主页的本性像素卡片按 6 分钟/点计算下一点与回满时间，卡片右上角可手动刷新，备用体力不推算，轨外之境不展示。读取由用户主动刷新，失败时保留上次成功快照并标注失败原因，不在后台轮询。
 
 「游戏数据」页复用同一条 `roleHome` 快照，增加角色收集、区域探索、房产与载具概览；它不另发详情请求，也不编造未返回的字段。进入页面或主页时读取一次，手动刷新才会再次读取。
+
+## 海特洛相册
+
+「海特洛相册」（`internal/gallery`、`internal/launcher/state/gallery.go`、`internal/launcher/system/gallery_backend.go`、`internal/launcher/gallery_*.go`）坚持 Local-first，完全离线运行，不发起网络请求、不依赖塔吉多登录、不注入游戏进程，也不修改、移动或删除游戏原始文件。
+
+- **来源发现与隔离**：通过 `internal/gamelocate` 规范化后的安装目录只读探测 `Client/WindowsNoEditor/Selfie/<UID>/ScreenShots`（及 `HT/Selfie/<UID>/ScreenShots` 变体），跳过 `FFMpeg` 与 `*_KeyFrame.*` 等视频派生文件；通过 Windows Known Folder API（`SHGetKnownFolderPath`）探测 `Pictures/NevernessToEverness`，并允许用户添加或移除自定义目录。无法确认归属的导出或自定义照片保留 `uid = NULL`（界面标为「未知归属」），不猜测账号映射。所有路径逐级拒绝符号链接、junction 与 reparse point。
+- **元数据与索引**：结构化元数据与位置关系存在本地 SQLite（`gallery_settings`、`gallery_sources`、`gallery_assets`、`gallery_asset_locations`、`gallery_archive`），大文件留在文件系统。扫描只读取头部与流式 SHA256，校验魔数、体积、边长与像素上限后再建立索引；增量扫描通过 `(file_size, modified_at, file_identity)` 跳过未变化文件。仅当文件真实包含 EXIF 拍摄时间时写入 `captured_at`，未知时保持 `NULL`，界面按真实时间或文件修改时间分组排序但不把 `mtime` 冒充为拍摄时间。
+- **实时监听与自动归档**：通过重叠 I/O 的 `ReadDirectoryChangesW` 监听目录创建、写入、重命名和删除事件，合并去抖并等待文件稳定后处理；监听溢出、休眠唤醒及切换游戏目录时取消旧任务并触发增量对账。自动归档开关默认关闭，开启后将游戏缓存的原始字节通过同卷临时文件、校验和原子发布复制到内容寻址目录 `originals/<sha256[:2]>/<sha256>.<ext>`（默认位于 `<Pictures>\Oddward\Gallery`），绝不使用硬链接；不同画质与相框版本因哈希不同分别保留。磁盘空间不足时停止归档并保留源文件；启动时自动对账清理遗留临时文件、补录或收养孤立归档并标记丢失副本。自动归档不会提升源图画质，Oddward 关闭期间无法监听游戏拍照。删除操作仅限用户明确确认的 Oddward 归档副本。
+- **渲染与缓存**：相册网格基于 MyGo `ui.List` 虚拟化渲染并按日期分组；解码与缩放由 4 个有界后台 worker 执行，内容寻址磁盘缩略图缓存存于 `%LOCALAPPDATA%\Oddward\cache\gallery\thumbnails`（默认 256 MiB 预算，支持手动清理），UI 线程 Bitmap LRU 受 64 MiB 字节预算与条目上限约束，淘汰或离开相册页面时调用 `ReleasePixels` 释放图形内存。查看器支持缩放、拖拽平移、适应/1:1、左右切换、导出和 Windows 剪贴板复制。
 
 ## 游戏资源规划
 

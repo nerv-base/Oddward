@@ -36,6 +36,11 @@ var launcherIcons = map[string]*ui.SVG{
 	"\uE72B": lineIcon(`<path d="m15 5-7 7 7 7"/>`),
 	"\uE77B": lineIcon(`<circle cx="12" cy="8" r="4"/><path d="M4 21c1.2-4 4.3-6 8-6s6.8 2 8 6"/>`),
 	"\uE74D": lineIcon(`<path d="M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13M10 11v6m4-6v6"/>`),
+	"\uEB9F": lineIcon(`<rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="8.5" cy="9.5" r="1.7"/><path d="m21 15.5-5-5L7 19.5"/>`),
+	"\uE8B7": lineIcon(`<path d="M3 6.5A2.5 2.5 0 0 1 5.5 4H9l2 2.5h7.5A2.5 2.5 0 0 1 21 9v8.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5Z"/>`),
+	"\uE8C8": lineIcon(`<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>`),
+	"\uE8F1": lineIcon(`<rect x="3" y="4" width="18" height="4.5" rx="1.2"/><path d="M5 8.5v9.5A2 2 0 0 0 7 20h10a2 2 0 0 0 2-2V8.5M10 13h4"/>`),
+	"\uEDA2": lineIcon(`<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/>`),
 }
 
 func glyph(c *ui.Context, key string, size float32) {

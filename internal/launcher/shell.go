@@ -78,38 +78,44 @@ type brandingResult struct {
 // Shell owns UI-thread state. No element or build context escapes a frame.
 // The mock clock is advanced by the UI, not goroutines or wall-clock tests.
 type Shell struct {
-	Model              state.Model
-	WishLinkBackend    WishLinkBackend
-	wishLink           wishLinkMedia
-	WishBackend        WishArchiveBackend
-	WishImages         wishImageSource
-	wishIcons          wishIconMedia
-	WishLocation       *time.Location
-	PickWishImport     func(context.Context) (string, error)
-	PickWishExport     func(context.Context, string, state.WishFormat) (string, error)
-	wish               wishArchives
-	FixedWindow        bool
-	ManagedBackend     ManagedBackend
-	ManagedStore       ManagedStore
-	PickGameDirectory  func(context.Context) (string, error)
-	ManagedPathInput   string
-	InitialManagedRoot string
-	managedOut         chan managedResult
-	managedProgress    chan state.Event
-	managedCancel      context.CancelFunc
-	managedPlan        GamePlan
-	gameSession        GameSession
-	managedPlanRoot    string
-	managedSave        chan ManagedPreferences
-	managedSaveStarted bool
-	Player             *ui.VideoPlayer
-	nextPlayer         *ui.VideoPlayer
-	BackgroundSource   BackgroundSource
-	backgroundOut      chan backgroundResult
-	Slogan             *ui.Bitmap
-	Logo               *ui.Bitmap
-	News               *ui.Bitmap
-	Poster             *ui.Bitmap
+	Model                 state.Model
+	WishLinkBackend       WishLinkBackend
+	wishLink              wishLinkMedia
+	WishBackend           WishArchiveBackend
+	WishImages            wishImageSource
+	wishIcons             wishIconMedia
+	WishLocation          *time.Location
+	PickWishImport        func(context.Context) (string, error)
+	PickWishExport        func(context.Context, string, state.WishFormat) (string, error)
+	wish                  wishArchives
+	GalleryBackend        GalleryBackend
+	PickGalleryDirectory  func(context.Context, string) (string, error)
+	PickGalleryExportFile func(context.Context, string) (string, error)
+	WriteClipboardImage   func([]byte) error
+	RevealFile            func(string)
+	gallery               galleryRuntime
+	FixedWindow           bool
+	ManagedBackend        ManagedBackend
+	ManagedStore          ManagedStore
+	PickGameDirectory     func(context.Context) (string, error)
+	ManagedPathInput      string
+	InitialManagedRoot    string
+	managedOut            chan managedResult
+	managedProgress       chan state.Event
+	managedCancel         context.CancelFunc
+	managedPlan           GamePlan
+	gameSession           GameSession
+	managedPlanRoot       string
+	managedSave           chan ManagedPreferences
+	managedSaveStarted    bool
+	Player                *ui.VideoPlayer
+	nextPlayer            *ui.VideoPlayer
+	BackgroundSource      BackgroundSource
+	backgroundOut         chan backgroundResult
+	Slogan                *ui.Bitmap
+	Logo                  *ui.Bitmap
+	News                  *ui.Bitmap
+	Poster                *ui.Bitmap
 	// StaminaIcon and CityStaminaIcon are the embedded official resource
 	// icons used by the home stamina card.
 	StaminaIcon     *ui.Bitmap
@@ -231,6 +237,7 @@ func NewShell(m state.Model) *Shell {
 	s.StaminaIcon = decodeBundledIcon(staminaIconData)
 	s.CityStaminaIcon = decodeBundledIcon(cityStaminaIconData)
 	s.NetworkForm = networkForm(m.Network)
+	s.initGallery()
 	if state.Active(m.Flow) {
 		s.apply([]state.Effect{{Kind: state.Simulate, Flow: m.Flow, Token: m.Token}})
 	}
@@ -250,7 +257,7 @@ func (s *Shell) Dispatch(e state.Event) {
 
 func (s *Shell) apply(fx []state.Effect) {
 	for _, f := range fx {
-		if s.applyDownloadEffect(f) || s.applyWishLinkEffect(f) || s.applyWishEffect(f) || s.applyCheckInEffect(f) || s.applyManagedEffect(f) || s.applyUpdateEffect(f) || s.applyLoginEffect(f) {
+		if s.applyDownloadEffect(f) || s.applyWishLinkEffect(f) || s.applyWishEffect(f) || s.applyCheckInEffect(f) || s.applyManagedEffect(f) || s.applyUpdateEffect(f) || s.applyLoginEffect(f) || s.applyGalleryEffect(f) {
 			continue
 		}
 		switch f.Kind {
@@ -289,6 +296,7 @@ func (s *Shell) apply(fx []state.Effect) {
 
 func (s *Shell) Dispose() {
 	s.cancel()
+	s.disposeGallery()
 	s.cancelManagedWork()
 	s.pending = nil
 	s.newsPending, s.detailPending, s.brandingPending = false, false, false
@@ -602,6 +610,7 @@ func (s *Shell) tick(c *ui.Context) {
 	s.syncDownloadOffers(c)
 	s.syncUpdate()
 	s.syncCheckIn(c)
+	s.syncGallery()
 	// The home stamina card shows a live "next point" countdown; without a
 	// scheduled frame it would freeze until another state change.
 	if s.Model.Page == state.Home && s.Model.CheckIn.Linked && !s.Model.CheckIn.NeedsRelink {
@@ -648,6 +657,9 @@ func (s *Shell) View(c *ui.Context) {
 			s.footer(c)
 		case state.GameData:
 			s.gameDataPage(c, s.gameDataProjection())
+			s.footer(c)
+		case state.Gallery:
+			s.galleryPage(c)
 			s.footer(c)
 		case state.LauncherSettings:
 			s.launcherSettingsPage(c)

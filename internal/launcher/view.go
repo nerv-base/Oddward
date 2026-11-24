@@ -211,7 +211,28 @@ const (
 	checkinSpaceXL       float32 = 24
 	checkinHairlineWidth float32 = 1
 	checkinStatusOpacity float32 = .18
-	monoFont                     = "Bahnschrift"
+	// Hethereau Gallery page layout constants.
+	galleryInset                float32 = 28
+	galleryHeaderTop            float32 = 58
+	galleryToolbarHeight        float32 = 40
+	galleryTabsHeight           float32 = 34
+	galleryGridTop              float32 = 154
+	galleryGridTopNotice        float32 = 182
+	galleryStatusBarHeight      float32 = 32
+	galleryBottomInset          float32 = 54
+	galleryDateHeaderHeight     float32 = 34
+	galleryTileMinWidth         float32 = 232
+	galleryTileGap              float32 = 12
+	galleryTileFooterHeight     float32 = 34
+	galleryTileRadius           float32 = 10
+	galleryControlHeight        float32 = 34
+	galleryViewerBarHeight      float32 = 52
+	galleryViewerFootHeight     float32 = 64
+	gallerySettingsDialogWidth  float32 = 760
+	gallerySettingsDialogHeight float32 = 520
+	gallerySettingsNavWidth     float32 = 184
+	gallerySettingsCardRadius   float32 = 14
+	monoFont                            = "Bahnschrift"
 )
 
 // The first-screen prefetch estimate is kept out of the layout block above so
