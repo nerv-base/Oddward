@@ -74,7 +74,7 @@ func main() {
 		hostPID  = flag.Uint("host-pid", 0, "target host PID (used when -host is 0)")
 		hostMade = flag.String("host-created", "", "expected host creation time (decimal FILETIME)")
 		mode     = flag.String("mode", "owner", "binding mode: owner or child")
-		uncloak  = flag.Bool("child-uncloak", true, "clear MyGo's first-frame cloak before child binding (needed on v0.10.0; latest main does it itself)")
+		uncloak  = flag.Bool("child-uncloak", false, "clear MyGo's first-frame cloak before child binding (legacy v0.10.0 workaround; pinned MyGo includes PR #2248)")
 		control  = flag.Int("control", 0, "control TCP port on 127.0.0.1")
 		banner   = flag.String("banner", "", "start in welcome-banner mode with this text")
 		duration = flag.Duration("duration", 0, "exit after this duration")

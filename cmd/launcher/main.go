@@ -34,14 +34,19 @@ import (
 )
 
 func main() {
-	// Handle the restricted SDK host before opening account stores or starting
-	// MyGo. Only this child process receives a UAC elevation request.
+	// Handle internal child roles before opening databases, account stores or
+	// initializing the main launcher window.
+	// 1) Restricted elevated SDK host (--cnlogin-host): only this role receives UAC.
 	if handled, err := system.RunNativeHost(context.Background(), os.Args[1:]); handled {
 		if err != nil {
 			log.Print("SDK host stopped before completing its session")
 			os.Exit(1)
 		}
 		return
+	}
+	// 2) Isolated ordinary-privilege MyGo login UI / welcome banner (--cnlogin-ui).
+	if handled, code := system.RunLoginUI(os.Args[1:]); handled {
+		os.Exit(code)
 	}
 	background := flag.String("background", os.Getenv("ODDWARD_BACKGROUND"), "read-only local background video; never bundled")
 	poster := flag.String("background-still", os.Getenv("ODDWARD_BACKGROUND_STILL"), "read-only static fallback; defaults to video's bg_0.png sibling")
@@ -51,7 +56,7 @@ func main() {
 	gameRoot := flag.String("game-root", "", "initial selected game path; read-only revalidation, never automatic launch")
 	dataDir := flag.String("data-dir", "", "optional absolute private launcher data directory (settings and accounts)")
 	demo := flag.Bool("demo", false, "explicit memory-only game-state preview; normal entry does not simulate launch")
-	loginUI := flag.String("login-ui", os.Getenv("ODDWARD_LOGIN_UI"), "optional absolute path to the authored login window helper; defaults to the embedded copy")
+	loginUI := flag.String("login-ui", os.Getenv("ODDWARD_LOGIN_UI"), "login window: built-in MyGo by default, wpf for an -EmbedWPF build, or a separately published helper path")
 	flag.Parse()
 	settingsPath, cachePath, err := nativeDataPaths(*dataDir)
 	if err != nil {
@@ -173,9 +178,12 @@ func main() {
 		s.HomeAccountUse = func(_ context.Context, id string) error {
 			return accountStore.SetLast(id)
 		}
+		loginUIOverride := *loginUI
 		s.ManagedBackend = system.NativeManagedBackend{
-			Downloads:       downloads,
-			LoginUI:         resolveLoginUI(executable, *loginUI),
+			Downloads: downloads,
+			ResolveLoginUI: func() (string, []string, error) {
+				return resolveLoginUI(executable, loginUIOverride)
+			},
 			Accounts:        accountStore,
 			HTTPClient:      &http.Client{Transport: network},
 			LauncherVersion: buildinfo.Version,

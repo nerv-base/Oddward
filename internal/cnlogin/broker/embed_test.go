@@ -105,7 +105,7 @@ func TestEmbedOverlaySameDPIChangesOnlyHiddenUI(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := s.windows[100]
-	if w.parent != 200 || w.style&overlayChild == 0 || w.style&overlayPopup != 0 || w.visible || w.topmost || s.windows[200] != target || len(s.calls) != 3 {
+	if w.parent != 200 || w.style&overlayChild == 0 || w.style&overlayChildClear != 0 || w.visible || w.topmost || s.windows[200] != target || len(s.calls) != 3 {
 		t.Fatal("same-DPI UI was not embedded without changing game")
 	}
 	if s.closes.Load() != 3 {
@@ -114,6 +114,31 @@ func TestEmbedOverlaySameDPIChangesOnlyHiddenUI(t *testing.T) {
 	s.calls = nil
 	if err := bindOverlay(context.Background(), root, game, p, s); err != nil || len(s.calls) != 0 {
 		t.Fatal("same-game child retry was not idempotent")
+	}
+}
+func TestEmbedOverlayStripsTopLevelDecorationsAndRestoresOnFailure(t *testing.T) {
+	const framelessStyle = overlayCaption | overlaySysMenu | overlayMinimizeBox | overlayMaximizeBox | overlayThickFrame | 0x02000000 // WS_CLIPCHILDREN
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "embed", true: "rollback"}[fail], func(t *testing.T) {
+			s, root, game, p := embedFixture()
+			w := s.windows[100]
+			w.style = framelessStyle
+			s.windows[100] = w
+			if fail {
+				s.fail = "frame"
+			}
+			err := bindOverlay(context.Background(), root, game, p, s)
+			actual := s.windows[100]
+			if fail {
+				if err == nil || actual.style != framelessStyle || !actual.topLevel || actual.parent != 0 {
+					t.Fatalf("failed embed did not restore original frameless style: err=%v style=%#x", err, actual.style)
+				}
+				return
+			}
+			if err != nil || actual.style&overlayChild == 0 || actual.style&overlayChildClear != 0 || actual.style&0x02000000 == 0 || actual.parent != 200 {
+				t.Fatalf("embed did not strip top-level decorations: err=%v style=%#x parent=%d", err, actual.style, actual.parent)
+			}
+		})
 	}
 }
 func TestEmbedOverlayDPIUncertaintyFallsBackWithoutParentMutation(t *testing.T) {

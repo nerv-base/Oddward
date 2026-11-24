@@ -84,7 +84,7 @@ func bindOverlay(ctx context.Context, parent, game process.Identity, p overlayPa
 	var gameWindow overlayWindow
 	check := func() (overlayWindow, error) {
 		w, err := sys.window(uintptr(p.Window))
-		ownChild := p.PreferChild && w.style&overlayChild != 0 && w.style&overlayPopup == 0 && w.parent == uintptr(p.GameWindow)
+		ownChild := p.PreferChild && w.style&overlayChild != 0 && w.style&overlayChildClear == 0 && w.parent == uintptr(p.GameWindow)
 		if err != nil || w.pid != p.UI.PID || (!w.topLevel && !ownChild) || w.topmost || (p.PreferChild && (w.visible || w.style&overlayVisible != 0)) {
 			return overlayWindow{}, errRemote
 		}

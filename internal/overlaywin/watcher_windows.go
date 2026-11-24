@@ -1,9 +1,11 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //go:build windows
 
 package overlaywin
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"golang.org/x/sys/windows"
@@ -12,7 +14,11 @@ import (
 const (
 	eventSystemMoveSizeStart  = 0x000A
 	eventSystemMoveSizeEnd    = 0x000B
+	eventSystemMinimizeStart  = 0x0016
+	eventSystemMinimizeEnd    = 0x0017
 	eventObjectDestroy        = 0x8001
+	eventObjectShow           = 0x8002
+	eventObjectHide           = 0x8003
 	eventObjectLocationChange = 0x800B
 
 	wineventOutOfContext = 0x0000
@@ -28,9 +34,10 @@ type State struct {
 	DPI       uintptr
 }
 
-// Watcher tracks one verified game process and its main window. Hooks make it
-// react to move/resize/destroy promptly; the caller also polls State because
-// hooks are best-effort, exactly as the WPF overlay does.
+// Watcher tracks one verified game process and its main window. OUTOFCONTEXT
+// WinEvent hooks react to move, resize, show, hide, minimize and destroy
+// immediately without DLL injection; callers may pair hooks with a low-rate
+// health check for process lifetime and late window creation.
 type Watcher struct {
 	identity Identity
 
@@ -38,6 +45,7 @@ type Watcher struct {
 	hooks     []uintptr
 	callbacks atomic.Uint64
 	installed atomic.Bool
+	onEvent   atomic.Pointer[func()]
 }
 
 // NewWatcher creates a watcher for a verified identity.
@@ -48,19 +56,30 @@ func NewWatcher(id Identity) (*Watcher, error) {
 	return &Watcher{identity: id}, nil
 }
 
+// SetOnEvent registers a callback invoked on the installing UI thread whenever
+// a matching WinEvent arrives for the watched process. Pass nil to clear.
+func (w *Watcher) SetOnEvent(fn func()) {
+	if fn == nil {
+		w.onEvent.Store(nil)
+		return
+	}
+	w.onEvent.Store(&fn)
+}
+
 // Install installs the WinEvent hooks. It must be called on the thread that
 // runs the message loop (the MyGo UI thread); callbacks are delivered there.
 func (w *Watcher) Install() error {
 	if w.installed.Load() {
 		return nil
 	}
-	if hookCallback == 0 {
+	hookOnce.Do(func() {
 		hookCallback = windows.NewCallback(winEventProc)
-	}
+	})
 	ranges := [][2]uint32{
 		{eventObjectLocationChange, eventObjectLocationChange},
 		{eventSystemMoveSizeStart, eventSystemMoveSizeEnd},
-		{eventObjectDestroy, eventObjectDestroy},
+		{eventSystemMinimizeStart, eventSystemMinimizeEnd},
+		{eventObjectDestroy, eventObjectHide},
 	}
 	for _, r := range ranges {
 		h, _, err := procSetWinEventHook.Call(uintptr(r[0]), uintptr(r[1]), 0, hookCallback, uintptr(w.identity.PID), 0, wineventOutOfContext)
@@ -69,8 +88,10 @@ func (w *Watcher) Install() error {
 			return fmt.Errorf("overlay: SetWinEventHook(%#x): %w", r[0], err)
 		}
 		w.hooks = append(w.hooks, h)
+		watcherMu.Lock()
+		watchersByHook[h] = w
+		watcherMu.Unlock()
 	}
-	currentWatcher.Store(w)
 	w.installed.Store(true)
 	return nil
 }
@@ -78,11 +99,13 @@ func (w *Watcher) Install() error {
 // Uninstall removes the hooks. It must be called on the installing thread.
 func (w *Watcher) Uninstall() {
 	for _, h := range w.hooks {
+		watcherMu.Lock()
+		delete(watchersByHook, h)
+		watcherMu.Unlock()
 		procUnhookWinEvent.Call(h)
 	}
 	w.hooks = nil
 	w.installed.Store(false)
-	currentWatcher.CompareAndSwap(w, nil)
 }
 
 // CallbackCount reports how many WinEvent callbacks this watcher observed.
@@ -91,11 +114,11 @@ func (w *Watcher) CallbackCount() uint64 { return w.callbacks.Load() }
 // State reads the current target window state. It is safe from any goroutine.
 func (w *Watcher) State() State {
 	hwnd := w.hwnd.Load()
-	if hwnd == 0 || !isWindow(hwnd) || ProcessOfWindow(hwnd) != w.identity.PID {
+	if !CandidateOf(hwnd, w.identity.PID) {
 		hwnd = FindMainWindow(w.identity.PID)
 		w.hwnd.Store(hwnd)
 	}
-	if hwnd == 0 || !isWindow(hwnd) {
+	if hwnd == 0 || !IsWindow(hwnd) {
 		return State{Valid: false}
 	}
 	st := State{HWND: hwnd, Valid: true, DPI: DPI(hwnd)}
@@ -116,26 +139,32 @@ func (w *Watcher) State() State {
 }
 
 var (
+	hookOnce            sync.Once
 	hookCallback        uintptr
-	currentWatcher      atomic.Pointer[Watcher]
+	watcherMu           sync.RWMutex
+	watchersByHook      = map[uintptr]*Watcher{}
 	procSetWinEventHook = user32.NewProc("SetWinEventHook")
 	procUnhookWinEvent  = user32.NewProc("UnhookWinEvent")
-	procIsWindow        = user32.NewProc("IsWindow")
 )
 
-func isWindow(hwnd uintptr) bool {
-	v, _, _ := procIsWindow.Call(hwnd)
-	return v != 0
-}
-
-func winEventProc(_ uintptr, event uint32, hwnd uintptr, idObject int32, idChild int32, _ uint32, _ uint32) uintptr {
-	w := currentWatcher.Load()
-	if w == nil || idObject != 0 || idChild != 0 {
+func winEventProc(hook uintptr, event uint32, hwnd uintptr, idObject int32, idChild int32, _ uint32, _ uint32) uintptr {
+	if idObject != 0 || idChild != 0 {
 		return 0
 	}
-	if hwnd != 0 && hwnd != w.hwnd.Load() && ProcessOfWindow(hwnd) != w.identity.PID {
+	watcherMu.RLock()
+	w := watchersByHook[hook]
+	watcherMu.RUnlock()
+	if w == nil {
+		return 0
+	}
+	// Ignore accessibility descendants and windows from other processes.
+	cur := w.hwnd.Load()
+	if hwnd != 0 && hwnd != cur && ProcessOfWindow(hwnd) != w.identity.PID {
 		return 0
 	}
 	w.callbacks.Add(1)
+	if fn := w.onEvent.Load(); fn != nil && *fn != nil {
+		(*fn)()
+	}
 	return 0
 }

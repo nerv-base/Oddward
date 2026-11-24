@@ -13,13 +13,14 @@
 param(
     [switch]$SkipBuild,
     [switch]$KeepRunning,
-    [string[]]$ExtraOverlayArgs = @()
+    [string[]]$ExtraOverlayArgs = @(),
+    [ValidatePattern('^[A-Za-z0-9_-]+$')][string]$ArtifactFolder = 'overlay-poc'
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
-$out = Join-Path $root 'artifacts\overlay-poc'
+$out = Join-Path $root 'artifacts' $ArtifactFolder
 New-Item -ItemType Directory -Force $out | Out-Null
 
 if (-not ('OverlayChildWin' -as [type])) {
@@ -206,7 +207,6 @@ try {
     if (-not $script:hostCreated) { throw 'host status did not include its creation time' }
     $hostHwnd = [IntPtr][uint64]$h.hwnd
     $hostClient = [OverlayChildWin]::ClientOnScreen($hostHwnd)
-    [OverlayChildWin]::SetWindowPos($hostHwnd, [IntPtr](-1), 0, 0, 0, 0, 0x13) | Out-Null
     Start-Sleep -Milliseconds 300
 
     # Negative check: a host creation time that does not match must be rejected.
@@ -225,9 +225,10 @@ try {
     $style = [OverlayChildWin]::Style($outer)
     $ex = [OverlayChildWin]::ExStyle($outer)
     Add-Check 'child mode bound' ($s.mode -eq 'child' -and $s.bound) "mode=$($s.mode) bound=$($s.bound)"
-    if ($ExtraOverlayArgs -contains '-child-uncloak=false') {
-        Add-Check 'child uncloak workaround disabled' (-not $s.child_uncloak) "child_uncloak=$($s.child_uncloak)"
-    }
+    # Assert the pinned upstream fix on a default run, too. A missing field is not false.
+    $legacy = $ExtraOverlayArgs -contains '-child-uncloak=true' -or $ExtraOverlayArgs -contains '-child-uncloak'
+    $workaroundCheck = if ($legacy) { 'legacy child uncloak workaround enabled' } else { 'child uncloak workaround disabled' }
+    Add-Check $workaroundCheck ($s.child_uncloak -is [bool] -and $s.child_uncloak -eq $legacy) "child_uncloak=$($s.child_uncloak)"
     Add-Check 'outer is a WS_CHILD of host' (($style -band 0x40000000) -ne 0 -and $parent -eq $hostHwnd) ("style=0x{0:X} parent=0x{1:X}" -f $style, $parent.ToInt64())
     Add-Check 'caption removed from child' (($style -band 0x00C00000) -eq 0) ("style=0x{0:X}" -f $style)
     $r = [OverlayChildWin]::WindowRect($outer)
@@ -285,11 +286,11 @@ try {
 
     # Clean shutdown.
     Invoke-Ctl $script:overlayPort 'quit' | Out-Null
-    $script:overlayProc.WaitForExit(5000) | Out-Null
-    Add-Check 'overlay exits cleanly' ($script:overlayProc.HasExited) "exit=$($script:overlayProc.ExitCode)"
-    $script:overlayProc = $null
-    Stop-Host
-    Add-Check 'host exits cleanly' ($true) ''
+    $ovExited = $script:overlayProc.WaitForExit(5000)
+    Add-Check 'overlay exits cleanly' ($ovExited -and $script:overlayProc.ExitCode -eq 0) "gracefulExit=$ovExited exit=$($script:overlayProc.ExitCode)"
+    Invoke-Ctl $script:hostPort 'quit' | Out-Null
+    $hostExited = $script:hostProc.WaitForExit(5000)
+    Add-Check 'host exits cleanly' ($hostExited -and $script:hostProc.ExitCode -eq 0) "gracefulExit=$hostExited exit=$($script:hostProc.ExitCode)"
 
     Add-Check 'no leftover overlay process' (-not (Get-Process -Id $script:overlayPid -ErrorAction SilentlyContinue)) "pid=$($script:overlayPid)"
 } finally {

@@ -1,7 +1,9 @@
 # MyGo Native UI Overlay PoC
 
-> 实验性验证文档。本文描述的 `cmd/overlay-poc`、`cmd/overlay-host` 与
-> `internal/overlaywin` 不进入正式启动流程，不修改现有 WPF 登录实现。
+> 前期可行性验证文档。本 PoC 已升级收敛为正式实现（`internal/cnlogin/loginui/state`、
+> `internal/cnlogin/loginui/native` 与 `internal/overlaywin`，通过 `oddward.exe --cnlogin-ui`
+> 隔离运行，详见 [架构说明](architecture.md#国服登录)）。`cmd/overlay-poc` 与 `cmd/overlay-host`
+> 仍作为独立模拟宿主与回归实验入口保留，不进入发行流程。
 
 ## 结论
 

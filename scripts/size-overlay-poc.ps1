@@ -54,19 +54,21 @@ function Measure-Artifact([string]$name, [string]$exe) {
 
 $pocOverlay = Build-Go 'overlay-poc' './cmd/overlay-poc'
 $pocHost = Build-Go 'overlay-host' './cmd/overlay-host'
-$noPayload = Build-Go 'launcher-nopayload' './cmd/launcher'
+$mygoExe = Join-Path $out 'oddward-mygo.exe'
+& pwsh -NoProfile -File scripts/build-launcher.ps1 -Output $mygoExe
+if ($LASTEXITCODE -ne 0) { throw 'MyGo pure-Go launcher build failed' }
 
 $wpfExe = Join-Path $out 'oddward-wpf.exe'
 if ($SkipWPF) {
     if (-not (Test-Path $wpfExe)) { throw '-SkipWPF requires an existing oddward-wpf.exe' }
 } else {
-    & pwsh -NoProfile -File scripts/build-launcher.ps1 -Output $wpfExe
+    & pwsh -NoProfile -File scripts/build-launcher.ps1 -EmbedWPF -Output $wpfExe
     if ($LASTEXITCODE -ne 0) { throw 'WPF-embedded launcher build failed' }
 }
 
 $rows = @(
     Measure-Artifact 'oddward-wpf' $wpfExe
-    Measure-Artifact 'launcher-nopayload' $noPayload
+    Measure-Artifact 'oddward-mygo' $mygoExe
     Measure-Artifact 'overlay-poc' $pocOverlay
     Measure-Artifact 'overlay-host' $pocHost
 )

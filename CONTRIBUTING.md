@@ -28,7 +28,7 @@ gofmt -l cmd internal tools
 
 使用项目内工具链时，可将最后一条替换为 `.tools/go1.27.3/go/bin/gofmt.exe -l cmd internal tools`。格式和 tidy 检查应无输出。
 
-修改 WPF 时运行 `pwsh -File compat/loginui/Test.ps1`。删除代码或调整包结构时，补充架构文档中的[静态检查](docs/architecture.md#静态检查)。[Windows CI](.github/workflows/windows.yml)负责 Go 检查及嵌入式登录窗口、安装布局的构建。
+默认登录窗口与欢迎横幅使用纯 Go + MyGo Native UI（`internal/cnlogin/loginui/native`），由 `go test` 直接覆盖；仅当修改临时 WPF 回退代码时才需要运行 `pwsh -File compat/loginui/Test.ps1`。删除代码或调整包结构时，补充架构文档中的[静态检查](docs/architecture.md#静态检查)。[Windows CI](.github/workflows/windows.yml)负责纯 Go 检查、启动器及安装布局构建。
 
 ## 提交与 PR
 

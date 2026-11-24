@@ -15,7 +15,8 @@ param(
     [string]$Notes = '',
     [string]$OutDir = 'artifacts/release',
     [switch]$Unsigned,
-    [switch]$NoInstaller
+    [switch]$NoInstaller,
+    [switch]$EmbedWPF
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -29,7 +30,12 @@ try {
     if (Test-Path -LiteralPath $release) { Remove-Item -LiteralPath $release -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $app, $publish | Out-Null
 
-    & "$PSScriptRoot/build-launcher.ps1" -Output (Join-Path $app 'oddward-launcher.exe') -Version $Version
+    $launcherArgs = @{
+        Output  = (Join-Path $app 'oddward-launcher.exe')
+        Version = $Version
+    }
+    if ($EmbedWPF) { $launcherArgs['EmbedWPF'] = $true }
+    & "$PSScriptRoot/build-launcher.ps1" @launcherArgs
 
     & "$PSScriptRoot/go.ps1" build -trimpath -ldflags '-H=windowsgui -s -w' -o (Join-Path $stage 'Oddward.exe') ./cmd/stub
     if ($LASTEXITCODE -ne 0) { throw 'stub build failed.' }

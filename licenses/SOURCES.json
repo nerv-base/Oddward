@@ -5,8 +5,8 @@
     {
       "file": "mygo/LICENSE.txt",
       "component": "github.com/egoist/mygo",
-      "version": "v0.10.0",
-      "source": "https://raw.githubusercontent.com/egoist/mygo/ebde9399baf2734b3361856a53f4036859973d1d/LICENSE",
+      "version": "v0.10.1-0.20261124041827-c16fc5b6d8ed",
+      "source": "https://raw.githubusercontent.com/egoist/mygo/c16fc5b6d8ed6ac997d5a4ac3f59d94847cc3723/LICENSE",
       "upstreamPath": "LICENSE",
       "sha256": "f0b56f4ab53beb6e18c5e155219c2e2b6000b5475c0ae3ddb3af3894fd9349b4",
       "sha256Lf": "f0b56f4ab53beb6e18c5e155219c2e2b6000b5475c0ae3ddb3af3894fd9349b4"
@@ -14,8 +14,8 @@
     {
       "file": "mygo/shader-LICENSE.txt",
       "component": "github.com/egoist/mygo/internal/shader and internal/shaderir",
-      "version": "v0.10.0",
-      "source": "https://raw.githubusercontent.com/egoist/mygo/ebde9399baf2734b3361856a53f4036859973d1d/internal/shader/LICENSE",
+      "version": "v0.10.1-0.20261124041827-c16fc5b6d8ed",
+      "source": "https://raw.githubusercontent.com/egoist/mygo/c16fc5b6d8ed6ac997d5a4ac3f59d94847cc3723/internal/shader/LICENSE",
       "upstreamPath": "internal/shader/LICENSE",
       "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1",
       "sha256Lf": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"

@@ -2,7 +2,8 @@
 # Copy the reviewed, pinned license bundle into an application's licenses folder.
 # No dependency cache, network access or build tool is needed at packaging time.
 param(
-    [Parameter(Mandatory)][string]$Destination
+    [Parameter(Mandatory)][string]$Destination,
+    [switch]$IncludeWPFLicense
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -20,6 +21,9 @@ foreach ($entry in $manifest.files) {
     if ($entry.file -notmatch '^[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)+$' -or $entry.file -match '(^|/)\.\.(/|$)') {
         throw "Invalid license path: $($entry.file)"
     }
+    if (-not $IncludeWPFLicense -and $entry.file.StartsWith('dotnet/')) {
+        continue
+    }
     $source = Join-Path $sourceRoot $entry.file
     $text = [IO.File]::ReadAllText($source, $utf8).Replace("`r`n", "`n")
     $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($utf8.GetBytes($text))).ToLowerInvariant()
@@ -29,7 +33,9 @@ foreach ($entry in $manifest.files) {
 $copies.Add(@{ Source = $manifestPath; Relative = 'SOURCES.json' })
 $copies.Add(@{ Source = (Join-Path $root 'THIRD_PARTY_NOTICES.md'); Relative = 'THIRD_PARTY_NOTICES.md' })
 $copies.Add(@{ Source = (Join-Path $root 'LICENSE'); Relative = 'Oddward.LICENSE.txt' })
-$copies.Add(@{ Source = (Join-Path $root 'compat/loginui/LICENSES.md'); Relative = 'loginui/LICENSES.md' })
+if ($IncludeWPFLicense) {
+    $copies.Add(@{ Source = (Join-Path $root 'compat/loginui/LICENSES.md'); Relative = 'loginui/LICENSES.md' })
+}
 foreach ($copy in $copies) {
     if (!(Test-Path -LiteralPath $copy.Source -PathType Leaf)) { throw "Missing license notice: $($copy.Source)" }
 }

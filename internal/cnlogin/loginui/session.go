@@ -20,6 +20,10 @@ var ErrHelper = errors.New("login UI helper failed")
 // Config names the trusted, packaged helper. No user data is passed on its command line.
 type Config struct {
 	Executable string
+	// Args holds fixed internal role arguments (for example []string{Mode} when
+	// invoking the launcher executable in its isolated login UI helper role).
+	// Callers must never pass user input, phone numbers, tokens or paths here.
+	Args []string
 	// BindWindow authenticates an owned helper's window before the elevated
 	// host associates it with the game. The helper never supplies its own PID.
 	BindWindow func(context.Context, process.Identity, uintptr, uintptr) error
@@ -72,7 +76,7 @@ func Start(ctx context.Context, c Config, initial Model) (*Session, error) {
 		childOutput.Close()
 		return nil, ErrHelper
 	}
-	cmd := exec.Command(c.Executable)
+	cmd := exec.Command(c.Executable, c.Args...)
 	cmd.Stdin = childInput
 	cmd.Stdout = childOutput
 	cmd.Stderr = null
@@ -190,18 +194,21 @@ func Start(ctx context.Context, c Config, initial Model) (*Session, error) {
 			}
 		}()
 		readComplete := false
+		var callerCanceled bool
 		select {
 		case readErr := <-readDone:
 			readComplete = true
-			if readErr != nil && !errors.Is(readErr, io.EOF) && ownCtx.Err() == nil {
+			callerCanceled = ownCtx.Err() != nil
+			if readErr != nil && !errors.Is(readErr, io.EOF) && !callerCanceled {
 				s.fail(ErrHelper)
 			}
 			s.cancel()
 		case <-ownCtx.Done():
+			callerCanceled = true
 		}
 		select {
 		case err := <-exited:
-			if err != nil && ownCtx.Err() == nil {
+			if err != nil && !callerCanceled {
 				s.fail(ErrHelper)
 			}
 		case <-time.After(2 * time.Second):

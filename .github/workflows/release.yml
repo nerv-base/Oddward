@@ -31,8 +31,6 @@ env:
   CGO_ENABLED: '0'
   GOTOOLCHAIN: local
   GOFLAGS: -mod=readonly
-  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
-  DOTNET_NOLOGO: '1'
 
 jobs:
   release:
@@ -68,9 +66,6 @@ jobs:
         with:
           go-version: '1.27.3'
           cache: true
-      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0, resolved 2026-11-13
-        with:
-          global-json-file: compat/loginui/global.json
       - name: Synthetic tests
         run: go test -count=1 ./...
       - name: Install Inno Setup
@@ -92,8 +87,8 @@ jobs:
           if (!$text) { $text = "Oddward ${{ steps.version.outputs.version }}" }
           Set-Content -LiteralPath $notes -Value $text -Encoding utf8NoBOM
           "ODDWARD_NOTES=$notes" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-      # Builds the embedded launcher (WPF login window included), the stub, the
-      # signed update package and the installer.
+      # Builds the pure Go + MyGo Native UI launcher, the stub, the
+      # signed update package and the installer (no .NET SDK required).
       - name: Build, sign and package
         shell: pwsh
         env:

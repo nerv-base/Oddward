@@ -13,6 +13,7 @@ import (
 	"github.com/nerv-base/Oddward/internal/cnlogin/broker"
 	"github.com/nerv-base/Oddward/internal/cnlogin/elevatedipc"
 	"github.com/nerv-base/Oddward/internal/cnlogin/launch"
+	loginuinative "github.com/nerv-base/Oddward/internal/cnlogin/loginui/native"
 	"github.com/nerv-base/Oddward/internal/cnlogin/session"
 	"github.com/nerv-base/Oddward/internal/gamelocate"
 	"github.com/nerv-base/Oddward/internal/launcher"
@@ -27,12 +28,21 @@ func RunNativeHost(ctx context.Context, args []string) (bool, error) {
 	return true, broker.Run(ctx, args[1:])
 }
 
+// RunLoginUI dispatches the isolated MyGo Native UI login window / welcome
+// banner helper before cmd/launcher opens databases, account stores or the main
+// launcher window. It performs no work for ordinary launcher args.
+func RunLoginUI(args []string) (bool, int) {
+	return loginuinative.Run(args)
+}
+
 // NativeManagedBackend starts the game through the native CN login flow. The
-// login window is the authored WPF helper; the launcher itself never draws a
+// login window runs in an isolated child process (by default the same launcher
+// image invoked with loginui.Mode); the main launcher window never draws a
 // login form for this path.
 type NativeManagedBackend struct {
-	// LoginUI is the absolute path of the authored login window helper.
-	LoginUI string
+	// ResolveLoginUI selects the helper and its fixed role arguments when the
+	// user starts the game. A missing optional helper is a preparation error.
+	ResolveLoginUI func() (string, []string, error)
 	// Accounts is the saved-account store. It is required.
 	Accounts *accounts.Store
 	// HTTPClient is the launcher's shared transport.
@@ -54,10 +64,21 @@ func (b NativeManagedBackend) Prepare(ctx context.Context, root string, progress
 	if b.Accounts == nil {
 		return nil, errors.New("账号存储不可用，请检查应用数据目录权限")
 	}
-	if strings.TrimSpace(b.LoginUI) == "" {
+	var (
+		loginUI     string
+		loginUIArgs []string
+		err         error
+	)
+	if b.ResolveLoginUI != nil {
+		loginUI, loginUIArgs, err = b.ResolveLoginUI()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if strings.TrimSpace(loginUI) == "" {
 		return nil, errors.New("登录窗口组件缺失，请重新安装启动器")
 	}
-	if info, err := os.Stat(b.LoginUI); err != nil || !info.Mode().IsRegular() {
+	if info, err := os.Stat(loginUI); err != nil || !info.Mode().IsRegular() {
 		return nil, errors.New("登录窗口组件缺失，请重新安装启动器")
 	}
 	found, err := gamelocate.Inspect(ctx, root)
@@ -72,7 +93,8 @@ func (b NativeManagedBackend) Prepare(ctx context.Context, root string, progress
 	plan, err := session.Prepare(ctx, session.Config{
 		Root:            found.Root,
 		ElevatedHost:    true,
-		LoginUI:         b.LoginUI,
+		LoginUI:         loginUI,
+		LoginUIArgs:     loginUIArgs,
 		Accounts:        b.Accounts,
 		HTTPClient:      b.HTTPClient,
 		LauncherVersion: b.LauncherVersion,

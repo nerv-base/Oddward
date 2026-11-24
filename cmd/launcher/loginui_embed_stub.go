@@ -4,6 +4,8 @@
 
 package main
 
-// embeddedLoginUI is empty in development builds, where the WPF helper is read
-// from login-compat next to the executable.
-func embeddedLoginUI() (string, error) { return "", nil }
+import "errors"
+
+func embeddedLoginUI() (string, error) {
+	return "", errors.New("此构建未包含 WPF 登录窗口。请移除 -login-ui=wpf 改用内置窗口，或使用 -EmbedWPF 构建的版本")
+}
