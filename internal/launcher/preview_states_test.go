@@ -333,14 +333,42 @@ func TestRenderMockStateFrames(t *testing.T) {
 			s.Model.Gallery.Initialized = true
 			s.Model.Gallery.Phase = state.GalleryReady
 			s.Model.Gallery.Watching = true
-			s.Model.Gallery.TotalCount = 4
-			s.Model.Gallery.FilteredCount = 4
-			s.Model.Gallery.CachedCount = 2
+			day1 := time.Date(2026, 11, 24, 16, 52, 2, 0, time.FixedZone("CST", 8*3600))
+			base := sampleGalleryAssets()
+			vid := GalleryAsset{
+				ID: 5, SHA256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+				MediaType: GalleryMediaVideo, MIMEType: "video/mp4", ByteSize: 48 << 20,
+				Width: 1920, Height: 1080, DurationMS: 130_840, VideoCodec: "H.264", AudioCodec: "AAC",
+				PosterPath: `D:\Games\NTE\Selfie\100001\FFMpeg\26_11_24_16_49_20_KeyFrame.jpg`,
+				ModifiedAt: day1.Add(-2 * time.Minute), DisplayTime: day1.Add(-2 * time.Minute),
+				FileName:    "26_11_24_16_49_0123.mp4",
+				PrimaryPath: `D:\Games\NTE\Selfie\100001\FFMpeg\26_11_24_16_49_0123.mp4`,
+				SourcePath:  `D:\Games\NTE\Selfie\100001\FFMpeg\26_11_24_16_49_0123.mp4`,
+				UIDs:        []string{"100001"}, HasCached: true, HasArchived: true, Available: true,
+				Favorited: true, Tags: []string{"实机录屏", "夜景"},
+			}
+			assets := []GalleryAsset{base[0], vid, base[1], base[2], base[3]}
+			assets[0].Favorited = true
+			assets[0].Tags = []string{"海特洛", "霓虹"}
+			assets[2].Tags = []string{"街拍"}
+			s.Model.Gallery.TotalCount = 5
+			s.Model.Gallery.PhotoCount = 4
+			s.Model.Gallery.VideoCount = 1
+			s.Model.Gallery.FavoriteCount = 2
+			s.Model.Gallery.FilteredCount = 5
+			s.Model.Gallery.CachedCount = 3
 			s.Model.Gallery.ExportedCount = 1
-			s.Model.Gallery.ArchivedCount = 1
-			s.Model.Gallery.ArchiveBytes = 1_825_842
-			s.gallery.assets = sampleGalleryAssets()
+			s.Model.Gallery.ArchivedCount = 2
+			s.Model.Gallery.ArchiveBytes = 1_825_842 + (48 << 20)
+			s.Model.Gallery.ArchivePhotoCount = 1
+			s.Model.Gallery.ArchivePhotoBytes = 1_825_842
+			s.Model.Gallery.ArchiveVideoCount = 1
+			s.Model.Gallery.ArchiveVideoBytes = 48 << 20
+			s.Model.Gallery.ArchiveFreeBytes = 186 << 30
+			s.gallery.assets = assets
 			s.gallery.uids = []string{"100001", "200002"}
+			s.gallery.albums = []GalleryAlbum{{ID: 1, Name: "海特洛夜景", Count: 3}, {ID: 2, Name: "角色合影", Count: 2}}
+			s.gallery.tags = []GalleryTag{{ID: 1, Name: "海特洛", Count: 2}, {ID: 2, Name: "夜景", Count: 2}, {ID: 3, Name: "霓虹", Count: 1}}
 			s.gallery.hasUnknownUID = true
 			s.gallery.rowsRev++
 			fb := newFakeGalleryBackend(s.gallery.assets...)
@@ -358,13 +386,17 @@ func TestRenderMockStateFrames(t *testing.T) {
 			s.Model.Gallery.Initialized = true
 			s.Model.Gallery.Phase = state.GalleryReady
 			s.Model.Gallery.TotalCount = 4
+			s.Model.Gallery.PhotoCount = 4
 			s.Model.Gallery.FilteredCount = 4
 			s.Model.Gallery.CachedCount = 2
 			s.Model.Gallery.ExportedCount = 1
 			s.Model.Gallery.ArchivedCount = 1
 			s.Model.Gallery.ViewerOpen = true
 			s.Model.Gallery.ViewerID = 1
-			s.gallery.assets = sampleGalleryAssets()
+			assets := sampleGalleryAssets()
+			assets[0].Favorited = true
+			assets[0].Tags = []string{"海特洛", "霓虹"}
+			s.gallery.assets = assets
 			s.gallery.rowsRev++
 			fb := newFakeGalleryBackend(s.gallery.assets...)
 			s.GalleryBackend = fb
@@ -380,12 +412,19 @@ func TestRenderMockStateFrames(t *testing.T) {
 			s.Model.Gallery.Phase = state.GalleryReady
 			s.Model.Gallery.SettingsOpen = true
 			s.Model.Gallery.EffectiveArchive = `C:\Users\Player\Pictures\Oddward\Gallery`
-			s.Model.Gallery.TotalCount = 4
-			s.Model.Gallery.FilteredCount = 4
-			s.Model.Gallery.CachedCount = 2
+			s.Model.Gallery.TotalCount = 5
+			s.Model.Gallery.PhotoCount = 4
+			s.Model.Gallery.VideoCount = 1
+			s.Model.Gallery.FilteredCount = 5
+			s.Model.Gallery.CachedCount = 13
 			s.Model.Gallery.ExportedCount = 1
-			s.Model.Gallery.ArchivedCount = 1
-			s.Model.Gallery.ArchiveBytes = 1_825_842
+			s.Model.Gallery.ArchivedCount = 13
+			s.Model.Gallery.ArchiveBytes = 18_500_000 + (48 << 20)
+			s.Model.Gallery.ArchivePhotoCount = 12
+			s.Model.Gallery.ArchivePhotoBytes = 18_500_000
+			s.Model.Gallery.ArchiveVideoCount = 1
+			s.Model.Gallery.ArchiveVideoBytes = 48 << 20
+			s.Model.Gallery.ArchiveFreeBytes = 186 << 30
 			s.Model.Gallery.ThumbCacheBytes = 68 << 20
 			s.gallery.assets = sampleGalleryAssets()
 			s.gallery.rowsRev++
@@ -410,7 +449,9 @@ func TestRenderMockStateFrames(t *testing.T) {
 			s.Model.Gallery.CachedCount = 2
 			s.Model.Gallery.ExportedCount = 1
 			s.Model.Gallery.ArchivedCount = 1
+			s.Model.Gallery.MissingCount = 3
 			s.Model.Gallery.ArchiveBytes = 1_825_842
+			s.Model.Gallery.ArchiveFreeBytes = 186 << 30
 			s.Model.Gallery.ThumbCacheBytes = 68 << 20
 			s.gallery.settingsTab = gallerySettingsTabCache
 			s.gallery.assets = sampleGalleryAssets()
@@ -418,6 +459,92 @@ func TestRenderMockStateFrames(t *testing.T) {
 			fb := newFakeGalleryBackend(s.gallery.assets...)
 			s.GalleryBackend = fb
 			for _, a := range s.gallery.assets {
+				if !a.Invalid && a.Available {
+					px, _, _ := fb.DecodeThumbnail(s.ctx, a, galleryThumbEdgeL1)
+					s.gallery.images.remember(galleryThumbKey{assetID: a.ID, edge: galleryThumbEdgeL1}, ui.NewBitmap(px))
+				}
+			}
+		}},
+		{"43-gallery-video-viewer", func(s *Shell, _ *ui.Tester) {
+			s.WishLocation = time.FixedZone("CST", 8*3600)
+			day1 := time.Date(2026, 11, 24, 16, 49, 20, 0, time.FixedZone("CST", 8*3600))
+			vid := GalleryAsset{
+				ID: 5, SHA256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+				MediaType: GalleryMediaVideo, MIMEType: "video/mp4", ByteSize: 48 << 20,
+				Width: 1920, Height: 1080, DurationMS: 130_840, VideoCodec: "H.264", AudioCodec: "AAC",
+				PosterPath: `D:\Games\NTE\Selfie\100001\FFMpeg\26_11_24_16_49_20_KeyFrame.jpg`,
+				ModifiedAt: day1, DisplayTime: day1,
+				FileName:    "26_11_24_16_49_0123456789abcdef.mp4",
+				PrimaryPath: `D:\Games\NTE\Selfie\100001\FFMpeg\26_11_24_16_49_0123456789abcdef.mp4`,
+				UIDs:        []string{"100001"}, HasCached: true, HasArchived: true, Available: true,
+				Favorited: true, Tags: []string{"实机录屏", "夜景"},
+			}
+			s.Model.Page = state.Gallery
+			s.Model.Gallery.Initialized = true
+			s.Model.Gallery.Phase = state.GalleryReady
+			s.Model.Gallery.TotalCount = 1
+			s.Model.Gallery.VideoCount = 1
+			s.Model.Gallery.FilteredCount = 1
+			s.Model.Gallery.ViewerOpen = true
+			s.Model.Gallery.ViewerID = 5
+			s.gallery.assets = []GalleryAsset{vid}
+			s.gallery.rowsRev++
+			fb := newFakeGalleryBackend(vid)
+			s.GalleryBackend = fb
+			px, _, _ := fb.DecodeThumbnail(s.ctx, vid, galleryThumbEdgeL1)
+			s.gallery.images.remember(galleryThumbKey{assetID: 5, edge: galleryThumbEdgeL1}, ui.NewBitmap(px))
+		}},
+		{"44-gallery-album-modal", func(s *Shell, _ *ui.Tester) {
+			s.WishLocation = time.FixedZone("CST", 8*3600)
+			s.Model.Page = state.Gallery
+			s.Model.Gallery.Initialized = true
+			s.Model.Gallery.Phase = state.GalleryReady
+			s.Model.Gallery.TotalCount = 4
+			s.Model.Gallery.PhotoCount = 4
+			s.Model.Gallery.FilteredCount = 4
+			s.Model.Gallery.AlbumModalOpen = true
+			s.Model.Gallery.AlbumModalAssetID = 1
+			assets := sampleGalleryAssets()
+			assets[0].AlbumIDs = []int64{1}
+			s.gallery.assets = assets
+			s.gallery.albums = []GalleryAlbum{
+				{ID: 1, Name: "海特洛夜景", Count: 14},
+				{ID: 2, Name: "城市雨天", Count: 8},
+				{ID: 3, Name: "角色留影", Count: 21},
+			}
+			s.gallery.rowsRev++
+			fb := newFakeGalleryBackend(assets...)
+			s.GalleryBackend = fb
+			for _, a := range assets {
+				if !a.Invalid && a.Available {
+					px, _, _ := fb.DecodeThumbnail(s.ctx, a, galleryThumbEdgeL1)
+					s.gallery.images.remember(galleryThumbKey{assetID: a.ID, edge: galleryThumbEdgeL1}, ui.NewBitmap(px))
+				}
+			}
+		}},
+		{"45-gallery-tag-modal", func(s *Shell, _ *ui.Tester) {
+			s.WishLocation = time.FixedZone("CST", 8*3600)
+			s.Model.Page = state.Gallery
+			s.Model.Gallery.Initialized = true
+			s.Model.Gallery.Phase = state.GalleryReady
+			s.Model.Gallery.TotalCount = 4
+			s.Model.Gallery.PhotoCount = 4
+			s.Model.Gallery.FilteredCount = 4
+			s.Model.Gallery.TagModalOpen = true
+			s.Model.Gallery.TagModalAssetID = 1
+			assets := sampleGalleryAssets()
+			assets[0].Tags = []string{"海特洛", "霓虹"}
+			s.gallery.assets = assets
+			s.gallery.tags = []GalleryTag{
+				{ID: 1, Name: "海特洛", Count: 12},
+				{ID: 2, Name: "霓虹", Count: 7},
+				{ID: 3, Name: "实机录屏", Count: 3},
+				{ID: 4, Name: "街拍", Count: 9},
+			}
+			s.gallery.rowsRev++
+			fb := newFakeGalleryBackend(assets...)
+			s.GalleryBackend = fb
+			for _, a := range assets {
 				if !a.Invalid && a.Available {
 					px, _, _ := fb.DecodeThumbnail(s.ctx, a, galleryThumbEdgeL1)
 					s.gallery.images.remember(galleryThumbKey{assetID: a.ID, edge: galleryThumbEdgeL1}, ui.NewBitmap(px))

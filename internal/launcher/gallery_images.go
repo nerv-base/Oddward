@@ -218,6 +218,9 @@ func (s *Shell) requestGalleryThumb(asset GalleryAsset, edge int, pinned bool) *
 	if asset.ID <= 0 || asset.Invalid || !asset.Available || asset.PrimaryPath == "" {
 		return nil
 	}
+	if asset.IsVideo() && asset.PosterPath == "" {
+		return nil
+	}
 	img := &s.gallery.images
 	key := galleryThumbKey{assetID: asset.ID, edge: edge}
 	if img.painted == nil {
@@ -399,6 +402,10 @@ func (s *Shell) startGalleryViewerLoad(asset GalleryAsset) {
 	img.viewerGen++
 	img.releaseViewerBitmap()
 	img.viewerAssetID = asset.ID
+	if asset.IsVideo() {
+		// Videos play via VideoPlayer on the UI thread rather than decoding full-res RGBA stills.
+		return
+	}
 	if asset.Invalid || !asset.Available || asset.PrimaryPath == "" {
 		img.viewerErr = "源文件不可用或已损坏"
 		return

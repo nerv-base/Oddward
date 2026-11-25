@@ -35,6 +35,16 @@ func DefaultPicturesDir() (string, error) {
 	return filepath.Clean(dir), nil
 }
 
+// DefaultVideosDir resolves the user's Videos folder through the Windows
+// Known Folder API.
+func DefaultVideosDir() (string, error) {
+	dir, err := knownFolderPathFn(windows.FOLDERID_Videos, 0)
+	if err != nil {
+		return "", fmt.Errorf("gallery: resolve Videos known folder: %w", err)
+	}
+	return filepath.Clean(dir), nil
+}
+
 // DefaultArchiveDir returns <Pictures>\Oddward\Gallery.
 func DefaultArchiveDir() (string, error) {
 	pics, err := DefaultPicturesDir()

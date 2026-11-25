@@ -63,27 +63,69 @@ func TestRealCNSamplesReadOnly(t *testing.T) {
 	}
 
 	// Verify thumbnail decode + clipboard PNG + isolated export on the first real photo.
-	sample := snap.Assets[0]
-	px, hit, err := svc.DecodeThumbnail(ctx, sample.SHA256, sample.PrimaryPath, ThumbL1)
+	var photoSample, videoSample Asset
+	for _, a := range snap.Assets {
+		if a.MediaType == MediaImage && photoSample.ID == 0 {
+			photoSample = a
+		}
+		if a.MediaType == MediaVideo && videoSample.ID == 0 {
+			videoSample = a
+		}
+	}
+	if photoSample.ID == 0 {
+		t.Skip("no real photos found on this machine")
+	}
+	px, hit, err := svc.DecodeAssetThumbnail(ctx, photoSample, ThumbL1)
 	if err != nil || hit || px == nil {
 		t.Fatalf("cold thumbnail decode of real photo failed: hit=%v err=%v", hit, err)
 	}
-	px2, hit2, err := svc.DecodeThumbnail(ctx, sample.SHA256, sample.PrimaryPath, ThumbL1)
+	px2, hit2, err := svc.DecodeAssetThumbnail(ctx, photoSample, ThumbL1)
 	if err != nil || !hit2 || px2 == nil {
 		t.Fatalf("warm thumbnail decode of real photo failed: hit=%v err=%v", hit2, err)
 	}
-	clipBytes, err := ReadClipboardPNG(ctx, sample.PrimaryPath)
+	clipBytes, err := ReadClipboardPNG(ctx, photoSample.PrimaryPath)
 	if err != nil || len(clipBytes) == 0 {
 		t.Fatalf("ReadClipboardPNG on real photo failed: %v", err)
 	}
 	exportOut := filepath.Join(tmp, "exported-sample.png")
-	if err := ExportAsset(ctx, sample, exportOut); err != nil {
+	if err := ExportAsset(ctx, photoSample, exportOut); err != nil {
 		t.Fatalf("ExportAsset on real photo failed: %v", err)
 	}
-	if sum, _, err := HashFile(ctx, exportOut, MaxImageBytes); err != nil || sum != sample.SHA256 {
+	if sum, _, err := HashFile(ctx, exportOut, MaxImageBytes); err != nil || sum != photoSample.SHA256 {
 		t.Fatalf("exported real photo SHA256 mismatch: err=%v", err)
 	}
 
-	t.Logf("Real CN read-only verification PASSED: sources=%d total=%d cached=%d exported=%d distinct_uids=%d unknown_uid=%v sample_dims=%dx%d",
-		rep.SourcesScanned, snap.Stats.TotalAssets, snap.Stats.CachedCount, snap.Stats.ExportedCount, len(snap.UIDs), snap.HasUnknownUID, sample.Width, sample.Height)
+	// Verify real CN FFMpeg video inspection, keyframe thumbnail and isolated export when present.
+	if videoSample.ID != 0 {
+		if videoSample.Width <= 0 || videoSample.Height <= 0 || videoSample.DurationMS <= 0 {
+			t.Fatalf("real video missing parsed metadata: dims=%dx%d dur=%dms codec=%s/%s",
+				videoSample.Width, videoSample.Height, videoSample.DurationMS, videoSample.VideoCodec, videoSample.AudioCodec)
+		}
+		if videoSample.PosterPath != "" {
+			vpx, _, verr := svc.DecodeAssetThumbnail(ctx, videoSample, ThumbL1)
+			if verr != nil || vpx == nil {
+				t.Fatalf("real video keyframe thumbnail decode failed: vpx=%v err=%v", vpx, verr)
+			}
+		}
+		// Pick the smallest real video for fast isolated export verification.
+		smallest := videoSample
+		for _, a := range snap.Assets {
+			if a.MediaType == MediaVideo && a.ByteSize < smallest.ByteSize {
+				smallest = a
+			}
+		}
+		vidOut := filepath.Join(tmp, "exported-sample.mp4")
+		if err := ExportAsset(ctx, smallest, vidOut); err != nil {
+			t.Fatalf("ExportAsset on real video failed: %v", err)
+		}
+		if sum, _, err := HashFile(ctx, vidOut, MaxVideoBytes); err != nil || sum != smallest.SHA256 {
+			t.Fatalf("exported real video SHA256 mismatch: err=%v", err)
+		}
+	}
+
+	t.Logf("Real CN read-only verification PASSED: sources=%d total=%d photos=%d videos=%d cached=%d exported=%d distinct_uids=%d unknown_uid=%v photo_dims=%dx%d video_dims=%dx%d video_dur_ms=%d video_codec=%s/%s video_has_poster=%v",
+		rep.SourcesScanned, snap.Stats.TotalAssets, snap.Stats.PhotoCount, snap.Stats.VideoCount,
+		snap.Stats.CachedCount, snap.Stats.ExportedCount, len(snap.UIDs), snap.HasUnknownUID,
+		photoSample.Width, photoSample.Height, videoSample.Width, videoSample.Height,
+		videoSample.DurationMS, videoSample.VideoCodec, videoSample.AudioCodec, videoSample.PosterPath != "")
 }

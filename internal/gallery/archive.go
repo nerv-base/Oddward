@@ -21,10 +21,19 @@ type ArchiveResult struct {
 	Deduplicated bool
 }
 
-// ArchiveFile copies one validated image file into Oddward's content-addressed
-// archive (originals/<sha[:2]>/<sha><ext>) using a same-volume temporary file,
-// streaming SHA256 verification, mid-copy source change detection, atomic
-// publication and a SQLite transaction. Hard links are never used.
+func maxBytesForMIME(mimeType string) int64 {
+	if IsVideoMIME(mimeType) {
+		return MaxVideoBytes
+	}
+	return MaxImageBytes
+}
+
+// ArchiveFile copies one validated image or video file into Oddward's
+// content-addressed archive (originals/<sha[:2]>/<sha><ext>) using a same-volume
+// temporary file, streaming SHA256 verification, mid-copy source change
+// detection, atomic publication and a SQLite transaction. Hard links are never
+// used. For videos with a sibling keyframe thumbnail, a poster copy is also
+// stored under posters/<sha[:2]>/<sha>.jpg so thumbnails survive game cache cleanup.
 func ArchiveFile(ctx context.Context, store *Store, archiveDir string, assetID int64, sourcePath, expectedSHA, mimeType string) (ArchiveResult, error) {
 	if err := ctx.Err(); err != nil {
 		return ArchiveResult{}, err
@@ -46,10 +55,17 @@ func ArchiveFile(ctx context.Context, store *Store, archiveDir string, assetID i
 	}
 	destPath := joinNormalized(cleanArchive, relPath)
 	destDir := filepath.Dir(destPath)
+	isVid := IsVideoMIME(mimeType)
+	maxBytes := maxBytesForMIME(mimeType)
 
 	// Fast dedup check: if the exact content-addressed file is already published
 	// and matches expectedSHA, record it in SQLite without copying again.
-	if existing, err := verifyExistingArchiveFile(ctx, destPath, expectedSHA); err == nil && existing {
+	if existing, err := verifyExistingArchiveFile(ctx, destPath, expectedSHA, maxBytes); err == nil && existing {
+		if isVid {
+			if st, serr := statRegularFile(cleanSource); serr == nil {
+				archiveVideoPoster(ctx, cleanArchive, cleanSource, st.ModifiedAt, 0, expectedSHA)
+			}
+		}
 		if err := store.RecordArchive(ctx, assetID, relPath, store.clock(), ArchiveStatusReady); err != nil {
 			return ArchiveResult{}, err
 		}
@@ -72,7 +88,7 @@ func ArchiveFile(ctx context.Context, store *Store, archiveDir string, assetID i
 	if before.Size <= 0 {
 		return ArchiveResult{}, fmt.Errorf("%w: empty source file", ErrInvalidMedia)
 	}
-	if before.Size > MaxImageBytes {
+	if before.Size > maxBytes {
 		return ArchiveResult{}, fmt.Errorf("%w: source exceeds byte limit", ErrTooLarge)
 	}
 
@@ -108,8 +124,12 @@ func ArchiveFile(ctx context.Context, store *Store, archiveDir string, assetID i
 	}()
 
 	h := sha256.New()
-	headerCap := int(min(before.Size, int64(headerProbeBytes)))
-	headerBuf := make([]byte, 0, headerCap)
+	var headerBuf []byte
+	headerCap := 0
+	if !isVid {
+		headerCap = int(min(before.Size, int64(headerProbeBytes)))
+		headerBuf = make([]byte, 0, headerCap)
+	}
 	buf := make([]byte, 64<<10)
 	var written int64
 
@@ -132,7 +152,7 @@ func ArchiveFile(ctx context.Context, store *Store, archiveDir string, assetID i
 			}
 			_, _ = h.Write(chunk)
 			written += int64(nr)
-			if written > MaxImageBytes {
+			if written > maxBytes {
 				return ArchiveResult{}, ErrTooLarge
 			}
 		}
@@ -154,8 +174,10 @@ func ArchiveFile(ctx context.Context, store *Store, archiveDir string, assetID i
 	}
 
 	// Validate copied media header and exact digest before publication.
-	if _, err := InspectReader(bytesReader(headerBuf), written); err != nil {
-		return ArchiveResult{}, err
+	if !isVid {
+		if _, err := InspectReader(bytesReader(headerBuf), written); err != nil {
+			return ArchiveResult{}, err
+		}
 	}
 	actualSHA := hex.EncodeToString(h.Sum(nil))
 	if !strings.EqualFold(actualSHA, expectedSHA) {
@@ -171,13 +193,24 @@ func ArchiveFile(ctx context.Context, store *Store, archiveDir string, assetID i
 	if err := stage.Close(); err != nil {
 		return ArchiveResult{}, err
 	}
+	var vidDurationMS int64
+	if isVid {
+		vinfo, verr := InspectMP4File(stagePath)
+		if verr != nil {
+			return ArchiveResult{}, verr
+		}
+		vidDurationMS = vinfo.DurationMS
+	}
 	if _, err := checkLocalPath(ctx, stagePath, false, false); err != nil {
 		return ArchiveResult{}, err
 	}
 	if err := replaceFile(stagePath, destPath); err != nil {
 		// Another Oddward process may have concurrently published the same
 		// content-addressed object. Verify destination integrity before failing.
-		if ok, verr := verifyExistingArchiveFile(ctx, destPath, expectedSHA); verr == nil && ok {
+		if ok, verr := verifyExistingArchiveFile(ctx, destPath, expectedSHA, maxBytes); verr == nil && ok {
+			if isVid {
+				archiveVideoPoster(ctx, cleanArchive, cleanSource, before.ModifiedAt, vidDurationMS, expectedSHA)
+			}
 			if err := store.RecordArchive(ctx, assetID, relPath, store.clock(), ArchiveStatusReady); err != nil {
 				return ArchiveResult{}, err
 			}
@@ -187,13 +220,86 @@ func ArchiveFile(ctx context.Context, store *Store, archiveDir string, assetID i
 	}
 	published = true
 
+	if isVid {
+		archiveVideoPoster(ctx, cleanArchive, cleanSource, before.ModifiedAt, vidDurationMS, expectedSHA)
+	}
 	if err := store.RecordArchive(ctx, assetID, relPath, store.clock(), ArchiveStatusReady); err != nil {
 		return ArchiveResult{}, err
 	}
 	return ArchiveResult{RelativePath: relPath, Deduplicated: false}, nil
 }
 
-func verifyExistingArchiveFile(ctx context.Context, path, expectedSHA string) (bool, error) {
+// archiveVideoPoster best-effort copies a companion *_KeyFrame.jpg into
+// <archiveDir>/posters/<sha[:2]>/<sha>.jpg so video thumbnails keep working
+// even after the game cache is cleaned. Failures never fail video archiving.
+func archiveVideoPoster(ctx context.Context, cleanArchive, sourceVideoPath string, modTime time.Time, durationMS int64, sha256Hex string) {
+	kf := FindVideoKeyFrame(sourceVideoPath, modTime, durationMS)
+	if kf == "" {
+		return
+	}
+	cleanKF, err := checkLocalPath(ctx, kf, false, false)
+	if err != nil {
+		return
+	}
+	posterRel, err := ArchivePosterRelativePath(sha256Hex)
+	if err != nil {
+		return
+	}
+	destPath := joinNormalized(cleanArchive, posterRel)
+	if st, serr := statRegularFile(destPath); serr == nil && !st.Reparse && !st.IsDir && st.Size > 0 {
+		return
+	}
+	f, err := os.Open(cleanKF)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	st, err := statOpenFile(f)
+	if err != nil || st.Reparse || st.IsDir || st.Size <= 0 || st.Size > MaxImageBytes {
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, MaxImageBytes+1))
+	if err != nil || int64(len(raw)) > MaxImageBytes {
+		return
+	}
+	if _, err := InspectReader(bytesReader(raw), int64(len(raw))); err != nil {
+		return
+	}
+	destDir := filepath.Dir(destPath)
+	if err := os.MkdirAll(destDir, 0o700); err != nil {
+		return
+	}
+	if _, err := checkLocalPath(ctx, destDir, true, false); err != nil {
+		return
+	}
+	stage, err := os.CreateTemp(destDir, ".oddward-poster-*.tmp")
+	if err != nil {
+		return
+	}
+	stagePath := stage.Name()
+	committed := false
+	defer func() {
+		_ = stage.Close()
+		if !committed {
+			_ = os.Remove(stagePath)
+		}
+	}()
+	if _, err := stage.Write(raw); err != nil {
+		return
+	}
+	if err := stage.Sync(); err != nil {
+		return
+	}
+	if err := stage.Close(); err != nil {
+		return
+	}
+	if err := replaceFile(stagePath, destPath); err != nil {
+		return
+	}
+	committed = true
+}
+
+func verifyExistingArchiveFile(ctx context.Context, path, expectedSHA string, maxBytes int64) (bool, error) {
 	if _, err := checkLocalPath(ctx, path, false, false); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
@@ -207,7 +313,7 @@ func verifyExistingArchiveFile(ctx context.Context, path, expectedSHA string) (b
 	if st.Reparse || st.IsDir || st.Links != 1 {
 		return false, ErrUnsafePath
 	}
-	sum, _, err := HashFile(ctx, path, MaxImageBytes)
+	sum, _, err := HashFile(ctx, path, maxBytes)
 	if err != nil {
 		return false, err
 	}
@@ -242,6 +348,16 @@ func DeleteArchiveCopy(ctx context.Context, store *Store, archiveDir string, ass
 	}
 	if err := os.Remove(full); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	// Best-effort cleanup of companion archived video poster strictly under archiveDir/posters.
+	base := filepath.Base(normRel)
+	stem := strings.ToLower(strings.TrimSuffix(base, filepath.Ext(base)))
+	if ValidSHA256Hex(stem) {
+		if posterRel, perr := ArchivePosterRelativePath(stem); perr == nil {
+			if posterFull, serr := checkSafeSubpath(ctx, cleanArchive, posterRel, false, true); serr == nil {
+				_ = os.Remove(posterFull)
+			}
+		}
 	}
 	return store.DeleteArchiveRecord(ctx, assetID)
 }
@@ -280,7 +396,11 @@ func ExportAsset(ctx context.Context, asset Asset, destPath string) error {
 	if err != nil {
 		return err
 	}
-	if st.Reparse || st.IsDir || st.Size <= 0 || st.Size > MaxImageBytes {
+	maxBytes := maxBytesForMIME(asset.MIMEType)
+	if asset.MediaType == MediaVideo {
+		maxBytes = MaxVideoBytes
+	}
+	if st.Reparse || st.IsDir || st.Size <= 0 || st.Size > maxBytes {
 		return ErrInvalidMedia
 	}
 
@@ -303,7 +423,7 @@ func ExportAsset(ctx context.Context, asset Asset, destPath string) error {
 	}()
 
 	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(stage, h), io.LimitReader(src, MaxImageBytes+1)); err != nil {
+	if _, err := io.Copy(io.MultiWriter(stage, h), io.LimitReader(src, maxBytes+1)); err != nil {
 		if isDiskFullError(err) {
 			return fmt.Errorf("%w: %v", ErrDiskFull, err)
 		}

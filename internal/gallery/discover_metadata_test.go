@@ -40,14 +40,18 @@ func TestDiscoverSourcesFindsMultiUIDVariantsAndExported(t *testing.T) {
 	}
 
 	gotUIDs := make(map[string]SourceType)
+	var sawFFMpeg bool
 	for _, s := range sources {
 		if filepath.Base(s.RootPath) == "FFMpeg" {
-			t.Fatalf("FFMpeg derived directory must never be discovered as a photo source: %+v", s)
+			sawFFMpeg = true
 		}
 		gotUIDs[s.UID] = s.SourceType
 	}
-	if len(sources) != 4 {
-		t.Fatalf("discovered %d sources, want 4: %+v", len(sources), sources)
+	if !sawFFMpeg {
+		t.Fatalf("P1 must discover real CN FFMpeg video directory: %+v", sources)
+	}
+	if len(sources) != 5 {
+		t.Fatalf("discovered %d sources, want 5: %+v", len(sources), sources)
 	}
 	for _, uid := range []string{"100001234567", "98765", "555555555"} {
 		if gotUIDs[uid] != SourceGameCache {

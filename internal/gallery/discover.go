@@ -23,6 +23,8 @@ type DiscoveryOptions struct {
 	ContentRootOverride string
 	// PicturesDirOverride overrides FOLDERID_Pictures for isolated tests.
 	PicturesDirOverride string
+	// VideosDirOverride overrides FOLDERID_Videos for isolated tests.
+	VideosDirOverride string
 }
 
 // DiscoverSources probes trusted game-cache and exported media directories
@@ -84,6 +86,23 @@ func DiscoverSources(ctx context.Context, opts DiscoveryOptions) ([]Source, erro
 		}
 	}
 
+	vidsDir := opts.VideosDirOverride
+	if vidsDir == "" && opts.PicturesDirOverride == "" {
+		if resolved, err := DefaultVideosDir(); err == nil {
+			vidsDir = resolved
+		}
+	}
+	if vidsDir != "" {
+		exportedVideos := filepath.Join(vidsDir, "NevernessToEverness")
+		if clean, err := checkLocalPath(ctx, exportedVideos, true, false); err == nil {
+			add(Source{
+				RootPath:   clean,
+				SourceType: SourceExported,
+				Enabled:    true,
+			})
+		}
+	}
+
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].SourceType != out[j].SourceType {
 			return out[i].SourceType < out[j].SourceType
@@ -97,11 +116,9 @@ func DiscoverSources(ctx context.Context, opts DiscoveryOptions) ([]Source, erro
 }
 
 // discoverGameCacheFromContentRoot inspects the verified CN selfie layout:
-//   - <ContentRoot>/Selfie/<UID>/ScreenShots
-//   - <ContentRoot>/HT/Selfie/<UID>/ScreenShots (compatible variant)
-//
-// Derived sibling directories such as <UID>/FFMpeg (which contain video
-// *_KeyFrame.jpg thumbnails) are intentionally excluded.
+//   - <ContentRoot>/Selfie/<UID>/ScreenShots  (in-game PNG photos)
+//   - <ContentRoot>/Selfie/<UID>/FFMpeg       (in-game MP4 recordings; companion *_KeyFrame.jpg excluded as standalone)
+//   - <ContentRoot>/HT/Selfie/<UID>/...       (compatible variant)
 func discoverGameCacheFromContentRoot(ctx context.Context, contentRoot string) ([]Source, error) {
 	var found []Source
 	candidates := []string{
@@ -136,42 +153,41 @@ func discoverGameCacheFromContentRoot(ctx context.Context, contentRoot string) (
 			if err != nil || reparse {
 				continue
 			}
-			shotsDir, ok := findScreenshotsSubdir(ctx, uidDir)
-			if !ok {
-				continue
+			for _, mediaDir := range findGameMediaSubdirs(ctx, uidDir) {
+				found = append(found, Source{
+					RootPath:   mediaDir,
+					SourceType: SourceGameCache,
+					Channel:    "cn",
+					UID:        uid,
+					Enabled:    true,
+				})
 			}
-			found = append(found, Source{
-				RootPath:   shotsDir,
-				SourceType: SourceGameCache,
-				Channel:    "cn",
-				UID:        uid,
-				Enabled:    true,
-			})
 		}
 	}
 	return found, nil
 }
 
-func findScreenshotsSubdir(ctx context.Context, uidDir string) (string, bool) {
+func findGameMediaSubdirs(ctx context.Context, uidDir string) []string {
 	entries, err := os.ReadDir(uidDir)
 	if err != nil {
-		return "", false
+		return nil
 	}
+	var dirs []string
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		if !strings.EqualFold(e.Name(), "ScreenShots") {
+		if !strings.EqualFold(e.Name(), "ScreenShots") && !strings.EqualFold(e.Name(), "FFMpeg") {
 			continue
 		}
 		candidate := filepath.Join(uidDir, e.Name())
 		clean, err := checkLocalPath(ctx, candidate, true, false)
 		if err != nil {
-			return "", false
+			continue
 		}
-		return clean, true
+		dirs = append(dirs, clean)
 	}
-	return "", false
+	return dirs
 }
 
 // GameSelfieWatchRoots returns the parent Selfie roots that should be watched

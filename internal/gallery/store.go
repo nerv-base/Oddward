@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -41,11 +42,11 @@ func (s *Store) clock() time.Time {
 // a fresh database.
 func (s *Store) LoadSettings(ctx context.Context) (Settings, error) {
 	var autoArchive, autoDiscover, thumbMB int
-	var archiveDir string
+	var archiveDir, customBG string
 	err := s.db.QueryRow(ctx, `
-		SELECT auto_archive, archive_dir, auto_discover_game, thumb_cache_mb
+		SELECT auto_archive, archive_dir, auto_discover_game, thumb_cache_mb, custom_background
 		FROM gallery_settings WHERE id = 1`,
-	).Scan(&autoArchive, &archiveDir, &autoDiscover, &thumbMB)
+	).Scan(&autoArchive, &archiveDir, &autoDiscover, &thumbMB, &customBG)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DefaultSettings(), nil
 	}
@@ -57,10 +58,12 @@ func (s *Store) LoadSettings(ctx context.Context) (Settings, error) {
 		ArchiveDir:       archiveDir,
 		AutoDiscoverGame: autoDiscover == 1,
 		ThumbCacheMB:     thumbMB,
+		CustomBackground: customBG,
 	}, nil
 }
 
-// SaveSettings validates and persists gallery preferences.
+// SaveSettings validates and persists gallery preferences without clobbering
+// the persisted custom launcher background path.
 func (s *Store) SaveSettings(ctx context.Context, cfg Settings) error {
 	if cfg.ThumbCacheMB == 0 {
 		cfg.ThumbCacheMB = DefaultThumbCacheMB
@@ -86,6 +89,23 @@ func (s *Store) SaveSettings(ctx context.Context, cfg Settings) error {
 				thumb_cache_mb = excluded.thumb_cache_mb,
 				updated_at = excluded.updated_at`,
 			boolInt(cfg.AutoArchive), cfg.ArchiveDir, boolInt(cfg.AutoDiscoverGame), cfg.ThumbCacheMB, database.Stamp(s.clock()),
+		)
+		return err
+	})
+}
+
+// SaveCustomBackground persists or clears the active custom static background
+// file path without modifying other gallery settings.
+func (s *Store) SaveCustomBackground(ctx context.Context, path string) error {
+	def := DefaultSettings()
+	return s.db.Tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO gallery_settings(id, auto_archive, archive_dir, auto_discover_game, thumb_cache_mb, custom_background, updated_at)
+			VALUES(1, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET
+				custom_background = excluded.custom_background,
+				updated_at = excluded.updated_at`,
+			boolInt(def.AutoArchive), def.ArchiveDir, boolInt(def.AutoDiscoverGame), def.ThumbCacheMB, path, database.Stamp(s.clock()),
 		)
 		return err
 	})
@@ -317,23 +337,43 @@ func upsertAssetTx(ctx context.Context, tx *sql.Tx, item LocationUpsert) (assetI
 	err = tx.QueryRowContext(ctx, `SELECT id, invalid FROM gallery_assets WHERE sha256 = ?`, item.SHA256).Scan(&existingID, &existingInvalid)
 	if err == nil {
 		// Upgrade previously invalid row if valid bytes with same digest exist,
-		// or fill missing EXIF captured_at if discovered from a richer source.
+		// or backfill missing EXIF/video metadata discovered from another location.
 		if existingInvalid == 1 && !item.Invalid {
 			_, err = tx.ExecContext(ctx, `
 				UPDATE gallery_assets
-				SET mime_type = ?, byte_size = ?, width = ?, height = ?, captured_at = COALESCE(captured_at, ?),
+				SET media_type = ?, mime_type = ?, byte_size = ?, width = ?, height = ?,
+				    duration_ms = COALESCE(?, duration_ms),
+				    video_codec = CASE WHEN ? != '' THEN ? ELSE video_codec END,
+				    audio_codec = CASE WHEN ? != '' THEN ? ELSE audio_codec END,
+				    poster_path = CASE WHEN ? != '' THEN ? ELSE poster_path END,
+				    captured_at = COALESCE(captured_at, ?),
 				    invalid = 0, invalid_reason = ''
 				WHERE id = ?`,
-				item.Info.MIMEType, item.Info.ByteSize, item.Info.Width, item.Info.Height,
+				string(item.Info.MediaType), item.Info.MIMEType, item.Info.ByteSize, item.Info.Width, item.Info.Height,
+				nullInt64(item.Info.DurationMS),
+				item.Info.VideoCodec, item.Info.VideoCodec,
+				item.Info.AudioCodec, item.Info.AudioCodec,
+				item.Info.PosterPath, item.Info.PosterPath,
 				database.Stamp(item.Info.CapturedAt), existingID,
 			)
 			if err != nil {
 				return 0, false, err
 			}
-		} else if !item.Info.CapturedAt.IsZero() {
+		} else if !item.Info.CapturedAt.IsZero() || item.Info.DurationMS > 0 || item.Info.VideoCodec != "" || item.Info.AudioCodec != "" || item.Info.PosterPath != "" {
 			_, err = tx.ExecContext(ctx, `
-				UPDATE gallery_assets SET captured_at = COALESCE(captured_at, ?) WHERE id = ?`,
-				database.Stamp(item.Info.CapturedAt), existingID,
+				UPDATE gallery_assets
+				SET captured_at = COALESCE(captured_at, ?),
+				    duration_ms = COALESCE(duration_ms, ?),
+				    video_codec = CASE WHEN video_codec = '' AND ? != '' THEN ? ELSE video_codec END,
+				    audio_codec = CASE WHEN audio_codec = '' AND ? != '' THEN ? ELSE audio_codec END,
+				    poster_path = CASE WHEN poster_path = '' AND ? != '' THEN ? ELSE poster_path END
+				WHERE id = ?`,
+				database.Stamp(item.Info.CapturedAt),
+				nullInt64(item.Info.DurationMS),
+				item.Info.VideoCodec, item.Info.VideoCodec,
+				item.Info.AudioCodec, item.Info.AudioCodec,
+				item.Info.PosterPath, item.Info.PosterPath,
+				existingID,
 			)
 			if err != nil {
 				return 0, false, err
@@ -363,9 +403,12 @@ func upsertAssetTx(ctx context.Context, tx *sql.Tx, item LocationUpsert) (assetI
 	r, err := tx.ExecContext(ctx, `
 		INSERT INTO gallery_assets(
 			sha256, media_type, mime_type, byte_size, width, height, duration_ms,
+			video_codec, audio_codec, poster_path,
 			captured_at, discovered_at, invalid, invalid_reason)
-		VALUES(?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.SHA256, string(mediaType), mime, byteSize, item.Info.Width, item.Info.Height,
+		nullInt64(item.Info.DurationMS),
+		item.Info.VideoCodec, item.Info.AudioCodec, item.Info.PosterPath,
 		database.Stamp(item.Info.CapturedAt), database.Stamp(item.SeenAt),
 		boolInt(item.Invalid), reason,
 	)
@@ -573,11 +616,13 @@ func (s *Store) ListArchiveRecords(ctx context.Context) ([]struct {
 }
 
 // QueryAssets loads deduplicated assets, resolves locations/sources/archives,
-// applies filter/sort and returns aggregate Stats in one consistent read pass.
+// organization metadata (favorites/albums/tags), applies filter/sort and
+// returns aggregate Stats in one consistent read pass.
 func (s *Store) QueryAssets(ctx context.Context, archiveDir string, filter Filter) ([]Asset, Stats, []string, bool, error) {
 	assetRows, err := s.db.Query(ctx, `
 		SELECT a.id, a.sha256, a.media_type, a.mime_type, a.byte_size, a.width, a.height,
-		       a.duration_ms, a.captured_at, a.discovered_at, a.invalid, a.invalid_reason,
+		       a.duration_ms, a.video_codec, a.audio_codec, a.poster_path,
+		       a.captured_at, a.discovered_at, a.invalid, a.invalid_reason,
 		       ar.relative_path, ar.status
 		FROM gallery_assets a
 		LEFT JOIN gallery_archive ar ON ar.asset_id = a.id`)
@@ -597,7 +642,8 @@ func (s *Store) QueryAssets(ctx context.Context, archiveDir string, filter Filte
 		var archiveRel, archiveStatus sql.NullString
 		if err := assetRows.Scan(
 			&a.ID, &a.SHA256, &mediaType, &a.MIMEType, &a.ByteSize, &a.Width, &a.Height,
-			&durationMS, &capturedAt, &discoveredAt, &invalid, &a.InvalidReason,
+			&durationMS, &a.VideoCodec, &a.AudioCodec, &a.PosterPath,
+			&capturedAt, &discoveredAt, &invalid, &a.InvalidReason,
 			&archiveRel, &archiveStatus,
 		); err != nil {
 			return nil, Stats{}, nil, false, err
@@ -626,6 +672,61 @@ func (s *Store) QueryAssets(ctx context.Context, archiveDir string, filter Filte
 	}
 	if err := assetRows.Err(); err != nil {
 		return nil, Stats{}, nil, false, err
+	}
+
+	// Load favorites.
+	if favRows, ferr := s.db.Query(ctx, `SELECT asset_id FROM gallery_favorites`); ferr == nil {
+		for favRows.Next() {
+			var aid int64
+			if favRows.Scan(&aid) == nil {
+				if a, ok := byID[aid]; ok {
+					a.Favorited = true
+				}
+			}
+		}
+		_ = favRows.Close()
+	}
+
+	// Load album names and memberships for filtering & search.
+	albumNames := make(map[int64]string)
+	if albRows, aerr := s.db.Query(ctx, `SELECT id, name FROM gallery_albums`); aerr == nil {
+		for albRows.Next() {
+			var id int64
+			var name string
+			if albRows.Scan(&id, &name) == nil {
+				albumNames[id] = name
+			}
+		}
+		_ = albRows.Close()
+	}
+	if itemRows, ierr := s.db.Query(ctx, `SELECT album_id, asset_id FROM gallery_album_items ORDER BY album_id`); ierr == nil {
+		for itemRows.Next() {
+			var albID, aid int64
+			if itemRows.Scan(&albID, &aid) == nil {
+				if a, ok := byID[aid]; ok {
+					a.AlbumIDs = append(a.AlbumIDs, albID)
+				}
+			}
+		}
+		_ = itemRows.Close()
+	}
+
+	// Load tags attached to assets.
+	if tagRows, terr := s.db.Query(ctx, `
+		SELECT at.asset_id, t.name
+		FROM gallery_asset_tags at
+		JOIN gallery_tags t ON t.id = at.tag_id
+		ORDER BY t.name COLLATE NOCASE`); terr == nil {
+		for tagRows.Next() {
+			var aid int64
+			var name string
+			if tagRows.Scan(&aid, &name) == nil {
+				if a, ok := byID[aid]; ok {
+					a.Tags = append(a.Tags, name)
+				}
+			}
+		}
+		_ = tagRows.Close()
 	}
 
 	locRows, err := s.db.Query(ctx, `
@@ -722,6 +823,9 @@ func (s *Store) QueryAssets(ctx context.Context, archiveDir string, filter Filte
 		} else {
 			a.DisplayTime = a.DiscoveredAt
 		}
+		if a.MediaType == MediaVideo {
+			a.PosterPath = resolveVideoPosterPath(archiveDir, *a)
+		}
 		if set := uidSets[a.ID]; len(set) > 0 {
 			a.UIDs = make([]string, 0, len(set))
 			for u := range set {
@@ -733,6 +837,14 @@ func (s *Store) QueryAssets(ctx context.Context, archiveDir string, filter Filte
 		}
 
 		stats.TotalAssets++
+		if a.MediaType == MediaVideo {
+			stats.VideoCount++
+		} else {
+			stats.PhotoCount++
+		}
+		if a.Favorited {
+			stats.FavoriteCount++
+		}
 		if a.Invalid {
 			stats.InvalidCount++
 		} else {
@@ -746,13 +858,20 @@ func (s *Store) QueryAssets(ctx context.Context, archiveDir string, filter Filte
 				stats.ArchivedCount++
 				stats.ArchiveCount++
 				stats.ArchiveBytes += a.ByteSize
+				if a.MediaType == MediaVideo {
+					stats.ArchiveVideoCount++
+					stats.ArchiveVideoBytes += a.ByteSize
+				} else {
+					stats.ArchivePhotoCount++
+					stats.ArchivePhotoBytes += a.ByteSize
+				}
 			}
 			if !a.Available {
 				stats.MissingCount++
 			}
 		}
 
-		if matchesFilter(*a, filter) {
+		if matchesFilter(*a, filter, albumNames) {
 			filtered = append(filtered, *a)
 		}
 	}
@@ -767,7 +886,30 @@ func (s *Store) QueryAssets(ctx context.Context, archiveDir string, filter Filte
 	return filtered, stats, uids, hasUnknownUID, nil
 }
 
-func matchesFilter(a Asset, f Filter) bool {
+func resolveVideoPosterPath(archiveDir string, a Asset) string {
+	// Prefer Oddward's archived poster backup so video thumbnails survive game cache cleanup.
+	if archiveDir != "" && ValidSHA256Hex(a.SHA256) {
+		if rel, err := ArchivePosterRelativePath(a.SHA256); err == nil {
+			cand := joinNormalized(archiveDir, rel)
+			if st, serr := statRegularFile(cand); serr == nil && !st.Reparse && !st.IsDir && st.Size > 0 {
+				return cand
+			}
+		}
+	}
+	if a.PosterPath != "" {
+		if st, serr := statRegularFile(a.PosterPath); serr == nil && !st.Reparse && !st.IsDir && st.Size > 0 {
+			return a.PosterPath
+		}
+	}
+	if a.SourcePath != "" {
+		if kf := FindVideoKeyFrame(a.SourcePath, a.ModifiedAt, a.DurationMS); kf != "" {
+			return kf
+		}
+	}
+	return ""
+}
+
+func matchesFilter(a Asset, f Filter, albumNames map[int64]string) bool {
 	switch f.Scope {
 	case ScopeCached:
 		if !a.HasCached {
@@ -781,15 +923,33 @@ func matchesFilter(a Asset, f Filter) bool {
 		if !a.HasArchived {
 			return false
 		}
+	case ScopeFavorites:
+		if !a.Favorited {
+			return false
+		}
+	case ScopeVideos:
+		if a.MediaType != MediaVideo {
+			return false
+		}
 	}
 	if f.UID == UIDUnknown {
 		if len(a.UIDs) > 0 {
 			return false
 		}
 	} else if f.UID != "" {
+		if !slices.Contains(a.UIDs, f.UID) {
+			return false
+		}
+	}
+	if f.AlbumID > 0 {
+		if !slices.Contains(a.AlbumIDs, f.AlbumID) {
+			return false
+		}
+	}
+	if tag := strings.TrimSpace(f.Tag); tag != "" {
 		found := false
-		for _, u := range a.UIDs {
-			if u == f.UID {
+		for _, t := range a.Tags {
+			if strings.EqualFold(t, tag) {
 				found = true
 				break
 			}
@@ -798,7 +958,54 @@ func matchesFilter(a Asset, f Filter) bool {
 			return false
 		}
 	}
+	if q := strings.TrimSpace(f.Query); q != "" {
+		tokens := strings.Fields(strings.ToLower(q))
+		haystack := buildSearchHaystack(a, albumNames)
+		for _, tok := range tokens {
+			if !strings.Contains(haystack, tok) {
+				return false
+			}
+		}
+	}
 	return true
+}
+
+func buildSearchHaystack(a Asset, albumNames map[int64]string) string {
+	var b strings.Builder
+	b.WriteString(strings.ToLower(a.FileName))
+	b.WriteByte(' ')
+	if a.MediaType == MediaVideo {
+		b.WriteString("video 视频 mp4 ")
+	} else {
+		b.WriteString("photo image 照片 图片 ")
+	}
+	if a.VideoCodec != "" {
+		b.WriteString(strings.ToLower(a.VideoCodec))
+		b.WriteByte(' ')
+	}
+	if a.AudioCodec != "" {
+		b.WriteString(strings.ToLower(a.AudioCodec))
+		b.WriteByte(' ')
+	}
+	for _, u := range a.UIDs {
+		b.WriteString(strings.ToLower(u))
+		b.WriteByte(' ')
+	}
+	for _, t := range a.Tags {
+		b.WriteString(strings.ToLower(t))
+		b.WriteByte(' ')
+	}
+	for _, id := range a.AlbumIDs {
+		if name := albumNames[id]; name != "" {
+			b.WriteString(strings.ToLower(name))
+			b.WriteByte(' ')
+		}
+	}
+	if !a.DisplayTime.IsZero() {
+		lt := a.DisplayTime.Local()
+		b.WriteString(lt.Format("2006-01-02 2006/01/02 2006年01月02日"))
+	}
+	return b.String()
 }
 
 func sortAssets(items []Asset, order SortOrder) {
@@ -825,15 +1032,20 @@ func sortAssets(items []Asset, order SortOrder) {
 	})
 }
 
-// ResetIndex clears indexed locations and non-archived assets so a clean full
-// rescan can rebuild metadata while preserving settings, custom sources and
-// archive records.
+// ResetIndex clears indexed locations and unorganized/unarchived assets so a
+// clean full rescan can rebuild metadata while preserving settings, custom
+// sources, archive records, favorites, custom albums and tags.
 func (s *Store) ResetIndex(ctx context.Context) error {
 	return s.db.Tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM gallery_asset_locations`); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM gallery_assets WHERE id NOT IN (SELECT asset_id FROM gallery_archive)`); err != nil {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM gallery_assets
+			WHERE id NOT IN (SELECT asset_id FROM gallery_archive)
+			  AND id NOT IN (SELECT asset_id FROM gallery_favorites)
+			  AND id NOT IN (SELECT asset_id FROM gallery_album_items)
+			  AND id NOT IN (SELECT asset_id FROM gallery_asset_tags)`); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE gallery_sources SET last_scan_at = NULL`); err != nil {
@@ -855,4 +1067,11 @@ func nullString(s string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: s, Valid: true}
+}
+
+func nullInt64(v int64) sql.NullInt64 {
+	if v <= 0 {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: v, Valid: true}
 }

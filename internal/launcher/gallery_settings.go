@@ -74,7 +74,7 @@ func (s *Shell) gallerySettingsOverlay(c *ui.Context) {
 				ui.Row(c).FillWidth().Padding(20, 24, 16, 24).AlignItems(ui.Center).Gap(12).Children(func() {
 					ui.Column(c).Grow(1).Gap(3).Children(func() {
 						ui.Text(c, "相册设置").FontSize(20).FontWeight(700).TextColor(paper).SingleLine()
-						ui.Text(c, "管理本地照片归档策略、媒体目录与缩略图缓存").FontSize(12).TextColor(muted).SingleLine()
+						ui.Text(c, "管理本地照片与录像归档策略、媒体目录与缩略图缓存").FontSize(12).TextColor(muted).SingleLine()
 					})
 					iconButton(c, "gallery-settings-close", "关闭相册设置", "\uE8BB", 32, func() {
 						s.Dispatch(state.Event{Kind: state.GalleryCloseSettings})
@@ -135,7 +135,7 @@ func (s *Shell) gallerySettingsOverlay(c *ui.Context) {
 						ui.Box(c).Grow(1)
 
 						// Compact storage overview instrument card at rail bottom.
-						ui.Column(c).FillWidth().Padding(11, 12).Gap(8).Radius(12).
+						ui.Column(c).FillWidth().Padding(11, 12).Gap(7).Radius(12).
 							Background(ui.RGBA(255, 255, 255, .03)).Border(1, ui.RGBA(255, 255, 255, .07)).Children(func() {
 							ui.Text(c, "存储概览").FontSize(11).FontWeight(600).TextColor(muted).SingleLine()
 							ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
@@ -146,6 +146,12 @@ func (s *Shell) gallerySettingsOverlay(c *ui.Context) {
 								ui.Text(c, "缩略图").FontSize(11).TextColor(muted).Grow(1)
 								mono(c, formatGalleryBytes(g.ThumbCacheBytes), 11).TextColor(paper)
 							})
+							if g.ArchiveFreeBytes > 0 {
+								ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
+									ui.Text(c, "磁盘剩余").FontSize(11).TextColor(muted).Grow(1)
+									mono(c, formatGalleryBytes(g.ArchiveFreeBytes), 11).TextColor(tone)
+								})
+							}
 						})
 					})
 
@@ -220,17 +226,51 @@ func (s *Shell) gallerySettingsArchiveTab(c *ui.Context, g state.GalleryState, t
 		}
 		ui.Row(c).FillWidth().Padding(11, 13).Gap(10).Radius(10).Background(wellBg).Border(1, ui.RGBA(255, 255, 255, .06)).Children(func() {
 			ui.Box(c).Width(3).FillHeight().Radius(1.5).Background(tone.Alpha(.65))
-			ui.Text(c, "默认关闭。开启后会将游戏拍照缓存的原始字节独立复制到归档目录，防止游戏清理缓存导致作品丢失。归档副本会占用相应磁盘空间，不提升源图画质也不删除源文件；Oddward 关闭期间无法监听新拍摄的照片。").
+			ui.Text(c, "默认关闭。开启后会将游戏拍照和录像缓存的原始字节独立复制到归档目录，防止游戏清理缓存导致作品丢失。归档副本会占用相应磁盘空间，不提升画质也不删除源文件；Oddward 关闭期间无法监听新拍摄的媒体。").
 				FontSize(12).TextColor(muted).LineHeight(1.65).Grow(1).Shrink(1)
 		})
 	})
 
-	// Card 2: Archive location & manual batch archive.
+	// Card 2: Archive location, photo/video space breakdown & manual batch archive.
 	s.gallerySettingsCard(c, "gallery-card-archive-dir", opaque, func() {
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
-			ui.Text(c, "归档目录").FontSize(15).FontWeight(600).TextColor(paper).Grow(1)
-			mono(c, fmt.Sprintf("%d 张 · %s", g.ArchivedCount, formatGalleryBytes(g.ArchiveBytes)), 12).TextColor(muted)
+			ui.Text(c, "归档目录与容量").FontSize(15).FontWeight(600).TextColor(paper).Grow(1)
+			mono(c, fmt.Sprintf("%d 项 · %s", g.ArchivedCount, formatGalleryBytes(g.ArchiveBytes)), 12).TextColor(paper)
 		})
+
+		// Photo vs Video archive capacity breakdown bar.
+		ui.Column(c).FillWidth().Gap(6).Children(func() {
+			total := g.ArchivePhotoBytes + g.ArchiveVideoBytes
+			photoPct := float32(0)
+			videoPct := float32(0)
+			if total > 0 {
+				photoPct = float32(g.ArchivePhotoBytes) / float32(total) * 100
+				videoPct = float32(g.ArchiveVideoBytes) / float32(total) * 100
+			}
+			ui.Row(c).FillWidth().Height(6).Radius(3).Background(ui.RGBA(255, 255, 255, .08)).Clip().Gap(1).Children(func() {
+				if photoPct > 0 {
+					ui.Box(c).WidthPercent(max(photoPct, 2)).FillHeight().Background(tone)
+				}
+				if videoPct > 0 {
+					ui.Box(c).WidthPercent(max(videoPct, 2)).FillHeight().Background(wishWarningCool)
+				}
+			})
+			ui.Row(c).FillWidth().Gap(14).AlignItems(ui.Center).Children(func() {
+				ui.Row(c).Gap(5).AlignItems(ui.Center).Children(func() {
+					ui.Box(c).Size(7, 7).Radius(3.5).Background(tone)
+					ui.Text(c, fmt.Sprintf("照片 %d 张 (%s)", g.ArchivePhotoCount, formatGalleryBytes(g.ArchivePhotoBytes))).FontSize(11).TextColor(muted).SingleLine()
+				})
+				ui.Row(c).Gap(5).AlignItems(ui.Center).Children(func() {
+					ui.Box(c).Size(7, 7).Radius(3.5).Background(wishWarningCool)
+					ui.Text(c, fmt.Sprintf("视频 %d 段 (%s)", g.ArchiveVideoCount, formatGalleryBytes(g.ArchiveVideoBytes))).FontSize(11).TextColor(muted).SingleLine()
+				})
+				ui.Box(c).Grow(1)
+				if g.ArchiveFreeBytes > 0 {
+					mono(c, "可用 "+formatGalleryBytes(g.ArchiveFreeBytes), 11).TextColor(muted)
+				}
+			})
+		})
+
 		archivePath := g.EffectiveArchive
 		if archivePath == "" {
 			archivePath = "默认（系统图片目录\\Oddward\\Gallery）"
@@ -252,7 +292,7 @@ func (s *Shell) gallerySettingsArchiveTab(c *ui.Context, g state.GalleryState, t
 				s.Dispatch(state.Event{Kind: state.GalleryOpenFolder, Path: g.EffectiveArchive})
 			})
 			ui.Box(c).Grow(1)
-			s.gallerySmallButton(c, "gallery-archive-existing", "归档已有照片", g.Busy || g.CachedCount == 0).OnClick(func() {
+			s.gallerySmallButton(c, "gallery-archive-existing", "归档已有媒体", g.Busy || g.CachedCount == 0).OnClick(func() {
 				s.Dispatch(state.Event{Kind: state.GalleryArchiveExisting})
 			})
 		})
@@ -272,7 +312,7 @@ func (s *Shell) gallerySettingsSourcesTab(c *ui.Context, g state.GalleryState, t
 				return state.Event{Kind: state.GalleryToggleAutoDiscover, Enabled: on}
 			})
 		})
-		ui.Text(c, "从已定位的《异环》安装目录只读探测 Selfie 拍照目录，绝不修改或删除游戏文件。系统图片目录下的 NevernessToEverness 导出目录也会自动识别。").
+		ui.Text(c, "从已定位的《异环》安装目录只读探测 Selfie 下的 ScreenShots（拍照）与 FFMpeg（录像）目录，绝不修改或删除游戏文件。系统图片与视频目录下的 NevernessToEverness 导出目录也会自动识别。").
 			FontSize(12).TextColor(muted).LineHeight(1.6)
 	})
 
@@ -354,11 +394,14 @@ func (s *Shell) gallerySettingsCacheTab(c *ui.Context, g state.GalleryState, ton
 	// Card 2: Cache & index maintenance.
 	s.gallerySettingsCard(c, "gallery-card-maintenance", opaque, func() {
 		ui.Text(c, "缓存与索引维护").FontSize(15).FontWeight(600).TextColor(paper)
-		ui.Text(c, "若缩略图异常或手动整理过外部目录，可随时清理缓存或重新建立本地索引。").
+		ui.Text(c, "重建索引会保留已有的收藏、自定义相册、标签和归档副本；清理失效索引仅移除源文件已消失且未归档的数据库条目，绝不删除任何本地文件。").
 			FontSize(12).TextColor(muted).LineHeight(1.6)
-		ui.Row(c).FillWidth().Gap(10).Children(func() {
+		ui.Row(c).FillWidth().Gap(8).Children(func() {
 			s.gallerySmallButton(c, "gallery-clear-thumbs", "清理缩略图缓存", g.Busy).OnClick(func() {
 				s.Dispatch(state.Event{Kind: state.GalleryClearThumbCache})
+			})
+			s.gallerySmallButton(c, "gallery-prune-missing", fmt.Sprintf("清理失效索引 (%d)", g.MissingCount), g.Busy || g.MissingCount == 0).OnClick(func() {
+				s.Dispatch(state.Event{Kind: state.GalleryPruneMissing})
 			})
 			s.gallerySmallButton(c, "gallery-rebuild-index", "重新建立索引", g.Busy).OnClick(func() {
 				s.Dispatch(state.Event{Kind: state.GalleryRebuildIndex})

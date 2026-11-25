@@ -16,13 +16,26 @@ func (s *Shell) generalSection(c *ui.Context) {
 		"发现有新版本时在标题栏提示；关闭后可以在关于页手动检查。", s.Model.CheckUpdates, false, state.ToggleCheckUpdates)
 }
 
-// appearanceSection groups every visual preference. Artwork overrides stay
-// unavailable here until choosing a local file is wired end to end.
+// appearanceSection groups every visual preference, including restoring the
+// official launcher background when a gallery photo is active.
 func (s *Shell) appearanceSection(c *ui.Context) {
 	s.setting(c, "motion-setting", "动态背景", "关闭后显示静态背景。", s.Model.Motion, s.Model.Media == state.MediaUnavailable, state.ToggleMotion)
 	s.setting(c, "reduced-motion", "减少动态效果", "暂停背景播放和界面动画。", s.Model.ReducedMotion, false, state.ToggleReducedMotion)
 	s.setting(c, "accent-follow", "强调色跟随版本主视觉", "关闭后使用 Oddward 的默认黄色。", s.Model.AccentFollow, false, state.ToggleAccentFollow)
-	ui.Text(c, "自定义背景用启动参数 -background 指定视频、-background-still 指定静态图；也可以用 ODDWARD_BACKGROUND 环境变量。改动在下次启动时生效。").FontSize(12).TextColor(muted).LineHeight(1.6)
+	if s.Model.CustomBackground {
+		tone := s.tone()
+		ui.Row(c.Key("custom-bg-card")).FillWidth().Padding(12, 14).Gap(12).Radius(12).AlignItems(ui.Center).
+			Background(ui.RGBA(255, 255, 255, .04)).Border(1, tone.Alpha(.38)).Children(func() {
+			ui.Column(c).Grow(1).MinWidth(0).Gap(3).Children(func() {
+				ui.Text(c, "已启用自定义静态背景").FontSize(14).FontWeight(600).TextColor(paper).SingleLine()
+				ui.Text(c, "当前使用海特洛相册中的照片作为启动器静态背景，强调色已自动适配。").FontSize(12).TextColor(muted).LineHeight(1.5)
+			})
+			s.quietButton(c, "restore-official-bg", "恢复官方背景", s.Model.Gallery.Busy).Height(34).OnClick(func() {
+				s.Dispatch(state.Event{Kind: state.GalleryClearCustomBackground})
+			})
+		})
+	}
+	ui.Text(c, "可在「海特洛相册」中将任意照片设为自定义静态背景；也可通过启动参数 -background / -background-still 或 ODDWARD_BACKGROUND 环境变量覆盖，启动参数优先级最高。").FontSize(12).TextColor(muted).LineHeight(1.6)
 	if s.Model.MediaPreview {
 		ui.Text(c, "MOCK · 媒体状态预览").FontSize(12).TextColor(muted)
 	}

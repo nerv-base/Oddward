@@ -232,6 +232,10 @@ const (
 	gallerySettingsDialogHeight float32 = 520
 	gallerySettingsNavWidth     float32 = 184
 	gallerySettingsCardRadius   float32 = 14
+	gallerySearchWidth          float32 = 196
+	galleryOrganizeDialogWidth  float32 = 520
+	galleryOrganizeDialogHeight float32 = 468
+	galleryVideoBarHeight       float32 = 46
 	monoFont                            = "Bahnschrift"
 )
 

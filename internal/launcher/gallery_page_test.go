@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,25 +20,34 @@ import (
 )
 
 type fakeGalleryBackend struct {
-	mu            sync.Mutex
-	assets        []GalleryAsset
-	uids          []string
-	hasUnknown    bool
-	sources       []GallerySource
-	settings      GallerySettings
-	archiveDir    string
-	thumbBytes    int64
-	loadErr       error
-	scanErr       error
-	scanDiskFull  bool
-	watching      bool
-	copyCount     int
-	exportSingle  string
-	exportBatch   int
-	clearedThumbs int
-	rebuiltCount  int
-	archivedOne   int64
-	deletedArch   int64
+	mu               sync.Mutex
+	assets           []GalleryAsset
+	uids             []string
+	hasUnknown       bool
+	sources          []GallerySource
+	albums           []GalleryAlbum
+	tags             []GalleryTag
+	settings         GallerySettings
+	archiveDir       string
+	archiveFreeBytes int64
+	thumbBytes       int64
+	loadErr          error
+	scanErr          error
+	scanDiskFull     bool
+	watching         bool
+	copyCount        int
+	exportSingle     string
+	exportBatch      int
+	clearedThumbs    int
+	rebuiltCount     int
+	prunedMissing    int
+	archivedOne      int64
+	archivedBatch    int
+	deletedArch      int64
+	deletedArchBatch int
+	customBGSet      int64
+	customBGCleared  int
+	nextAlbumID      int64
 }
 
 func newFakeGalleryBackend(assets ...GalleryAsset) *fakeGalleryBackend {
@@ -55,26 +66,62 @@ func newFakeGalleryBackend(assets ...GalleryAsset) *fakeGalleryBackend {
 		}
 	}
 	return &fakeGalleryBackend{
-		assets:     assets,
-		uids:       uids,
-		hasUnknown: hasUnknown,
-		settings:   GallerySettings{AutoArchive: false, AutoDiscoverGame: true, ThumbCacheMB: 256},
-		archiveDir: `C:\Users\Test\Pictures\Oddward\Gallery`,
-		thumbBytes: 12 << 20,
+		assets:           assets,
+		uids:             uids,
+		hasUnknown:       hasUnknown,
+		settings:         GallerySettings{AutoArchive: false, AutoDiscoverGame: true, ThumbCacheMB: 256},
+		archiveDir:       `C:\Users\Test\Pictures\Oddward\Gallery`,
+		archiveFreeBytes: 120 << 30,
+		thumbBytes:       12 << 20,
+		nextAlbumID:      10,
 	}
 }
 
-func (f *fakeGalleryBackend) LoadSnapshot(_ context.Context, scope state.GalleryScope, uid string, _ state.GallerySort) (GallerySnapshot, error) {
+func (f *fakeGalleryBackend) rebuildTagsLocked() {
+	counts := make(map[string]int)
+	for _, a := range f.assets {
+		for _, t := range a.Tags {
+			counts[t]++
+		}
+	}
+	f.tags = nil
+	var id int64 = 1
+	for name, cnt := range counts {
+		f.tags = append(f.tags, GalleryTag{ID: id, Name: name, Count: cnt})
+		id++
+	}
+	for i := range f.albums {
+		cnt := 0
+		for _, a := range f.assets {
+			if slices.Contains(a.AlbumIDs, f.albums[i].ID) {
+				cnt++
+			}
+		}
+		f.albums[i].Count = cnt
+	}
+}
+
+func (f *fakeGalleryBackend) LoadSnapshot(_ context.Context, query GalleryQuery) (GallerySnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.loadErr != nil {
 		return GallerySnapshot{}, f.loadErr
 	}
+	f.rebuildTagsLocked()
 	var filtered []GalleryAsset
 	var stats GalleryStats
 	stats.ThumbCacheBytes = f.thumbBytes
+	stats.ArchiveFreeBytes = f.archiveFreeBytes
 	for _, a := range f.assets {
 		stats.TotalAssets++
+		if a.IsVideo() {
+			stats.VideoCount++
+		} else {
+			stats.PhotoCount++
+		}
+		if a.Favorited {
+			stats.FavoriteCount++
+		}
 		if a.Invalid {
 			stats.InvalidCount++
 		} else {
@@ -88,12 +135,19 @@ func (f *fakeGalleryBackend) LoadSnapshot(_ context.Context, scope state.Gallery
 				stats.ArchivedCount++
 				stats.ArchiveCount++
 				stats.ArchiveBytes += a.ByteSize
+				if a.IsVideo() {
+					stats.ArchiveVideoCount++
+					stats.ArchiveVideoBytes += a.ByteSize
+				} else {
+					stats.ArchivePhotoCount++
+					stats.ArchivePhotoBytes += a.ByteSize
+				}
 			}
 			if !a.Available {
 				stats.MissingCount++
 			}
 		}
-		switch scope {
+		switch query.Scope {
 		case state.GalleryScopeCached:
 			if !a.HasCached {
 				continue
@@ -106,18 +160,40 @@ func (f *fakeGalleryBackend) LoadSnapshot(_ context.Context, scope state.Gallery
 			if !a.HasArchived {
 				continue
 			}
+		case state.GalleryScopeFavorites:
+			if !a.Favorited {
+				continue
+			}
+		case state.GalleryScopeVideos:
+			if !a.IsVideo() {
+				continue
+			}
 		}
-		if uid == state.GalleryUIDUnknown && len(a.UIDs) > 0 {
+		if query.UID == state.GalleryUIDUnknown && len(a.UIDs) > 0 {
 			continue
-		} else if uid != "" && uid != state.GalleryUIDUnknown {
-			ok := false
-			for _, u := range a.UIDs {
-				if u == uid {
-					ok = true
+		} else if query.UID != "" && query.UID != state.GalleryUIDUnknown {
+			if !slices.Contains(a.UIDs, query.UID) {
+				continue
+			}
+		}
+		if query.AlbumID > 0 && !slices.Contains(a.AlbumIDs, query.AlbumID) {
+			continue
+		}
+		if query.Tag != "" {
+			found := false
+			for _, t := range a.Tags {
+				if strings.EqualFold(t, query.Tag) {
+					found = true
 					break
 				}
 			}
-			if !ok {
+			if !found {
+				continue
+			}
+		}
+		if q := strings.ToLower(strings.TrimSpace(query.Search)); q != "" {
+			hay := strings.ToLower(a.FileName + " " + strings.Join(a.Tags, " ") + " " + strings.Join(a.UIDs, " "))
+			if !strings.Contains(hay, q) {
 				continue
 			}
 		}
@@ -128,6 +204,8 @@ func (f *fakeGalleryBackend) LoadSnapshot(_ context.Context, scope state.Gallery
 		UIDs:          f.uids,
 		HasUnknownUID: f.hasUnknown,
 		Sources:       f.sources,
+		Albums:        slices.Clone(f.albums),
+		Tags:          slices.Clone(f.tags),
 		Stats:         stats,
 		Settings:      f.settings,
 		ArchiveDir:    f.archiveDir,
@@ -200,9 +278,153 @@ func (f *fakeGalleryBackend) ArchiveAsset(_ context.Context, a GalleryAsset) (bo
 	return false, nil
 }
 
+func (f *fakeGalleryBackend) ArchiveBatch(_ context.Context, assets []GalleryAsset) (GalleryArchiveSummary, error) {
+	f.mu.Lock()
+	f.archivedBatch += len(assets)
+	f.mu.Unlock()
+	return GalleryArchiveSummary{Archived: len(assets)}, nil
+}
+
 func (f *fakeGalleryBackend) DeleteArchiveCopy(_ context.Context, id int64) error {
 	f.mu.Lock()
 	f.deletedArch = id
+	for i := range f.assets {
+		if f.assets[i].ID == id {
+			f.assets[i].HasArchived = false
+		}
+	}
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeGalleryBackend) DeleteArchiveCopies(_ context.Context, ids []int64) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	removed := 0
+	for _, id := range ids {
+		for i := range f.assets {
+			if f.assets[i].ID == id && f.assets[i].HasArchived {
+				f.assets[i].HasArchived = false
+				removed++
+			}
+		}
+	}
+	f.deletedArchBatch += removed
+	return removed, nil
+}
+
+func (f *fakeGalleryBackend) PruneMissingUnarchived(_ context.Context) (int, error) {
+	f.mu.Lock()
+	f.prunedMissing++
+	f.mu.Unlock()
+	return 1, nil
+}
+
+func (f *fakeGalleryBackend) SetFavorites(_ context.Context, ids []int64, on bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.assets {
+		if slices.Contains(ids, f.assets[i].ID) {
+			f.assets[i].Favorited = on
+		}
+	}
+	return nil
+}
+
+func (f *fakeGalleryBackend) CreateAlbum(_ context.Context, name string) (GalleryAlbum, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextAlbumID++
+	al := GalleryAlbum{ID: f.nextAlbumID, Name: name}
+	f.albums = append(f.albums, al)
+	return al, nil
+}
+
+func (f *fakeGalleryBackend) RenameAlbum(_ context.Context, albumID int64, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.albums {
+		if f.albums[i].ID == albumID {
+			f.albums[i].Name = name
+			return nil
+		}
+	}
+	return errors.New("not found")
+}
+
+func (f *fakeGalleryBackend) DeleteAlbum(_ context.Context, albumID int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.albums {
+		if f.albums[i].ID == albumID {
+			f.albums = append(f.albums[:i], f.albums[i+1:]...)
+			break
+		}
+	}
+	for i := range f.assets {
+		f.assets[i].AlbumIDs = slices.DeleteFunc(f.assets[i].AlbumIDs, func(id int64) bool { return id == albumID })
+	}
+	return nil
+}
+
+func (f *fakeGalleryBackend) AddAssetsToAlbum(_ context.Context, albumID int64, ids []int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.assets {
+		if slices.Contains(ids, f.assets[i].ID) && !slices.Contains(f.assets[i].AlbumIDs, albumID) {
+			f.assets[i].AlbumIDs = append(f.assets[i].AlbumIDs, albumID)
+		}
+	}
+	return nil
+}
+
+func (f *fakeGalleryBackend) RemoveAssetsFromAlbum(_ context.Context, albumID int64, ids []int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.assets {
+		if slices.Contains(ids, f.assets[i].ID) {
+			f.assets[i].AlbumIDs = slices.DeleteFunc(f.assets[i].AlbumIDs, func(id int64) bool { return id == albumID })
+		}
+	}
+	return nil
+}
+
+func (f *fakeGalleryBackend) AddTagToAssets(_ context.Context, tag string, ids []int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.assets {
+		if slices.Contains(ids, f.assets[i].ID) && !slices.Contains(f.assets[i].Tags, tag) {
+			f.assets[i].Tags = append(f.assets[i].Tags, tag)
+		}
+	}
+	return nil
+}
+
+func (f *fakeGalleryBackend) RemoveTagFromAsset(_ context.Context, assetID int64, tag string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.assets {
+		if f.assets[i].ID == assetID {
+			f.assets[i].Tags = slices.DeleteFunc(f.assets[i].Tags, func(t string) bool { return t == tag })
+		}
+	}
+	return nil
+}
+
+func (f *fakeGalleryBackend) SetCustomBackground(ctx context.Context, asset GalleryAsset) (image.Image, error) {
+	f.mu.Lock()
+	f.customBGSet = asset.ID
+	f.mu.Unlock()
+	return f.DecodeOriginal(ctx, asset)
+}
+
+func (f *fakeGalleryBackend) LoadCustomBackground(_ context.Context) (image.Image, error) {
+	return nil, nil
+}
+
+func (f *fakeGalleryBackend) ClearCustomBackground(_ context.Context) error {
+	f.mu.Lock()
+	f.customBGCleared++
 	f.mu.Unlock()
 	return nil
 }
@@ -533,6 +755,144 @@ func TestGalleryViewerShortcutsBatchSelectionAndSettings(t *testing.T) {
 	if s.Model.Gallery.SettingsOpen {
 		t.Fatal("Esc must close gallery settings")
 	}
+}
+
+func TestGalleryP1FavoritesAlbumsTagsVideoViewerAndCustomBackground(t *testing.T) {
+	day1 := time.Date(2026, 11, 24, 16, 52, 2, 0, time.FixedZone("CST", 8*3600))
+	assets := append(sampleGalleryAssets(), GalleryAsset{
+		ID: 5, SHA256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		MediaType: GalleryMediaVideo, MIMEType: "video/mp4", ByteSize: 25 << 20,
+		Width: 1920, Height: 1080, DurationMS: 130_840, VideoCodec: "H.264", AudioCodec: "AAC",
+		PosterPath: `D:\Games\NTE\Selfie\100001\FFMpeg\26_11_24_16_49_20_KeyFrame.jpg`,
+		ModifiedAt: day1.Add(-2 * time.Minute), DisplayTime: day1.Add(-2 * time.Minute),
+		FileName:    "26_11_24_16_49_0123.mp4",
+		PrimaryPath: `D:\Games\NTE\Selfie\100001\FFMpeg\26_11_24_16_49_0123.mp4`,
+		SourcePath:  `D:\Games\NTE\Selfie\100001\FFMpeg\26_11_24_16_49_0123.mp4`,
+		UIDs:        []string{"100001"}, HasCached: true, HasArchived: true, Available: true,
+		Tags: []string{"夜景"},
+	})
+	assets[0].Favorited = true
+	assets[0].Tags = []string{"霓虹"}
+
+	s := NewShell(settled(state.Ready))
+	t.Cleanup(s.Dispose)
+	fb := newFakeGalleryBackend(assets...)
+	fb.albums = []GalleryAlbum{{ID: 1, Name: "海特洛夜景", Count: 1}}
+	s.GalleryBackend = fb
+	s.WishLocation = time.FixedZone("CST", 8*3600)
+
+	tt := ui.NewTester(s.View, 1280, 720)
+	if clickFailed(tt, "相册") {
+		t.Fatal("failed to open gallery")
+	}
+	settleGallery(t, tt, func() bool { return s.Model.Gallery.Phase == state.GalleryReady && len(s.gallery.assets) == 5 })
+	tt.Frame()
+
+	// Verify P1 scope tabs (收藏, 视频) and search input exist with accessible roles.
+	if _, ok := tt.AccessByRole(ui.RoleTab, "收藏"); !ok {
+		t.Fatal("missing accessible 收藏 scope tab")
+	}
+	if _, ok := tt.AccessByRole(ui.RoleTab, "视频"); !ok {
+		t.Fatal("missing accessible 视频 scope tab")
+	}
+	if _, ok := tt.AccessByRole(ui.RoleMenuButton, "相册筛选"); !ok {
+		t.Fatal("missing accessible 相册筛选 menu button")
+	}
+	if _, ok := tt.AccessByRole(ui.RoleMenuButton, "标签筛选"); !ok {
+		t.Fatal("missing accessible 标签筛选 menu button")
+	}
+
+	// Switch to 视频 tab -> only video asset visible, open video viewer.
+	if clickFailed(tt, "视频") {
+		t.Fatal("failed to click 视频 tab")
+	}
+	settleGallery(t, tt, func() bool { return len(s.gallery.assets) == 1 && s.gallery.assets[0].IsVideo() })
+	tt.Frame()
+	if !tt.HasText("02:11") {
+		t.Fatalf("video duration pill missing from tile; texts=%v", tt.Texts())
+	}
+
+	// Open video viewer by clicking the video tile -> displays verified codec metadata and hides photo-only actions.
+	if clickFailed(tt, "26_11_24_16_49_0123.mp4") {
+		t.Fatal("failed to click video tile")
+	}
+	tt.Frame()
+	if !s.Model.Gallery.ViewerOpen || s.Model.Gallery.ViewerID != 5 {
+		t.Fatalf("clicking video tile failed to open video viewer: %+v", s.Model.Gallery)
+	}
+	if !tt.HasText("MP4 · H.264/AAC · 02:11") {
+		t.Fatalf("video codec pill missing in viewer; texts=%v", tt.Texts())
+	}
+	if _, ok := tt.AccessByRole(ui.RoleButton, "设为背景"); ok {
+		t.Fatal("video viewer must not offer 设为背景")
+	}
+	tt.Key(0, ui.KeyEscape)
+	tt.Frame()
+
+	// Switch back to 全部媒体, open photo viewer, and set photo as custom static background.
+	if clickFailed(tt, "全部媒体") {
+		t.Fatal("failed to click 全部媒体")
+	}
+	settleGallery(t, tt, func() bool { return len(s.gallery.assets) == 5 })
+	tt.Frame()
+	s.Dispatch(state.Event{Kind: state.GalleryOpenViewer, Gallery: state.GalleryPayload{AssetID: 1}})
+	tt.Frame()
+	if clickFailed(tt, "设为背景") {
+		t.Fatal("failed to click 设为背景 in photo viewer")
+	}
+	settleGallery(t, tt, func() bool { return s.Model.CustomBackground && s.Poster != nil })
+	tt.Key(0, ui.KeyEscape)
+	tt.Frame()
+
+	// Navigate to 启动器设置 -> 外观 and restore official background.
+	s.Dispatch(state.Event{Kind: state.Navigate, Page: state.LauncherSettings})
+	s.selectSettingsSection(state.SettingsAppearance)
+	tt.Frame()
+	if !tt.HasText("已启用自定义静态背景") {
+		t.Fatalf("appearance settings must show custom background status; texts=%v", tt.Texts())
+	}
+	if clickFailed(tt, "恢复官方背景") {
+		t.Fatal("failed to click 恢复官方背景")
+	}
+	settleGallery(t, tt, func() bool { return !s.Model.CustomBackground })
+
+	// Return to gallery and verify centered album & tag modals + batch delete archive confirmation.
+	s.Dispatch(state.Event{Kind: state.Navigate, Page: state.Gallery})
+	settleGallery(t, tt, func() bool { return len(s.gallery.assets) == 5 })
+	s.Dispatch(state.Event{Kind: state.GalleryOpenAlbumModal, Gallery: state.GalleryPayload{AssetID: 1}})
+	tt.Frame()
+	if dlg, ok := tt.AccessByRole(ui.RoleDialog, "管理自定义相册"); !ok || dlg.Bounds.X < 100 {
+		t.Fatalf("album modal must be centered dialog, ok=%v bounds=%+v", ok, dlg.Bounds)
+	}
+	tt.Key(0, ui.KeyEscape)
+	tt.Frame()
+
+	s.Dispatch(state.Event{Kind: state.GalleryOpenTagModal, Gallery: state.GalleryPayload{AssetID: 1}})
+	tt.Frame()
+	if dlg, ok := tt.AccessByRole(ui.RoleDialog, "管理标签"); !ok || dlg.Bounds.X < 100 {
+		t.Fatalf("tag modal must be centered dialog, ok=%v bounds=%+v", ok, dlg.Bounds)
+	}
+	tt.Key(0, ui.KeyEscape)
+	tt.Frame()
+
+	// Multi-select all -> batch delete archive requires confirmation -> confirm deletes only archive copies.
+	tt.Key(ui.Ctrl, ui.KeyA)
+	tt.Frame()
+	if clickFailed(tt, "删除归档") {
+		t.Fatal("failed to open batch delete archive confirmation")
+	}
+	tt.Frame()
+	if _, ok := tt.AccessByRole(ui.RoleDialog, "批量删除归档副本"); !ok {
+		t.Fatal("missing centered batch delete archive confirmation dialog")
+	}
+	if clickFailed(tt, "删除归档副本") {
+		t.Fatal("failed to confirm batch delete archive")
+	}
+	settleGallery(t, tt, func() bool {
+		fb.mu.Lock()
+		defer fb.mu.Unlock()
+		return fb.deletedArchBatch == 2
+	})
 }
 
 func TestGalleryBitmapLRUEnforcesByteBudget(t *testing.T) {

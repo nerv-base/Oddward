@@ -64,7 +64,7 @@ const (
 	StatusInvalid
 )
 
-// Scope filters assets by provenance/availability.
+// Scope filters assets by provenance/availability/media kind.
 type Scope uint8
 
 const (
@@ -72,6 +72,8 @@ const (
 	ScopeCached
 	ScopeExported
 	ScopeArchived
+	ScopeFavorites
+	ScopeVideos
 )
 
 // SortOrder controls how assets are ordered.
@@ -105,6 +107,7 @@ type Settings struct {
 	ArchiveDir       string
 	AutoDiscoverGame bool
 	ThumbCacheMB     int
+	CustomBackground string
 }
 
 // DefaultSettings returns the initial gallery settings for a fresh profile.
@@ -164,6 +167,10 @@ type MediaInfo struct {
 	Width       int
 	Height      int
 	ByteSize    int64
+	DurationMS  int64
+	VideoCodec  string
+	AudioCodec  string
+	PosterPath  string
 	CapturedAt  time.Time // Zero (NULL in SQLite) when no trusted EXIF timestamp exists.
 	Orientation int       // EXIF orientation 1..8 (1 = upright).
 }
@@ -178,6 +185,9 @@ type Asset struct {
 	Width         int
 	Height        int
 	DurationMS    int64
+	VideoCodec    string
+	AudioCodec    string
+	PosterPath    string    // Companion keyframe or archived poster path for videos, if available.
 	CapturedAt    time.Time // Zero when unknown; never faked from file mtime.
 	DiscoveredAt  time.Time
 	ModifiedAt    time.Time // Latest observed file modification time across locations.
@@ -189,6 +199,9 @@ type Asset struct {
 	ArchiveStatus ArchiveStatus
 	UIDs          []string
 	Locations     []Location
+	Favorited     bool
+	Tags          []string
+	AlbumIDs      []int64
 	HasCached     bool
 	HasExported   bool
 	HasCustom     bool
@@ -217,22 +230,33 @@ func (a Asset) Status() AssetStatus {
 
 // Filter narrows and sorts queried assets.
 type Filter struct {
-	Scope Scope
-	UID   string
-	Sort  SortOrder
+	Scope   Scope
+	UID     string
+	AlbumID int64
+	Tag     string
+	Query   string
+	Sort    SortOrder
 }
 
 // Stats summarizes indexed assets and storage usage from real records.
 type Stats struct {
-	TotalAssets     int
-	CachedCount     int
-	ExportedCount   int
-	ArchivedCount   int
-	MissingCount    int
-	InvalidCount    int
-	ArchiveCount    int
-	ArchiveBytes    int64
-	ThumbCacheBytes int64
+	TotalAssets       int
+	PhotoCount        int
+	VideoCount        int
+	FavoriteCount     int
+	CachedCount       int
+	ExportedCount     int
+	ArchivedCount     int
+	MissingCount      int
+	InvalidCount      int
+	ArchiveCount      int
+	ArchiveBytes      int64
+	ArchivePhotoCount int
+	ArchivePhotoBytes int64
+	ArchiveVideoCount int
+	ArchiveVideoBytes int64
+	ArchiveFreeBytes  int64
+	ThumbCacheBytes   int64
 }
 
 // ScanReport summarizes one incremental or full scan pass.

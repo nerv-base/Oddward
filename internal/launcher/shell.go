@@ -89,6 +89,7 @@ type Shell struct {
 	PickWishExport        func(context.Context, string, state.WishFormat) (string, error)
 	wish                  wishArchives
 	GalleryBackend        GalleryBackend
+	OpenGalleryVideo      func(string) (*ui.VideoPlayer, error)
 	PickGalleryDirectory  func(context.Context, string) (string, error)
 	PickGalleryExportFile func(context.Context, string) (string, error)
 	WriteClipboardImage   func([]byte) error
@@ -111,6 +112,7 @@ type Shell struct {
 	Player                *ui.VideoPlayer
 	nextPlayer            *ui.VideoPlayer
 	BackgroundSource      BackgroundSource
+	NewBackgroundSource   func() BackgroundSource
 	backgroundOut         chan backgroundResult
 	Slogan                *ui.Bitmap
 	Logo                  *ui.Bitmap

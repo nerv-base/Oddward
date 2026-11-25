@@ -31,24 +31,28 @@ const (
 )
 
 // IsIgnoredCandidate reports whether a file should be skipped during scanning
-// (temporary files, hidden dotfiles, non-image extensions or derived FFMpeg
+// (temporary files, hidden dotfiles, non-media extensions or derived FFMpeg
 // video keyframes). Note: passing this filter does NOT grant trust — actual
-// bytes are always sniffed and header-validated by InspectFile.
+// bytes are always sniffed and header-validated by HashAndInspectFile.
 func IsIgnoredCandidate(sourceType SourceType, relPath string) bool {
 	norm := strings.ToLower(strings.ReplaceAll(relPath, `\`, `/`))
 	base := filepath.Base(norm)
 	if base == "" || strings.HasPrefix(base, ".") || strings.HasSuffix(base, ".tmp") || strings.HasSuffix(base, ".part") {
 		return true
 	}
+	ext := strings.ToLower(filepath.Ext(base))
 	if sourceType == SourceGameCache {
-		// Real CN client writes video keyframe thumbnails under <UID>/FFMpeg/*_KeyFrame.jpg.
-		if strings.Contains(norm, "/ffmpeg/") || strings.HasPrefix(norm, "ffmpeg/") || strings.Contains(base, "_keyframe.") {
+		// Real CN client writes companion video keyframe thumbnails (*_KeyFrame.jpg)
+		// alongside MP4 recordings under <UID>/FFMpeg/. Never index them as photos.
+		if strings.Contains(base, "_keyframe.") {
+			return true
+		}
+		if (strings.Contains(norm, "/ffmpeg/") || strings.HasPrefix(norm, "ffmpeg/")) && !IsVideoExtension(ext) {
 			return true
 		}
 	}
-	ext := strings.ToLower(filepath.Ext(base))
 	switch ext {
-	case ".png", ".jpg", ".jpeg", ".webp", ".bmp":
+	case ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".mp4", ".mov":
 		return false
 	default:
 		return true
@@ -78,7 +82,7 @@ func SniffImageMIME(header []byte) (mimeType, format string, ok bool) {
 }
 
 // ExtensionForMIME returns the canonical lowercase extension for a validated
-// image MIME type.
+// image or video MIME type.
 func ExtensionForMIME(mimeType string) string {
 	switch mimeType {
 	case "image/png":
@@ -89,6 +93,10 @@ func ExtensionForMIME(mimeType string) string {
 		return ".webp"
 	case "image/bmp":
 		return ".bmp"
+	case "video/mp4":
+		return ".mp4"
+	case "video/quicktime":
+		return ".mov"
 	default:
 		return ""
 	}

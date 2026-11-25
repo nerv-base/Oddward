@@ -28,6 +28,7 @@ func NewGalleryBackend(db *database.DB, dataDir string) (*GalleryBackend, error)
 		return nil, errors.New("gallery data directory must be an absolute path")
 	}
 	svc, err := gallery.NewService(db, gallery.ServiceOptions{
+		DataRoot:      dataDir,
 		ThumbCacheDir: filepath.Join(dataDir, "cache", "gallery", "thumbnails"),
 	})
 	if err != nil {
@@ -43,11 +44,14 @@ func (g *GalleryBackend) Close() {
 	}
 }
 
-func (g *GalleryBackend) LoadSnapshot(ctx context.Context, scope state.GalleryScope, uid string, sort state.GallerySort) (launcher.GallerySnapshot, error) {
+func (g *GalleryBackend) LoadSnapshot(ctx context.Context, query launcher.GalleryQuery) (launcher.GallerySnapshot, error) {
 	snap, err := g.svc.LoadSnapshot(ctx, gallery.Filter{
-		Scope: mapGalleryScope(scope),
-		UID:   uid,
-		Sort:  mapGallerySort(sort),
+		Scope:   mapGalleryScope(query.Scope),
+		UID:     query.UID,
+		AlbumID: query.AlbumID,
+		Tag:     query.Tag,
+		Query:   query.Search,
+		Sort:    mapGallerySort(query.Sort),
 	})
 	if err != nil {
 		return launcher.GallerySnapshot{}, err
@@ -57,16 +61,26 @@ func (g *GalleryBackend) LoadSnapshot(ctx context.Context, scope state.GallerySc
 		UIDs:          snap.UIDs,
 		HasUnknownUID: snap.HasUnknownUID,
 		Sources:       make([]launcher.GallerySource, len(snap.Sources)),
+		Albums:        make([]launcher.GalleryAlbum, len(snap.Albums)),
+		Tags:          make([]launcher.GalleryTag, len(snap.Tags)),
 		Stats: launcher.GalleryStats{
-			TotalAssets:     snap.Stats.TotalAssets,
-			CachedCount:     snap.Stats.CachedCount,
-			ExportedCount:   snap.Stats.ExportedCount,
-			ArchivedCount:   snap.Stats.ArchivedCount,
-			MissingCount:    snap.Stats.MissingCount,
-			InvalidCount:    snap.Stats.InvalidCount,
-			ArchiveCount:    snap.Stats.ArchiveCount,
-			ArchiveBytes:    snap.Stats.ArchiveBytes,
-			ThumbCacheBytes: snap.Stats.ThumbCacheBytes,
+			TotalAssets:       snap.Stats.TotalAssets,
+			PhotoCount:        snap.Stats.PhotoCount,
+			VideoCount:        snap.Stats.VideoCount,
+			FavoriteCount:     snap.Stats.FavoriteCount,
+			CachedCount:       snap.Stats.CachedCount,
+			ExportedCount:     snap.Stats.ExportedCount,
+			ArchivedCount:     snap.Stats.ArchivedCount,
+			MissingCount:      snap.Stats.MissingCount,
+			InvalidCount:      snap.Stats.InvalidCount,
+			ArchiveCount:      snap.Stats.ArchiveCount,
+			ArchiveBytes:      snap.Stats.ArchiveBytes,
+			ArchivePhotoCount: snap.Stats.ArchivePhotoCount,
+			ArchivePhotoBytes: snap.Stats.ArchivePhotoBytes,
+			ArchiveVideoCount: snap.Stats.ArchiveVideoCount,
+			ArchiveVideoBytes: snap.Stats.ArchiveVideoBytes,
+			ArchiveFreeBytes:  snap.Stats.ArchiveFreeBytes,
+			ThumbCacheBytes:   snap.Stats.ThumbCacheBytes,
 		},
 		Settings: launcher.GallerySettings{
 			AutoArchive:      snap.Settings.AutoArchive,
@@ -87,6 +101,21 @@ func (g *GalleryBackend) LoadSnapshot(ctx context.Context, scope state.GallerySc
 			UID:        s.UID,
 			Enabled:    s.Enabled,
 			LastScanAt: s.LastScanAt,
+		}
+	}
+	for i, al := range snap.Albums {
+		out.Albums[i] = launcher.GalleryAlbum{
+			ID:           al.ID,
+			Name:         al.Name,
+			Count:        al.Count,
+			CoverAssetID: al.CoverAssetID,
+		}
+	}
+	for i, tag := range snap.Tags {
+		out.Tags[i] = launcher.GalleryTag{
+			ID:    tag.ID,
+			Name:  tag.Name,
+			Count: tag.Count,
 		}
 	}
 	return out, nil
@@ -154,8 +183,31 @@ func (g *GalleryBackend) ArchiveAsset(ctx context.Context, asset launcher.Galler
 	return res.Deduplicated, err
 }
 
+func (g *GalleryBackend) ArchiveBatch(ctx context.Context, assets []launcher.GalleryAsset) (launcher.GalleryArchiveSummary, error) {
+	domainAssets := make([]gallery.Asset, len(assets))
+	for i, a := range assets {
+		domainAssets[i] = toDomainAsset(a)
+	}
+	rep, err := g.svc.ArchiveBatch(ctx, domainAssets)
+	return launcher.GalleryArchiveSummary{
+		Archived: rep.Archived,
+		Dedups:   rep.Dedups,
+		Skipped:  rep.Skipped,
+		Failed:   rep.Failed,
+		DiskFull: rep.DiskFull,
+	}, err
+}
+
 func (g *GalleryBackend) DeleteArchiveCopy(ctx context.Context, assetID int64) error {
 	return g.svc.DeleteArchiveCopy(ctx, assetID)
+}
+
+func (g *GalleryBackend) DeleteArchiveCopies(ctx context.Context, assetIDs []int64) (int, error) {
+	return g.svc.DeleteArchiveCopies(ctx, assetIDs)
+}
+
+func (g *GalleryBackend) PruneMissingUnarchived(ctx context.Context) (int, error) {
+	return g.svc.PruneMissingUnarchived(ctx)
 }
 
 func (g *GalleryBackend) ClearThumbCache(ctx context.Context) error {
@@ -163,21 +215,21 @@ func (g *GalleryBackend) ClearThumbCache(ctx context.Context) error {
 }
 
 func (g *GalleryBackend) DecodeThumbnail(ctx context.Context, asset launcher.GalleryAsset, edge int) (*image.RGBA, bool, error) {
-	if asset.PrimaryPath == "" || asset.Invalid || !asset.Available {
+	if asset.Invalid || !asset.Available {
 		return nil, false, gallery.ErrNotFound
 	}
-	return g.svc.DecodeThumbnail(ctx, asset.SHA256, asset.PrimaryPath, edge)
+	return g.svc.DecodeAssetThumbnail(ctx, toDomainAsset(asset), edge)
 }
 
 func (g *GalleryBackend) DecodeOriginal(ctx context.Context, asset launcher.GalleryAsset) (*image.RGBA, error) {
-	if asset.PrimaryPath == "" || asset.Invalid || !asset.Available {
+	if asset.PrimaryPath == "" || asset.Invalid || !asset.Available || asset.IsVideo() {
 		return nil, gallery.ErrNotFound
 	}
 	return g.svc.DecodeOriginal(ctx, asset.PrimaryPath)
 }
 
 func (g *GalleryBackend) ReadClipboardPNG(ctx context.Context, asset launcher.GalleryAsset) ([]byte, error) {
-	if asset.PrimaryPath == "" || asset.Invalid || !asset.Available {
+	if asset.PrimaryPath == "" || asset.Invalid || !asset.Available || asset.IsVideo() {
 		return nil, gallery.ErrNotFound
 	}
 	return gallery.ReadClipboardPNG(ctx, asset.PrimaryPath)
@@ -199,6 +251,52 @@ func (g *GalleryBackend) ExportBatch(ctx context.Context, assets []launcher.Gall
 	}, err
 }
 
+func (g *GalleryBackend) SetFavorites(ctx context.Context, assetIDs []int64, on bool) error {
+	return g.svc.SetFavorites(ctx, assetIDs, on)
+}
+
+func (g *GalleryBackend) CreateAlbum(ctx context.Context, name string) (launcher.GalleryAlbum, error) {
+	al, err := g.svc.CreateAlbum(ctx, name)
+	return launcher.GalleryAlbum{ID: al.ID, Name: al.Name, Count: al.Count, CoverAssetID: al.CoverAssetID}, err
+}
+
+func (g *GalleryBackend) RenameAlbum(ctx context.Context, albumID int64, name string) error {
+	return g.svc.RenameAlbum(ctx, albumID, name)
+}
+
+func (g *GalleryBackend) DeleteAlbum(ctx context.Context, albumID int64) error {
+	return g.svc.DeleteAlbum(ctx, albumID)
+}
+
+func (g *GalleryBackend) AddAssetsToAlbum(ctx context.Context, albumID int64, assetIDs []int64) error {
+	return g.svc.AddAssetsToAlbum(ctx, albumID, assetIDs)
+}
+
+func (g *GalleryBackend) RemoveAssetsFromAlbum(ctx context.Context, albumID int64, assetIDs []int64) error {
+	return g.svc.RemoveAssetsFromAlbum(ctx, albumID, assetIDs)
+}
+
+func (g *GalleryBackend) AddTagToAssets(ctx context.Context, tag string, assetIDs []int64) error {
+	return g.svc.AddTagToAssets(ctx, tag, assetIDs)
+}
+
+func (g *GalleryBackend) RemoveTagFromAsset(ctx context.Context, assetID int64, tag string) error {
+	return g.svc.RemoveTagFromAsset(ctx, assetID, tag)
+}
+
+func (g *GalleryBackend) SetCustomBackground(ctx context.Context, asset launcher.GalleryAsset) (image.Image, error) {
+	return g.svc.SetCustomBackground(ctx, toDomainAsset(asset))
+}
+
+func (g *GalleryBackend) LoadCustomBackground(ctx context.Context) (image.Image, error) {
+	img, _, err := g.svc.LoadCustomBackground(ctx)
+	return img, err
+}
+
+func (g *GalleryBackend) ClearCustomBackground(ctx context.Context) error {
+	return g.svc.ClearCustomBackground(ctx)
+}
+
 func mapGalleryScope(s state.GalleryScope) gallery.Scope {
 	switch s {
 	case state.GalleryScopeCached:
@@ -207,6 +305,10 @@ func mapGalleryScope(s state.GalleryScope) gallery.Scope {
 		return gallery.ScopeExported
 	case state.GalleryScopeArchived:
 		return gallery.ScopeArchived
+	case state.GalleryScopeFavorites:
+		return gallery.ScopeFavorites
+	case state.GalleryScopeVideos:
+		return gallery.ScopeVideos
 	default:
 		return gallery.ScopeAll
 	}
@@ -224,13 +326,22 @@ func mapGallerySort(s state.GallerySort) gallery.SortOrder {
 }
 
 func toLauncherAsset(a gallery.Asset) launcher.GalleryAsset {
+	mt := launcher.GalleryMediaImage
+	if a.MediaType == gallery.MediaVideo {
+		mt = launcher.GalleryMediaVideo
+	}
 	return launcher.GalleryAsset{
 		ID:            a.ID,
 		SHA256:        a.SHA256,
+		MediaType:     mt,
 		MIMEType:      a.MIMEType,
 		ByteSize:      a.ByteSize,
 		Width:         a.Width,
 		Height:        a.Height,
+		DurationMS:    a.DurationMS,
+		VideoCodec:    a.VideoCodec,
+		AudioCodec:    a.AudioCodec,
+		PosterPath:    a.PosterPath,
 		CapturedAt:    a.CapturedAt,
 		ModifiedAt:    a.ModifiedAt,
 		DisplayTime:   a.DisplayTime,
@@ -239,6 +350,9 @@ func toLauncherAsset(a gallery.Asset) launcher.GalleryAsset {
 		SourcePath:    a.SourcePath,
 		ArchivePath:   a.ArchivePath,
 		UIDs:          a.UIDs,
+		Favorited:     a.Favorited,
+		Tags:          a.Tags,
+		AlbumIDs:      a.AlbumIDs,
 		HasCached:     a.HasCached,
 		HasExported:   a.HasExported,
 		HasCustom:     a.HasCustom,
@@ -250,17 +364,27 @@ func toLauncherAsset(a gallery.Asset) launcher.GalleryAsset {
 }
 
 func toDomainAsset(a launcher.GalleryAsset) gallery.Asset {
+	mt := gallery.MediaImage
+	if a.MediaType == launcher.GalleryMediaVideo {
+		mt = gallery.MediaVideo
+	}
 	return gallery.Asset{
 		ID:          a.ID,
 		SHA256:      a.SHA256,
+		MediaType:   mt,
 		MIMEType:    a.MIMEType,
 		ByteSize:    a.ByteSize,
 		Width:       a.Width,
 		Height:      a.Height,
+		DurationMS:  a.DurationMS,
+		VideoCodec:  a.VideoCodec,
+		AudioCodec:  a.AudioCodec,
+		PosterPath:  a.PosterPath,
 		FileName:    a.FileName,
 		PrimaryPath: a.PrimaryPath,
 		SourcePath:  a.SourcePath,
 		ArchivePath: a.ArchivePath,
+		HasArchived: a.HasArchived,
 		Available:   a.Available,
 		Invalid:     a.Invalid,
 	}

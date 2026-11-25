@@ -322,6 +322,9 @@ type Model struct {
 	// closes it. AccentFollow keeps the launch tone from the current key art.
 	CloseToTray  bool
 	AccentFollow bool
+	// CustomBackground is true while a user-selected gallery photo overrides
+	// the default official launcher background.
+	CustomBackground bool
 	// CheckUpdates asks the update service once at startup.
 	CheckUpdates bool
 	Closed       bool
