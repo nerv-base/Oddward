@@ -908,9 +908,9 @@ func TestGalleryP1FavoritesAlbumsTagsVideoViewerAndCustomBackground(t *testing.T
 }
 
 func TestGalleryInfiniteCanvasPanZoomAndClick(t *testing.T) {
-	// Build 12 works so the Bravais lattice extends beyond the 1280x720 viewport in 2D.
+	// Build 24 works so the multi-scale quilt extends beyond the 1280x720 viewport in 2D.
 	day := time.Date(2026, 11, 24, 16, 0, 0, 0, time.FixedZone("CST", 8*3600))
-	assets := make([]GalleryAsset, 12)
+	assets := make([]GalleryAsset, 24)
 	for i := range assets {
 		ts := day.Add(-time.Duration(i) * time.Minute)
 		assets[i] = GalleryAsset{
@@ -931,7 +931,7 @@ func TestGalleryInfiniteCanvasPanZoomAndClick(t *testing.T) {
 	if clickFailed(tt, "相册") {
 		t.Fatal("failed to open gallery")
 	}
-	settleGallery(t, tt, func() bool { return s.Model.Gallery.Phase == state.GalleryReady && len(s.gallery.assets) == 12 })
+	settleGallery(t, tt, func() bool { return s.Model.Gallery.Phase == state.GalleryReady && len(s.gallery.assets) == 24 })
 	tt.Frame()
 
 	if s.Model.Gallery.ViewMode != state.GalleryViewCanvas {
@@ -996,6 +996,86 @@ func TestGalleryInfiniteCanvasPanZoomAndClick(t *testing.T) {
 	tt.Frame()
 	if !s.Model.Gallery.ViewerOpen || s.Model.Gallery.ViewerID != assets[0].ID {
 		t.Fatalf("clicking canvas tile failed to open viewer: open=%v id=%d", s.Model.Gallery.ViewerOpen, s.Model.Gallery.ViewerID)
+	}
+}
+
+func TestGalleryQuiltHierarchyNoOverlapNoInteriorHoles(t *testing.T) {
+	// Verify zero overlaps, zero interior holes, and genuine multi-scale
+	// hierarchy across uniform 16:9 captures + portrait captures at many sizes.
+	for _, n := range []int{1, 2, 3, 4, 5, 6, 7, 12, 24, 60} {
+		assets := make([]GalleryAsset, n)
+		for i := range assets {
+			w, h := 1920, 1080
+			if n >= 12 && i == 4 {
+				w, h = 1080, 1440 // native portrait
+			}
+			assets[i] = GalleryAsset{
+				ID:        int64(i + 1),
+				SHA256:    fmt.Sprintf("%064x", i*7919+13),
+				Width:     w,
+				Height:    h,
+				Favorited: i == 0 || i == 7,
+				Available: true,
+			}
+		}
+		q := computeGalleryQuilt(assets)
+		if len(q.tiles) != n {
+			t.Fatalf("n=%d: placed %d tiles, want %d", n, len(q.tiles), n)
+		}
+		seenAsset := make([]bool, n)
+		grid := make([][]bool, q.rows)
+		for r := range grid {
+			grid[r] = make([]bool, q.cols)
+		}
+		var hasHero, hasFeature, hasCompact, portraitGotTall bool
+		for _, tile := range q.tiles {
+			if seenAsset[tile.assetIdx] {
+				t.Fatalf("n=%d: duplicate assetIdx %d", n, tile.assetIdx)
+			}
+			seenAsset[tile.assetIdx] = true
+			if tile.spanW == 3 && tile.spanH == 3 {
+				hasHero = true
+			}
+			if tile.spanW == 2 && tile.spanH == 2 {
+				hasFeature = true
+			}
+			if tile.spanW == 1 && tile.spanH == 1 {
+				hasCompact = true
+			}
+			if n >= 12 && tile.assetIdx == 4 && tile.spanW == 1 && tile.spanH == 2 {
+				portraitGotTall = true
+			}
+			for r := tile.row; r < tile.row+tile.spanH; r++ {
+				for c := tile.col; c < tile.col+tile.spanW; c++ {
+					if r < 0 || r >= q.rows || c < 0 || c >= q.cols {
+						t.Fatalf("n=%d: tile %+v out of bounds (%dx%d)", n, tile, q.cols, q.rows)
+					}
+					if grid[r][c] {
+						t.Fatalf("n=%d: overlap at (%d,%d)", n, c, r)
+					}
+					grid[r][c] = true
+				}
+			}
+		}
+		// Verify zero interior holes: in every column, once a cell is empty, no cell below it may be occupied.
+		for c := 0; c < q.cols; c++ {
+			seenEmpty := false
+			for r := 0; r < q.rows; r++ {
+				if !grid[r][c] {
+					seenEmpty = true
+				} else if seenEmpty {
+					t.Fatalf("n=%d: interior hole detected in col %d above row %d", n, c, r)
+				}
+			}
+		}
+		if n >= 12 {
+			if !hasHero || !hasFeature || !hasCompact {
+				t.Fatalf("n=%d: expected multi-scale hierarchy (3x3=%v 2x2=%v 1x1=%v)", n, hasHero, hasFeature, hasCompact)
+			}
+			if !portraitGotTall {
+				t.Fatalf("n=%d: native portrait asset 4 should receive 1x2 vertical slot", n)
+			}
+		}
 	}
 }
 

@@ -230,6 +230,17 @@ func (s *Shell) requestGalleryThumb(asset GalleryAsset, edge int, pinned bool) *
 	if bmp := img.touch(key); bmp != nil {
 		return bmp
 	}
+	// If another decoded edge is already resident for this asset (e.g. L1 cached
+	// while a 3x3 hero upgrades to sharper resolution), paint it immediately so
+	// tiles never flash blank while the sharper decode runs in the background.
+	var fallback *ui.Bitmap
+	var fallbackEdge int
+	for k, entry := range img.cache {
+		if k.assetID == asset.ID && entry.bitmap != nil && k.edge > fallbackEdge {
+			fallback = entry.bitmap
+			fallbackEdge = k.edge
+		}
+	}
 	if !s.galleryImagesEnabled() || img.queued[key] || img.inflight[key] != nil {
 		if pinned && s.galleryImagesEnabled() && (img.queued[key] || img.inflight[key] != nil) {
 			if img.pinned == nil {
@@ -237,10 +248,10 @@ func (s *Shell) requestGalleryThumb(asset GalleryAsset, edge int, pinned bool) *
 			}
 			img.pinned[key] = true
 		}
-		return nil
+		return fallback
 	}
 	if retryAt, failed := img.failures[key]; failed && time.Now().Before(retryAt) {
-		return nil
+		return fallback
 	}
 	if img.queued == nil {
 		img.queued = make(map[galleryThumbKey]bool)
@@ -253,7 +264,7 @@ func (s *Shell) requestGalleryThumb(asset GalleryAsset, edge int, pinned bool) *
 		}
 		img.pinned[key] = true
 	}
-	return nil
+	return fallback
 }
 
 func (s *Shell) syncGalleryImages() {

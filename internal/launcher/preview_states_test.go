@@ -643,15 +643,63 @@ func setupGalleryPreviewWall(s *Shell, mode state.GalleryViewMode) {
 			PrimaryPath: `D:\Games\NTE\Selfie\100001\ScreenShots\26_11_23_20_26_10.png`,
 			UIDs:        []string{"100001"}, HasCached: true, Available: true,
 		},
+		{
+			ID: 13, SHA256: "13aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			MIMEType: "image/png", ByteSize: 2_210_000, Width: 1920, Height: 1080,
+			ModifiedAt: day2.Add(-55 * time.Minute), DisplayTime: day2.Add(-55 * time.Minute),
+			FileName:    "26_11_23_20_19_05.png",
+			PrimaryPath: `D:\Games\NTE\Selfie\100001\ScreenShots\26_11_23_20_19_05.png`,
+			UIDs:        []string{"100001"}, HasCached: true, Available: true,
+		},
+		{
+			ID: 14, SHA256: "14bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			MIMEType: "image/png", ByteSize: 1_940_000, Width: 1920, Height: 1080,
+			ModifiedAt: day2.Add(-64 * time.Minute), DisplayTime: day2.Add(-64 * time.Minute),
+			FileName:    "26_11_23_20_10_42.png",
+			PrimaryPath: `D:\Games\NTE\Selfie\200002\ScreenShots\26_11_23_20_10_42.png`,
+			UIDs:        []string{"200002"}, HasCached: true, HasArchived: true, Available: true, Favorited: true,
+		},
+		{
+			ID: 15, SHA256: "15cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			MIMEType: "image/png", ByteSize: 1_880_000, Width: 1920, Height: 1080,
+			ModifiedAt: day2.Add(-75 * time.Minute), DisplayTime: day2.Add(-75 * time.Minute),
+			FileName:    "26_11_23_19_59_11.png",
+			PrimaryPath: `D:\Games\NTE\Selfie\100001\ScreenShots\26_11_23_19_59_11.png`,
+			UIDs:        []string{"100001"}, HasCached: true, Available: true,
+		},
+		{
+			ID: 16, SHA256: "16dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			MIMEType: "image/png", ByteSize: 2_390_000, Width: 1920, Height: 1080,
+			ModifiedAt: day2.Add(-86 * time.Minute), DisplayTime: day2.Add(-86 * time.Minute),
+			FileName:    "26_11_23_19_48_28.png",
+			PrimaryPath: `D:\Games\NTE\Selfie\200002\ScreenShots\26_11_23_19_48_28.png`,
+			UIDs:        []string{"200002"}, HasCached: true, Available: true,
+		},
+		{
+			ID: 17, SHA256: "17eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+			MIMEType: "image/png", ByteSize: 2_540_000, Width: 1920, Height: 1080,
+			ModifiedAt: day2.Add(-98 * time.Minute), DisplayTime: day2.Add(-98 * time.Minute),
+			FileName:    "26_11_23_19_36_14.png",
+			PrimaryPath: `D:\Games\NTE\Selfie\100001\ScreenShots\26_11_23_19_36_14.png`,
+			UIDs:        []string{"100001"}, HasCached: true, HasArchived: true, Available: true,
+		},
+		{
+			ID: 18, SHA256: "18ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+			MIMEType: "image/png", ByteSize: 1_780_000, Width: 1920, Height: 1080,
+			ModifiedAt: day2.Add(-112 * time.Minute), DisplayTime: day2.Add(-112 * time.Minute),
+			FileName:    "26_11_23_19_22_03.png",
+			PrimaryPath: `D:\Games\NTE\Selfie\100001\ScreenShots\26_11_23_19_22_03.png`,
+			UIDs:        []string{"100001"}, HasCached: true, Available: true,
+		},
 	}
 	s.Model.Gallery.TotalCount = len(assets)
-	s.Model.Gallery.PhotoCount = 10
+	s.Model.Gallery.PhotoCount = 16
 	s.Model.Gallery.VideoCount = 2
-	s.Model.Gallery.FavoriteCount = 4
+	s.Model.Gallery.FavoriteCount = 5
 	s.Model.Gallery.FilteredCount = len(assets)
-	s.Model.Gallery.CachedCount = 10
+	s.Model.Gallery.CachedCount = 16
 	s.Model.Gallery.ExportedCount = 2
-	s.Model.Gallery.ArchivedCount = 6
+	s.Model.Gallery.ArchivedCount = 8
 	s.Model.Gallery.ArchiveBytes = 12_500_000 + (48 << 20)
 	s.Model.Gallery.ArchivePhotoCount = 5
 	s.Model.Gallery.ArchivePhotoBytes = 12_500_000

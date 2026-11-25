@@ -54,7 +54,8 @@ func (s *Shell) galleryPage(c *ui.Context) {
 				s.Dispatch(state.Event{Kind: state.GalleryOpenViewer, Gallery: state.GalleryPayload{AssetID: id}})
 			}
 		case resetCanvas:
-			s.gallery.canvas.recenter(computeGalleryLattice(len(s.gallery.assets)), surfaceW, surfaceH)
+			q := s.gallery.canvas.ensureQuilt(s.gallery.assets, s.gallery.rowsRev)
+			s.gallery.canvas.recenter(q, surfaceW, surfaceH)
 		case escSelect:
 			s.Dispatch(state.Event{Kind: state.Dismiss})
 		}
@@ -832,7 +833,7 @@ func (s *Shell) galleryStatusBar(c *ui.Context, g state.GalleryState, tone ui.Co
 
 		// Right floating canvas controls (zoom & recenter) or timeline shortcut hint.
 		if showCanvasControls {
-			layout := computeGalleryLattice(len(s.gallery.assets))
+			quilt := s.gallery.canvas.ensureQuilt(s.gallery.assets, s.gallery.rowsRev)
 			zoomPct := int(math.Round(float64(max(s.gallery.canvas.zoom, 0.1) * 100)))
 			ui.Row(c.Key("gallery-canvas-hud")).Height(galleryStatusBarHeight).Padding(0, 6).Radius(16).AlignItems(ui.Center).Gap(2).
 				Background(pillBg).Border(1, ui.RGBA(255, 255, 255, .08)).Children(func() {
@@ -846,7 +847,7 @@ func (s *Shell) galleryStatusBar(c *ui.Context, g state.GalleryState, tone ui.Co
 					b.Children(func() { mono(c, text, 11) }).OnClick(onClick)
 				}
 				zoomBtn("gallery-canvas-zoom-out", "缩小画廊", "−", func() {
-					s.adjustGalleryCanvasZoom(layout, surfaceW, surfaceH, 1/1.15, surfaceW/2, surfaceH/2)
+					s.adjustGalleryCanvasZoom(quilt, surfaceW, surfaceH, 1/1.15, surfaceW/2, surfaceH/2)
 				})
 				resetBtn := ui.ButtonBase(c.Key("gallery-canvas-reset")).Label("重置画廊视角").Tooltip("重置视角与缩放 (0)").
 					Height(24).Padding(0, 8).Radius(12).Gap(5).Justify(ui.Center).TextColor(paper)
@@ -857,10 +858,10 @@ func (s *Shell) galleryStatusBar(c *ui.Context, g state.GalleryState, tone ui.Co
 					ui.Box(c).TextColor(muted).Children(func() { glyph(c, "\uE72A", 11) })
 					mono(c, fmt.Sprintf("%d%%", zoomPct), 11)
 				}).OnClick(func() {
-					s.gallery.canvas.recenter(layout, surfaceW, surfaceH)
+					s.gallery.canvas.recenter(quilt, surfaceW, surfaceH)
 				})
 				zoomBtn("gallery-canvas-zoom-in", "放大画廊", "+", func() {
-					s.adjustGalleryCanvasZoom(layout, surfaceW, surfaceH, 1.15, surfaceW/2, surfaceH/2)
+					s.adjustGalleryCanvasZoom(quilt, surfaceW, surfaceH, 1.15, surfaceW/2, surfaceH/2)
 				})
 			})
 		} else {

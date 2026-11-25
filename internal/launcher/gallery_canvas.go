@@ -12,8 +12,9 @@ import (
 	"github.com/nerv-base/Oddward/internal/launcher/state"
 )
 
-// galleryCanvasState owns the 2D seamless infinite gallery wall camera, inertia
-// physics and pointer drag gesture state strictly on the UI thread.
+// galleryCanvasState owns the 2D seamless editorial-quilt infinite gallery wall
+// camera, cached multi-scale layout, inertia physics and pointer drag gesture
+// state strictly on the UI thread.
 type galleryCanvasState struct {
 	camX, camY float32 // world-space center currently at viewport center
 	zoom       float32 // 1.0 = default exhibition scale
@@ -30,7 +31,11 @@ type galleryCanvasState struct {
 	dragLastY    float32
 	dragLastTime time.Time
 	hoveredID    int64
-	layoutRev    uint64
+
+	quilt      galleryQuilt
+	quiltRev   uint64
+	quiltCount int
+	cameraRev  uint64
 }
 
 func (st *galleryCanvasState) ensureInit() {
@@ -49,104 +54,353 @@ func (st *galleryCanvasState) reset() {
 	st.dragAssetID = 0
 }
 
-func (st *galleryCanvasState) recenter(layout galleryLatticeLayout, viewW, viewH float32) {
+func (st *galleryCanvasState) ensureQuilt(assets []GalleryAsset, rev uint64) galleryQuilt {
+	if st.quiltRev != rev || st.quiltCount != len(assets) {
+		st.quilt = computeGalleryQuilt(assets)
+		st.quiltRev = rev
+		st.quiltCount = len(assets)
+	}
+	return st.quilt
+}
+
+func (st *galleryCanvasState) recenter(q galleryQuilt, viewW, viewH float32) {
 	st.reset()
-	minX, maxX, minY, _ := layout.cameraBounds(viewW, viewH, st.zoom)
+	minX, maxX, minY, _ := q.cameraBounds(viewW, viewH, st.zoom)
 	st.camX = clampFloat32(0, minX, maxX)
 	st.camY = minY
 }
 
-type galleryLatticeLayout struct {
-	count   int
-	cols    int
-	rows    int
-	pitchX  float32
-	pitchY  float32
-	originX float32 // world X of cell (0,0) top-left so wall centers at (0,0)
-	originY float32 // world Y of cell (0,0) top-left so wall centers at (0,0)
-	worldW  float32
-	worldH  float32
+// galleryQuiltTile places one asset onto an integer span of the atomic 16:9
+// grid so uniform 16:9 game captures form a multi-scale editorial mosaic
+// (3x3 hero, 2x2 feature, 1x2 native portrait, 1x1 compact) with zero gaps,
+// zero rounded corners and zero interior holes.
+type galleryQuiltTile struct {
+	assetIdx int
+	col, row int
+	spanW    int
+	spanH    int
 }
 
-func computeGalleryLattice(n int) galleryLatticeLayout {
-	if n <= 0 {
-		return galleryLatticeLayout{}
+type galleryQuilt struct {
+	cols       int
+	rows       int
+	originX    float32 // world X of cell (0,0) top-left so wall centers at (0,0)
+	originY    float32 // world Y of cell (0,0) top-left so wall centers at (0,0)
+	worldW     float32
+	worldH     float32
+	tiles      []galleryQuiltTile
+	rowBuckets [][]int // starting row -> indices into tiles for O(visible) rendering
+}
+
+func (q galleryQuilt) tileWorldRect(t galleryQuiltTile) ui.Rect {
+	return ui.Rect{
+		X: q.originX + float32(t.col)*galleryCanvasUnitW,
+		Y: q.originY + float32(t.row)*galleryCanvasUnitH,
+		W: float32(t.spanW) * galleryCanvasUnitW,
+		H: float32(t.spanH) * galleryCanvasUnitH,
 	}
-	var cols int
-	switch {
-	case n <= 2:
-		cols = n
-	case n <= 4:
-		cols = 2
-	case n <= 6:
-		cols = 3
-	default:
-		cols = int(math.Round(math.Sqrt(float64(n) * 1.25)))
-		if cols < 4 {
-			cols = 4
+}
+
+func galleryAssetIsPortrait(a GalleryAsset) bool {
+	return a.Width > 0 && a.Height > 0 && a.Height*10 > a.Width*11
+}
+
+// galleryAssetHash mixes SHA256 or ID into a deterministic unsigned value so
+// editorial rhythm stays stable across pans and reloads without randomness.
+func galleryAssetHash(a GalleryAsset, idx int) uint32 {
+	var h uint32 = 2166136261
+	if a.SHA256 != "" {
+		limit := min(len(a.SHA256), 16)
+		for i := 0; i < limit; i++ {
+			h ^= uint32(a.SHA256[i])
+			h *= 16777619
+		}
+		return h
+	}
+	v := uint64(a.ID)*2654435761 ^ uint64(idx+1)*40503
+	return uint32(v ^ (v >> 32))
+}
+
+// galleryAssetPriority scores real user/media curation signals so favorites,
+// videos, full-res exports, tagged/albumed and archived works naturally rise
+// to hero/feature scale while uncurated libraries still receive editorial rhythm.
+func galleryAssetPriority(a GalleryAsset) int {
+	score := 0
+	if a.Favorited {
+		score += 4
+	}
+	if a.IsVideo() {
+		score += 3
+	}
+	if a.HasExported {
+		score += 2
+	}
+	if len(a.Tags) > 0 || len(a.AlbumIDs) > 0 {
+		score += 2
+	}
+	if a.HasArchived {
+		score++
+	}
+	if a.Width >= 2560 {
+		score++
+	}
+	return score
+}
+
+// computeGalleryQuilt packs assets into a zero-hole flush multi-scale quilt.
+// All landscape tiers (3x3, 2x2, 1x1) share exact 16:9 geometry so game photos
+// keep their full frame uncropped; true portrait captures claim 1x2 slots.
+func computeGalleryQuilt(assets []GalleryAsset) galleryQuilt {
+	n := len(assets)
+	if n == 0 {
+		return galleryQuilt{}
+	}
+
+	// Curated small-library compositions (1..6 works): exact zero-hole blocks
+	// with natural scale hierarchy even before a library grows large.
+	if n <= 6 {
+		return buildSmallGalleryQuilt(assets)
+	}
+
+	// Assign target spans with rolling cadence so scale contrast holds even
+	// inside uniform tabs (e.g. all Favorites or all Videos or all raw 16:9).
+	type pendingItem struct {
+		idx   int
+		wantW int
+		wantH int
+		prio  int
+	}
+	allowHero := n >= 9
+	queue := make([]pendingItem, n)
+	totalCells := 0
+	sinceHero := 99
+	consecFeature := 0
+	for i, a := range assets {
+		prio := galleryAssetPriority(a)
+		h := galleryAssetHash(a, i)
+		var w, ht int
+		switch {
+		case galleryAssetIsPortrait(a):
+			w, ht = 1, 2
+			consecFeature = 0
+		case i == 0 && allowHero:
+			// Lead latest work anchors the top-left of the wall as a 3x3 showcase hero.
+			w, ht = 3, 3
+			sinceHero = 0
+			consecFeature = 0
+		case allowHero && sinceHero >= 8 && (prio >= 4 || (prio >= 2 && h%3 == 0) || sinceHero >= 11):
+			w, ht = 3, 3
+			sinceHero = 0
+			consecFeature = 0
+		case consecFeature < 2 && (prio >= 3 || (prio >= 1 && h%3 != 0) || h%4 == 0):
+			w, ht = 2, 2
+			sinceHero++
+			consecFeature++
+		default:
+			w, ht = 1, 1
+			sinceHero++
+			consecFeature = 0
+		}
+		queue[i] = pendingItem{idx: i, wantW: w, wantH: ht, prio: prio}
+		totalCells += w * ht
+	}
+
+	// Each atomic cell is already 16:9 (192x108), so cols ≈ sqrt(totalCells)
+	// naturally yields a balanced ~16:9 physical 2D wall at every library size.
+	gridCols := int(math.Round(math.Sqrt(float64(totalCells))))
+	if allowHero && gridCols < 7 {
+		gridCols = 7
+	} else if gridCols < 5 {
+		gridCols = 5
+	}
+
+	// Zero-hole skyline packer: always fills the lexicographically earliest
+	// skyline trough (minRow, leftmost col), using a short lookahead window
+	// (<= 6 items) to plug narrow troughs with 1x1/1x2 works rather than
+	// shrinking upcoming heroes unnecessarily.
+	colHeight := make([]int, gridCols)
+	tiles := make([]galleryQuiltTile, 0, n)
+	maxRow := 0
+
+	const lookahead = 6
+	for len(queue) > 0 {
+		minR := colHeight[0]
+		startC := 0
+		for c := 1; c < gridCols; c++ {
+			if colHeight[c] < minR {
+				minR = colHeight[c]
+				startC = c
+			}
+		}
+		runW := 1
+		for startC+runW < gridCols && colHeight[startC+runW] == minR {
+			runW++
+		}
+
+		// Pick the first item within the local window whose desired width fits runW.
+		pick := -1
+		win := min(len(queue), lookahead)
+		for k := 0; k < win; k++ {
+			if queue[k].wantW <= runW {
+				pick = k
+				break
+			}
+		}
+		if pick < 0 {
+			pick = 0
+		}
+		item := queue[pick]
+		queue = append(queue[:pick], queue[pick+1:]...)
+
+		w, h := item.wantW, item.wantH
+		// Gracefully shrink if no local lookahead item fit a narrow trough.
+		if w > runW {
+			if runW >= 2 {
+				w, h = 2, 2
+			} else if galleryAssetIsPortrait(assets[item.idx]) {
+				w, h = 1, 2
+			} else {
+				w, h = 1, 1
+			}
+		}
+
+		// Level off the final band so the bottom silhouette stays composed.
+		if len(queue) == 0 && w == 1 && runW >= 2 {
+			skyMax := minR
+			for _, ch := range colHeight {
+				if ch > skyMax {
+					skyMax = ch
+				}
+			}
+			if skyMax-minR >= 2 && !galleryAssetIsPortrait(assets[item.idx]) {
+				w, h = 2, 2
+			}
+		} else if len(queue) < gridCols/2 && w == 3 && h == 3 {
+			w, h = 2, 2
+		}
+
+		tiles = append(tiles, galleryQuiltTile{
+			assetIdx: item.idx,
+			col:      startC,
+			row:      minR,
+			spanW:    w,
+			spanH:    h,
+		})
+		for k := 0; k < w; k++ {
+			colHeight[startC+k] = minR + h
+		}
+		if minR+h > maxRow {
+			maxRow = minR + h
 		}
 	}
-	rows := (n + cols - 1) / cols
-	pitchX := galleryCanvasTileW
-	pitchY := galleryCanvasTileH
-	worldW := float32(cols) * pitchX
-	worldH := float32(rows) * pitchY
-	return galleryLatticeLayout{
-		count:   n,
-		cols:    cols,
-		rows:    rows,
-		pitchX:  pitchX,
-		pitchY:  pitchY,
-		originX: -worldW / 2,
-		originY: -worldH / 2,
-		worldW:  worldW,
-		worldH:  worldH,
-	}
+
+	return finalizeGalleryQuilt(gridCols, maxRow, tiles)
 }
 
-// cellWorldRect returns the flush world-space rectangle for cell (row, col).
-func (l galleryLatticeLayout) cellWorldRect(row, col int) ui.Rect {
-	return ui.Rect{
-		X: l.originX + float32(col)*l.pitchX,
-		Y: l.originY + float32(row)*l.pitchY,
-		W: galleryCanvasTileW,
-		H: galleryCanvasTileH,
+func buildSmallGalleryQuilt(assets []GalleryAsset) galleryQuilt {
+	n := len(assets)
+	var cols, rows int
+	var tiles []galleryQuiltTile
+	switch n {
+	case 1:
+		cols, rows = 3, 3
+		tiles = []galleryQuiltTile{{assetIdx: 0, col: 0, row: 0, spanW: 3, spanH: 3}}
+	case 2:
+		cols, rows = 4, 2
+		tiles = []galleryQuiltTile{
+			{assetIdx: 0, col: 0, row: 0, spanW: 2, spanH: 2},
+			{assetIdx: 1, col: 2, row: 0, spanW: 2, spanH: 2},
+		}
+	case 3:
+		cols, rows = 3, 2
+		tiles = []galleryQuiltTile{
+			{assetIdx: 0, col: 0, row: 0, spanW: 2, spanH: 2},
+			{assetIdx: 1, col: 2, row: 0, spanW: 1, spanH: 1},
+			{assetIdx: 2, col: 2, row: 1, spanW: 1, spanH: 1},
+		}
+	case 4:
+		cols, rows = 4, 2
+		tiles = []galleryQuiltTile{
+			{assetIdx: 0, col: 0, row: 0, spanW: 2, spanH: 2},
+			{assetIdx: 1, col: 2, row: 0, spanW: 1, spanH: 1},
+			{assetIdx: 2, col: 2, row: 1, spanW: 1, spanH: 1},
+			{assetIdx: 3, col: 3, row: 0, spanW: 1, spanH: 2},
+		}
+	case 5:
+		cols, rows = 4, 2
+		tiles = []galleryQuiltTile{
+			{assetIdx: 0, col: 0, row: 0, spanW: 2, spanH: 2},
+			{assetIdx: 1, col: 2, row: 0, spanW: 1, spanH: 1},
+			{assetIdx: 2, col: 3, row: 0, spanW: 1, spanH: 1},
+			{assetIdx: 3, col: 2, row: 1, spanW: 1, spanH: 1},
+			{assetIdx: 4, col: 3, row: 1, spanW: 1, spanH: 1},
+		}
+	case 6:
+		cols, rows = 4, 3
+		tiles = []galleryQuiltTile{
+			{assetIdx: 0, col: 0, row: 0, spanW: 2, spanH: 2},
+			{assetIdx: 1, col: 2, row: 0, spanW: 1, spanH: 1},
+			{assetIdx: 2, col: 3, row: 0, spanW: 1, spanH: 1},
+			{assetIdx: 3, col: 2, row: 1, spanW: 2, spanH: 2},
+			{assetIdx: 4, col: 0, row: 2, spanW: 1, spanH: 1},
+			{assetIdx: 5, col: 1, row: 2, spanW: 1, spanH: 1},
+		}
+	}
+	return finalizeGalleryQuilt(cols, rows, tiles)
+}
+
+func finalizeGalleryQuilt(cols, rows int, tiles []galleryQuiltTile) galleryQuilt {
+	worldW := float32(cols) * galleryCanvasUnitW
+	worldH := float32(rows) * galleryCanvasUnitH
+	buckets := make([][]int, rows)
+	for i, t := range tiles {
+		if t.row >= 0 && t.row < rows {
+			buckets[t.row] = append(buckets[t.row], i)
+		}
+	}
+	return galleryQuilt{
+		cols:       cols,
+		rows:       rows,
+		originX:    -worldW / 2,
+		originY:    -worldH / 2,
+		worldW:     worldW,
+		worldH:     worldH,
+		tiles:      tiles,
+		rowBuckets: buckets,
 	}
 }
 
 // cameraBounds returns the soft finite camera limits so few photos stay
 // balanced in frame without duplication, while large libraries roam smoothly
-// across all tiles with breathing margins for the floating HUD.
-func (l galleryLatticeLayout) cameraBounds(viewW, viewH, zoom float32) (minX, maxX, minY, maxY float32) {
+// across all tiles edge-to-edge under the floating header HUD.
+func (q galleryQuilt) cameraBounds(viewW, viewH, zoom float32) (minX, maxX, minY, maxY float32) {
 	if zoom <= 0 {
 		zoom = 1
 	}
-	// Reserve top headroom for the floating header HUD; side edges run flush edge-to-edge.
 	hudTop := float32(148)
 	hudBottom := float32(64)
 
 	visW := max(viewW, 160) / zoom
 	visH := max(viewH-hudTop-hudBottom, 160) / zoom
-	// Visual center offset caused by asymmetric top/bottom HUD clearance.
 	hudCenterOffsetY := (hudTop - hudBottom) / (2 * zoom)
 
-	if l.worldW <= visW {
+	if q.worldW <= visW {
 		minX, maxX = 0, 0
 	} else {
-		halfSpanX := (l.worldW - visW) / 2
+		halfSpanX := (q.worldW - visW) / 2
 		minX, maxX = -halfSpanX, halfSpanX
 	}
-	if l.worldH <= visH {
+	if q.worldH <= visH {
 		minY, maxY = -hudCenterOffsetY, -hudCenterOffsetY
 	} else {
-		halfSpanY := (l.worldH - visH) / 2
+		halfSpanY := (q.worldH - visH) / 2
 		minY = -halfSpanY - hudCenterOffsetY
 		maxY = halfSpanY - hudCenterOffsetY
 	}
 	return minX, maxX, minY, maxY
 }
 
-func (s *Shell) stepGalleryCanvasPhysics(c *ui.Context, layout galleryLatticeLayout, viewW, viewH float32) {
+func (s *Shell) stepGalleryCanvasPhysics(c *ui.Context, q galleryQuilt, viewW, viewH float32) {
 	st := &s.gallery.canvas
 	st.ensureInit()
 	now := c.Now()
@@ -159,7 +413,7 @@ func (s *Shell) stepGalleryCanvasPhysics(c *ui.Context, layout galleryLatticeLay
 	}
 	st.lastTick = now
 
-	minX, maxX, minY, maxY := layout.cameraBounds(viewW, viewH, st.zoom)
+	minX, maxX, minY, maxY := q.cameraBounds(viewW, viewH, st.zoom)
 
 	// Under reduced motion, clamp immediately without inertia or spring-back.
 	if !s.motion() {
@@ -197,7 +451,6 @@ func (s *Shell) stepGalleryCanvasPhysics(c *ui.Context, layout galleryLatticeLay
 		pull := 1 - float32(math.Exp(float64(-dt*12.0)))
 		st.camX += dx * pull
 		st.camY += dy * pull
-		// Damp outward momentum quickly when hitting boundary.
 		st.velX *= 0.72
 		st.velY *= 0.72
 		moving = true
@@ -210,7 +463,7 @@ func (s *Shell) stepGalleryCanvasPhysics(c *ui.Context, layout galleryLatticeLay
 	}
 }
 
-func (s *Shell) adjustGalleryCanvasZoom(layout galleryLatticeLayout, viewW, viewH, factor, anchorX, anchorY float32) {
+func (s *Shell) adjustGalleryCanvasZoom(q galleryQuilt, viewW, viewH, factor, anchorX, anchorY float32) {
 	st := &s.gallery.canvas
 	st.ensureInit()
 	oldZoom := st.zoom
@@ -218,21 +471,35 @@ func (s *Shell) adjustGalleryCanvasZoom(layout galleryLatticeLayout, viewW, view
 	if nextZoom == oldZoom {
 		return
 	}
-	// Keep the world point under (anchorX, anchorY) fixed on screen while zooming.
 	worldX := st.camX + (anchorX-viewW/2)/oldZoom
 	worldY := st.camY + (anchorY-viewH/2)/oldZoom
 	st.zoom = nextZoom
 	st.camX = worldX - (anchorX-viewW/2)/nextZoom
 	st.camY = worldY - (anchorY-viewH/2)/nextZoom
 	st.velX, st.velY = 0, 0
-	minX, maxX, minY, maxY := layout.cameraBounds(viewW, viewH, st.zoom)
+	minX, maxX, minY, maxY := q.cameraBounds(viewW, viewH, st.zoom)
 	st.camX = clampFloat32(st.camX, minX, maxX)
 	st.camY = clampFloat32(st.camY, minY, maxY)
 }
 
-// galleryInfiniteCanvas renders the folia-major-inspired Bravais staggered
-// infinite gallery wall with viewport culling, rubber-band finite edges,
-// left-drag inertia panning, wheel scroll & Ctrl+wheel cursor-anchored zoom.
+// galleryCanvasTileThumbEdge picks a quantized thumbnail tier proportional to
+// the tile's rendered physical pixel size so 3x3 heroes decode crisply while
+// 1x1 compact tiles stay lightweight.
+func galleryCanvasTileThumbEdge(sw, sh, dpiScale float32) int {
+	phys := max(sw, sh) * max(dpiScale, 1)
+	switch {
+	case phys > 560:
+		return 768
+	case phys > 360:
+		return 512
+	default:
+		return galleryThumbEdgeL1
+	}
+}
+
+// galleryInfiniteCanvas renders the seamless sharp-cornered multi-scale
+// infinite gallery wall with O(visible) row-bucket culling, rubber-band finite
+// edges, left-drag inertia panning, wheel scroll & Ctrl+wheel zoom.
 func (s *Shell) galleryInfiniteCanvas(c *ui.Context, viewW, viewH float32, opaque bool, tone ui.Color) {
 	st := &s.gallery.canvas
 	st.ensureInit()
@@ -240,23 +507,21 @@ func (s *Shell) galleryInfiniteCanvas(c *ui.Context, viewW, viewH float32, opaqu
 	if len(assets) == 0 {
 		return
 	}
-	layout := computeGalleryLattice(len(assets))
-	if st.layoutRev != s.gallery.rowsRev {
-		st.recenter(layout, viewW, viewH)
-		st.layoutRev = s.gallery.rowsRev
+	quilt := st.ensureQuilt(assets, s.gallery.rowsRev)
+	if st.cameraRev != s.gallery.rowsRev {
+		st.recenter(quilt, viewW, viewH)
+		st.cameraRev = s.gallery.rowsRev
 	}
-	s.stepGalleryCanvasPhysics(c, layout, viewW, viewH)
+	s.stepGalleryCanvasPhysics(c, quilt, viewW, viewH)
 	st.hoveredID = 0
 
-	// Shared canvas pointer/scroll handler. Child tiles pass their top-left
-	// screen offset so coordinates convert cleanly into canvas space.
 	handleCanvasInput := func(ev ui.InputEvent, offsetX, offsetY float32, tileAsset *GalleryAsset, heartRect ui.Rect) bool {
 		cx := ev.X + offsetX
 		cy := ev.Y + offsetY
 		switch ev.Kind {
 		case ui.InputZoom:
 			if ev.Scale > 0 && ev.Scale != 1 {
-				s.adjustGalleryCanvasZoom(layout, viewW, viewH, ev.Scale, cx, cy)
+				s.adjustGalleryCanvasZoom(quilt, viewW, viewH, ev.Scale, cx, cy)
 				return true
 			}
 			return false
@@ -269,7 +534,7 @@ func (s *Shell) galleryInfiniteCanvas(c *ui.Context, viewW, viewH float32, opaqu
 				if ev.DY > 0 {
 					factor = 1 / factor
 				}
-				s.adjustGalleryCanvasZoom(layout, viewW, viewH, factor, cx, cy)
+				s.adjustGalleryCanvasZoom(quilt, viewW, viewH, factor, cx, cy)
 				return true
 			}
 			dx, dy := ev.DX, ev.DY
@@ -282,8 +547,7 @@ func (s *Shell) galleryInfiniteCanvas(c *ui.Context, viewW, viewH float32, opaqu
 			st.velX, st.velY = 0, 0
 			st.camX += dx / st.zoom
 			st.camY += dy / st.zoom
-			minX, maxX, minY, maxY := layout.cameraBounds(viewW, viewH, st.zoom)
-			// Soft overscroll allowance when wheel-scrolling, springing smoothly back.
+			minX, maxX, minY, maxY := quilt.cameraBounds(viewW, viewH, st.zoom)
 			pad := float32(48) / st.zoom
 			if !s.motion() {
 				pad = 0
@@ -325,10 +589,9 @@ func (s *Shell) galleryInfiniteCanvas(c *ui.Context, viewW, viewH float32, opaqu
 				}
 			}
 			if st.dragMoved {
-				minX, maxX, minY, maxY := layout.cameraBounds(viewW, viewH, st.zoom)
+				minX, maxX, minY, maxY := quilt.cameraBounds(viewW, viewH, st.zoom)
 				wx := -dx / st.zoom
 				wy := -dy / st.zoom
-				// Rubber-band resistance when pulling past finite gallery bounds.
 				if (st.camX < minX && wx < 0) || (st.camX > maxX && wx > 0) {
 					wx *= 0.28
 				}
@@ -389,18 +652,12 @@ func (s *Shell) galleryInfiniteCanvas(c *ui.Context, viewW, viewH float32, opaqu
 		return false
 	}
 
-	// Compute visible lattice index window (O(visible), scales smoothly to 10,000+ items).
-	visMinX := st.camX - viewW/(2*st.zoom)
-	visMaxX := st.camX + viewW/(2*st.zoom)
+	// Visible row bucket window: tiles span at most 3 atomic rows, so scanning
+	// [rowStart-3 .. rowEnd] is strictly O(visible) even for 10,000+ works.
 	visMinY := st.camY - viewH/(2*st.zoom)
 	visMaxY := st.camY + viewH/(2*st.zoom)
-
-	rowStart := max(0, int(math.Floor(float64((visMinY-layout.originY)/layout.pitchY)))-1)
-	rowEnd := min(layout.rows-1, int(math.Ceil(float64((visMaxY-layout.originY)/layout.pitchY)))+1)
-	colStart := max(0, int(math.Floor(float64((visMinX-layout.originX)/layout.pitchX)))-1)
-	colEnd := min(layout.cols-1, int(math.Ceil(float64((visMaxX-layout.originX)/layout.pitchX)))+1)
-
-	thumbEdge := galleryThumbEdge(s.gallery.dpiScale * max(st.zoom, 1))
+	rowStart := max(0, int(math.Floor(float64((visMinY-quilt.originY)/galleryCanvasUnitH)))-3)
+	rowEnd := min(quilt.rows-1, int(math.Ceil(float64((visMaxY-quilt.originY)/galleryCanvasUnitH)))+1)
 
 	canvasEl := ui.Box(c.Key("gallery-infinite-canvas")).Absolute().Left(0).Right(0).Top(0).Bottom(0).Clip().
 		Label("无限画廊画布").AutoFocus()
@@ -415,7 +672,6 @@ func (s *Shell) galleryInfiniteCanvas(c *ui.Context, viewW, viewH float32, opaqu
 		if opaque {
 			return
 		}
-		// Ultra-subtle architectural dot matrix anchored to world space so panning feels tangible.
 		dotStep := 48 * st.zoom
 		if dotStep >= 22 {
 			offX := float32(math.Mod(float64(viewW/2-st.camX*st.zoom), float64(dotStep)))
@@ -426,7 +682,7 @@ func (s *Shell) galleryInfiniteCanvas(c *ui.Context, viewW, viewH float32, opaqu
 			if offY < 0 {
 				offY += dotStep
 			}
-			dotColor := ui.RGBA(255, 255, 255, .045)
+			dotColor := ui.RGBA(255, 255, 255, .04)
 			for y := r.Y + offY; y < r.Y+r.H; y += dotStep {
 				for x := r.X + offX; x < r.X+r.W; x += dotStep {
 					p.Fill(ui.Rect{X: x, Y: y, W: 1.5, H: 1.5}, dotColor, 0.75)
@@ -434,28 +690,30 @@ func (s *Shell) galleryInfiniteCanvas(c *ui.Context, viewW, viewH float32, opaqu
 			}
 		}
 	}).Children(func() {
-		// Render ONLY the visible tiles (typically 12–30) with full accessibility,
-		// hover states, context menus and GPU contain framing.
-		for row := rowStart; row <= rowEnd; row++ {
-			for col := colStart; col <= colEnd; col++ {
-				idx := row*layout.cols + col
-				if idx < 0 || idx >= len(assets) {
+		for r := rowStart; r <= rowEnd; r++ {
+			for _, tileIdx := range quilt.rowBuckets[r] {
+				qt := quilt.tiles[tileIdx]
+				if qt.assetIdx < 0 || qt.assetIdx >= len(assets) {
 					continue
 				}
-				wr := layout.cellWorldRect(row, col)
-				// Snap both edges to integer DIPs so flush adjacent tiles never show subpixel hair cracks.
+				asset := assets[qt.assetIdx]
+				wr := quilt.tileWorldRect(qt)
+				// Snap both edges to integer DIPs so flush adjacent tiles never show subpixel cracks.
 				sx := float32(math.Round(float64(viewW/2 + (wr.X-st.camX)*st.zoom)))
 				sy := float32(math.Round(float64(viewH/2 + (wr.Y-st.camY)*st.zoom)))
 				sx1 := float32(math.Round(float64(viewW/2 + (wr.X+wr.W-st.camX)*st.zoom)))
 				sy1 := float32(math.Round(float64(viewH/2 + (wr.Y+wr.H-st.camY)*st.zoom)))
 				sw := max(sx1-sx, 1)
 				sh := max(sy1-sy, 1)
+				thumbEdge := galleryCanvasTileThumbEdge(sw, sh, s.gallery.dpiScale)
+
 				if sx+sw < -40 || sx > viewW+40 || sy+sh < -40 || sy > viewH+40 {
-					// Prefetch just outside viewport for silky panning.
-					s.prefetchGalleryThumb(assets[idx], thumbEdge)
+					if sx+sw >= -320 && sx <= viewW+320 && sy+sh >= -240 && sy <= viewH+240 {
+						s.prefetchGalleryThumb(asset, thumbEdge)
+					}
 					continue
 				}
-				s.galleryCanvasTile(c, assets[idx], sx, sy, sw, sh, thumbEdge, opaque, tone, handleCanvasInput)
+				s.galleryCanvasTile(c, asset, sx, sy, sw, sh, thumbEdge, opaque, tone, handleCanvasInput)
 			}
 		}
 	})
@@ -473,10 +731,20 @@ func (s *Shell) galleryCanvasTile(
 	selected := s.gallery.selected[asset.ID]
 	focused := s.Model.Gallery.FocusedID == asset.ID
 	label := galleryAssetAccessibleLabel(asset)
-	heartSize := float32(28)
-	heartRect := ui.Rect{X: sw - heartSize - 8, Y: 8, W: heartSize, H: heartSize}
 
-	// Flush seamless contact-sheet tile: sharp 90° corners, zero gap, zero shadow.
+	// Scale corner controls cleanly to match 1x1 compact vs 2x2/3x3 feature tiles.
+	compact := sw < 240
+	heartSize := float32(28)
+	heartInset := float32(8)
+	heartIconSize := float32(13)
+	if compact {
+		heartSize = 22
+		heartInset = 6
+		heartIconSize = 11
+	}
+	heartRect := ui.Rect{X: sw - heartSize - heartInset, Y: heartInset, W: heartSize, H: heartSize}
+
+	// Flush seamless photographic tile: sharp 90° corners, zero gap, zero shadow.
 	tile := ui.Box(c.Key(fmt.Sprintf("gallery-canvas-tile-%d", asset.ID))).
 		Absolute().Left(sx).Top(sy).Size(sw, sh).
 		Clip().
@@ -503,7 +771,6 @@ func (s *Shell) galleryCanvasTile(
 	case hovered || focused:
 		tile.Border(2, tone.Alpha(.88))
 	case bmp == nil:
-		// Keep placeholder tiles subtly legible against adjacent frames.
 		tile.Border(1, ui.RGBA(255, 255, 255, .06))
 	}
 
@@ -518,13 +785,17 @@ func (s *Shell) galleryCanvasTile(
 			ui.Image(c.Key(fmt.Sprintf("gallery-cimg-%d", asset.ID)), bmp).
 				Absolute().Left(0).Right(0).Top(0).Bottom(0).Fit(ui.Cover).Label(asset.FileName).PassThrough()
 		} else if asset.IsVideo() && asset.Available && !asset.Invalid {
-			ui.Column(c).Fill().Justify(ui.Center).AlignItems(ui.Center).Gap(6).PassThrough().Children(func() {
-				ui.Box(c).TextColor(tone.Alpha(.85)).Children(func() { glyph(c, "\uE714", 26) })
+			iconSz := float32(26)
+			if compact {
+				iconSz = 20
+			}
+			ui.Column(c).Fill().Justify(ui.Center).AlignItems(ui.Center).Gap(5).PassThrough().Children(func() {
+				ui.Box(c).TextColor(tone.Alpha(.85)).Children(func() { glyph(c, "\uE714", iconSz) })
 				sub := "MP4 录像"
 				if asset.VideoCodec != "" {
 					sub = asset.VideoCodec + " 录像"
 				}
-				ui.Text(c, sub).FontSize(12).TextColor(muted).SingleLine()
+				ui.Text(c, sub).FontSize(11).TextColor(muted).SingleLine()
 			})
 		} else {
 			placeholder := "加载中…"
@@ -534,59 +805,66 @@ func (s *Shell) galleryCanvasTile(
 				placeholder = "源文件不存在"
 			}
 			ui.Row(c).Fill().Justify(ui.Center).AlignItems(ui.Center).PassThrough().Children(func() {
-				ui.Text(c, placeholder).FontSize(12).TextColor(muted).SingleLine()
+				ui.Text(c, placeholder).FontSize(11).TextColor(muted).SingleLine()
 			})
 		}
 
-		// Calm hover scrim with filename & resolution — absent at rest so the art breathes.
-		if hovered && sw >= 150 {
-			ui.Box(c).Absolute().Left(0).Right(0).Bottom(0).Height(52).PassThrough().LinearGradient(ui.LinearGradient{
+		// Calm hover scrim with filename & resolution — absent at rest so the wall breathes.
+		if hovered && sw >= 140 {
+			scrimH := float32(52)
+			if compact {
+				scrimH = 40
+			}
+			ui.Box(c).Absolute().Left(0).Right(0).Bottom(0).Height(scrimH).PassThrough().LinearGradient(ui.LinearGradient{
 				Angle: 180,
 				Stops: []ui.GradientStop{
 					{Color: ui.Transparent, At: 0},
-					{Color: ui.RGBA(8, 9, 13, .82), At: 1},
+					{Color: ui.RGBA(8, 9, 13, .84), At: 1},
 				},
 			})
-			ui.Row(c).Absolute().Left(10).Right(10).Bottom(8).AlignItems(ui.Center).Gap(6).PassThrough().Children(func() {
+			ui.Row(c).Absolute().Left(8).Right(8).Bottom(7).AlignItems(ui.Center).Gap(6).PassThrough().Children(func() {
 				name := asset.FileName
 				if name == "" {
 					name = "未命名作品"
 				}
 				ui.Text(c, name).FontSize(11).FontWeight(600).TextColor(paper).SingleLine().Grow(1).Shrink(1)
-				if !asset.IsVideo() && asset.Width > 0 && asset.Height > 0 {
+				if !compact && !asset.IsVideo() && asset.Width > 0 && asset.Height > 0 {
 					mono(c, fmt.Sprintf("%dx%d", asset.Width, asset.Height), 10).TextColor(muted)
 				}
 			})
 		}
 
 		// Minimal corner indicators: error/missing always visible; archive/tags appear subtly on hover.
-		showStatus := asset.Invalid || !asset.Available || (hovered && sw >= 160)
+		showStatus := asset.Invalid || !asset.Available || (hovered && sw >= 170)
 		if showStatus {
 			badgeText, badgeBg, badgeFg := galleryStatusBadge(asset, tone, opaque, s.wishWarningColor())
 			if badgeText != "" {
-				ui.Row(c).Absolute().Left(8).Top(8).Height(20).Padding(0, 7).Radius(6).
+				ui.Row(c).Absolute().Left(8).Top(8).Height(20).Padding(0, 7).Radius(4).
 					AlignItems(ui.Center).Background(badgeBg).PassThrough().Children(func() {
 					ui.Text(c, badgeText).FontSize(10).FontWeight(600).TextColor(badgeFg).SingleLine()
 				})
 			}
-		} else if asset.HasArchived && sw >= 140 {
-			// Quiet 6px accent archive dot at rest (zero visual noise).
-			ui.Box(c).Absolute().Left(10).Top(10).Size(6, 6).Radius(3).Background(tone).PassThrough()
+		} else if asset.HasArchived && sw >= 120 {
+			ui.Box(c).Absolute().Left(8).Top(8).Size(5, 5).Radius(2.5).Background(tone).PassThrough()
 		}
 
 		// Video duration badge stays legible at rest so videos stand out from stills.
-		if asset.IsVideo() && sw >= 120 {
+		if asset.IsVideo() && sw >= 110 {
 			durText := "视频"
 			if asset.DurationMS > 0 {
 				durText = formatGalleryDuration(asset.DurationMS)
 			}
 			bottomPos := float32(8)
-			if hovered && sw >= 150 {
-				bottomPos = 30
+			if hovered && sw >= 140 {
+				bottomPos = 28
 			}
-			ui.Row(c).Absolute().Right(8).Bottom(bottomPos).Height(20).Padding(0, 7).Radius(6).Gap(4).
-				AlignItems(ui.Center).Background(ui.RGBA(8, 9, 13, .78)).PassThrough().Children(func() {
-				ui.Box(c).TextColor(tone).Children(func() { glyph(c, "\uE768", 9) })
+			pillH := float32(20)
+			if compact {
+				pillH = 18
+			}
+			ui.Row(c).Absolute().Right(8).Bottom(bottomPos).Height(pillH).Padding(0, 6).Radius(4).Gap(4).
+				AlignItems(ui.Center).Background(ui.RGBA(8, 9, 13, .80)).PassThrough().Children(func() {
+				ui.Box(c).TextColor(tone).Children(func() { glyph(c, "\uE768", 8) })
 				mono(c, durText, 10).TextColor(paper)
 			})
 		}
@@ -599,13 +877,13 @@ func (s *Shell) galleryCanvasTile(
 				checkBg = tone
 				checkBorder = tone
 			}
-			ui.Row(c).Absolute().Right(8).Top(8).Size(22, 22).Radius(11).
+			ui.Row(c).Absolute().Right(heartInset).Top(heartInset).Size(22, 22).Radius(11).
 				Justify(ui.Center).AlignItems(ui.Center).Background(checkBg).Border(1.5, checkBorder).PassThrough().Children(func() {
 				if selected {
 					ui.Box(c).TextColor(ink).Children(func() { glyph(c, "\uE73E", 12) })
 				}
 			})
-		} else if !asset.Invalid && (asset.Favorited || hovered) && sw >= 130 {
+		} else if !asset.Invalid && (asset.Favorited || hovered) && sw >= 110 {
 			iconKey := "\uEB51"
 			iconColor := paper.Alpha(.85)
 			btnBg := ui.RGBA(10, 12, 18, .66)
@@ -616,7 +894,7 @@ func (s *Shell) galleryCanvasTile(
 			}
 			ui.Row(c).Absolute().Left(heartRect.X).Top(heartRect.Y).Size(heartRect.W, heartRect.H).Radius(heartRect.W / 2).
 				Justify(ui.Center).AlignItems(ui.Center).Background(btnBg).TextColor(iconColor).PassThrough().Children(func() {
-				glyph(c, iconKey, 13)
+				glyph(c, iconKey, heartIconSize)
 			})
 		}
 	})
