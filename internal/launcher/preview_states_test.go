@@ -328,57 +328,10 @@ func TestRenderMockStateFrames(t *testing.T) {
 			s.Model.Gallery.Phase = state.GalleryReady
 		}},
 		{"39-gallery-grid", func(s *Shell, _ *ui.Tester) {
-			s.WishLocation = time.FixedZone("CST", 8*3600)
-			s.Model.Page = state.Gallery
-			s.Model.Gallery.Initialized = true
-			s.Model.Gallery.Phase = state.GalleryReady
-			s.Model.Gallery.Watching = true
-			day1 := time.Date(2026, 11, 24, 16, 52, 2, 0, time.FixedZone("CST", 8*3600))
-			base := sampleGalleryAssets()
-			vid := GalleryAsset{
-				ID: 5, SHA256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-				MediaType: GalleryMediaVideo, MIMEType: "video/mp4", ByteSize: 48 << 20,
-				Width: 1920, Height: 1080, DurationMS: 130_840, VideoCodec: "H.264", AudioCodec: "AAC",
-				PosterPath: `D:\Games\NTE\Selfie\100001\FFMpeg\26_11_24_16_49_20_KeyFrame.jpg`,
-				ModifiedAt: day1.Add(-2 * time.Minute), DisplayTime: day1.Add(-2 * time.Minute),
-				FileName:    "26_11_24_16_49_0123.mp4",
-				PrimaryPath: `D:\Games\NTE\Selfie\100001\FFMpeg\26_11_24_16_49_0123.mp4`,
-				SourcePath:  `D:\Games\NTE\Selfie\100001\FFMpeg\26_11_24_16_49_0123.mp4`,
-				UIDs:        []string{"100001"}, HasCached: true, HasArchived: true, Available: true,
-				Favorited: true, Tags: []string{"实机录屏", "夜景"},
-			}
-			assets := []GalleryAsset{base[0], vid, base[1], base[2], base[3]}
-			assets[0].Favorited = true
-			assets[0].Tags = []string{"海特洛", "霓虹"}
-			assets[2].Tags = []string{"街拍"}
-			s.Model.Gallery.TotalCount = 5
-			s.Model.Gallery.PhotoCount = 4
-			s.Model.Gallery.VideoCount = 1
-			s.Model.Gallery.FavoriteCount = 2
-			s.Model.Gallery.FilteredCount = 5
-			s.Model.Gallery.CachedCount = 3
-			s.Model.Gallery.ExportedCount = 1
-			s.Model.Gallery.ArchivedCount = 2
-			s.Model.Gallery.ArchiveBytes = 1_825_842 + (48 << 20)
-			s.Model.Gallery.ArchivePhotoCount = 1
-			s.Model.Gallery.ArchivePhotoBytes = 1_825_842
-			s.Model.Gallery.ArchiveVideoCount = 1
-			s.Model.Gallery.ArchiveVideoBytes = 48 << 20
-			s.Model.Gallery.ArchiveFreeBytes = 186 << 30
-			s.gallery.assets = assets
-			s.gallery.uids = []string{"100001", "200002"}
-			s.gallery.albums = []GalleryAlbum{{ID: 1, Name: "海特洛夜景", Count: 3}, {ID: 2, Name: "角色合影", Count: 2}}
-			s.gallery.tags = []GalleryTag{{ID: 1, Name: "海特洛", Count: 2}, {ID: 2, Name: "夜景", Count: 2}, {ID: 3, Name: "霓虹", Count: 1}}
-			s.gallery.hasUnknownUID = true
-			s.gallery.rowsRev++
-			fb := newFakeGalleryBackend(s.gallery.assets...)
-			s.GalleryBackend = fb
-			for _, a := range s.gallery.assets {
-				if !a.Invalid && a.Available {
-					px, _, _ := fb.DecodeThumbnail(s.ctx, a, galleryThumbEdgeL1)
-					s.gallery.images.remember(galleryThumbKey{assetID: a.ID, edge: galleryThumbEdgeL1}, ui.NewBitmap(px))
-				}
-			}
+			setupGalleryPreviewWall(s, state.GalleryViewCanvas)
+		}},
+		{"46-gallery-timeline", func(s *Shell, _ *ui.Tester) {
+			setupGalleryPreviewWall(s, state.GalleryViewTimeline)
 		}},
 		{"40-gallery-viewer", func(s *Shell, _ *ui.Tester) {
 			s.WishLocation = time.FixedZone("CST", 8*3600)
@@ -576,5 +529,147 @@ func TestRenderMockStateFrames(t *testing.T) {
 		}
 		file.Close()
 		s.Dispose()
+	}
+}
+
+func setupGalleryPreviewWall(s *Shell, mode state.GalleryViewMode) {
+	tz := time.FixedZone("CST", 8*3600)
+	s.WishLocation = tz
+	s.Model.Page = state.Gallery
+	s.Model.Gallery.Initialized = true
+	s.Model.Gallery.Phase = state.GalleryReady
+	s.Model.Gallery.Watching = true
+	s.Model.Gallery.ViewMode = mode
+
+	day1 := time.Date(2026, 11, 24, 16, 52, 2, 0, tz)
+	day2 := time.Date(2026, 11, 23, 21, 14, 0, 0, tz)
+	assets := []GalleryAsset{
+		{
+			ID: 1, SHA256: "01aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			MIMEType: "image/png", ByteSize: 2_140_000, Width: 1920, Height: 1080,
+			ModifiedAt: day1, DisplayTime: day1, FileName: "26_11_24_16_52_02.png",
+			PrimaryPath: `D:\Games\NTE\Selfie\100001\ScreenShots\26_11_24_16_52_02.png`,
+			UIDs:        []string{"100001"}, HasCached: true, HasArchived: true, Available: true,
+			Favorited: true, Tags: []string{"海特洛", "霓虹"},
+		},
+		{
+			ID: 2, SHA256: "02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			MediaType: GalleryMediaVideo, MIMEType: "video/mp4", ByteSize: 48 << 20,
+			Width: 1920, Height: 1080, DurationMS: 130_840, VideoCodec: "H.264", AudioCodec: "AAC",
+			PosterPath: `D:\Games\NTE\Selfie\100001\FFMpeg\26_11_24_16_49_20_KeyFrame.jpg`,
+			ModifiedAt: day1.Add(-3 * time.Minute), DisplayTime: day1.Add(-3 * time.Minute),
+			FileName:    "26_11_24_16_49_0123.mp4",
+			PrimaryPath: `D:\Games\NTE\Selfie\100001\FFMpeg\26_11_24_16_49_0123.mp4`,
+			UIDs:        []string{"100001"}, HasCached: true, HasArchived: true, Available: true,
+			Favorited: true, Tags: []string{"实机录屏", "夜景"},
+		},
+		{
+			ID: 3, SHA256: "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			MIMEType: "image/png", ByteSize: 4_885_173, Width: 2642, Height: 1555,
+			ModifiedAt: day1.Add(-8 * time.Minute), DisplayTime: day1.Add(-8 * time.Minute),
+			FileName:    "26_11_24_16_44_20.png",
+			PrimaryPath: `C:\Users\Player\Pictures\NevernessToEverness\26_11_24_16_44_20.png`,
+			HasExported: true, Available: true, Tags: []string{"街拍"},
+		},
+		{
+			ID: 4, SHA256: "04dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			MIMEType: "image/png", ByteSize: 1_920_000, Width: 1280, Height: 720,
+			ModifiedAt: day1.Add(-15 * time.Minute), DisplayTime: day1.Add(-15 * time.Minute),
+			FileName:    "26_11_24_16_37_11.png",
+			PrimaryPath: `D:\Games\NTE\Selfie\100001\ScreenShots\26_11_24_16_37_11.png`,
+			UIDs:        []string{"100001"}, HasCached: true, HasArchived: true, Available: true,
+		},
+		{
+			ID: 5, SHA256: "05eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+			MIMEType: "image/png", ByteSize: 2_310_000, Width: 1080, Height: 1440,
+			ModifiedAt: day1.Add(-24 * time.Minute), DisplayTime: day1.Add(-24 * time.Minute),
+			FileName:    "26_11_24_16_28_09.png",
+			PrimaryPath: `D:\Games\NTE\Selfie\200002\ScreenShots\26_11_24_16_28_09.png`,
+			UIDs:        []string{"200002"}, HasCached: true, Available: true, Favorited: true,
+		},
+		{
+			ID: 6, SHA256: "06ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+			MIMEType: "image/png", ByteSize: 1_760_000, Width: 1920, Height: 1080,
+			ModifiedAt: day1.Add(-38 * time.Minute), DisplayTime: day1.Add(-38 * time.Minute),
+			FileName:    "26_11_24_16_14_55.png",
+			PrimaryPath: `D:\Games\NTE\Selfie\100001\ScreenShots\26_11_24_16_14_55.png`,
+			UIDs:        []string{"100001"}, HasCached: true, HasArchived: true, Available: true,
+		},
+		{
+			ID: 7, SHA256: "07aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			MIMEType: "image/png", ByteSize: 2_480_000, Width: 1920, Height: 1080,
+			ModifiedAt: day2, DisplayTime: day2, FileName: "26_11_23_21_14_00.png",
+			PrimaryPath: `D:\Games\NTE\Selfie\200002\ScreenShots\26_11_23_21_14_00.png`,
+			UIDs:        []string{"200002"}, HasCached: true, Available: true,
+		},
+		{
+			ID: 8, SHA256: "08bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			MediaType: GalleryMediaVideo, MIMEType: "video/mp4", ByteSize: 32 << 20,
+			Width: 1920, Height: 1080, DurationMS: 45_200, VideoCodec: "H.264", AudioCodec: "AAC",
+			ModifiedAt: day2.Add(-6 * time.Minute), DisplayTime: day2.Add(-6 * time.Minute),
+			FileName:    "26_11_23_21_08_12.mp4",
+			PrimaryPath: `D:\Games\NTE\Selfie\100001\FFMpeg\26_11_23_21_08_12.mp4`,
+			UIDs:        []string{"100001"}, HasCached: true, Available: true,
+		},
+		{
+			ID: 9, SHA256: "09cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			MIMEType: "image/png", ByteSize: 3_120_000, Width: 2560, Height: 1440,
+			ModifiedAt: day2.Add(-14 * time.Minute), DisplayTime: day2.Add(-14 * time.Minute),
+			FileName:    "26_11_23_21_00_33.png",
+			PrimaryPath: `C:\Users\Player\Pictures\NevernessToEverness\26_11_23_21_00_33.png`,
+			HasExported: true, HasArchived: true, Available: true, Favorited: true,
+		},
+		{
+			ID: 10, SHA256: "10dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			MIMEType: "image/png", ByteSize: 1_890_000, Width: 1920, Height: 1080,
+			ModifiedAt: day2.Add(-22 * time.Minute), DisplayTime: day2.Add(-22 * time.Minute),
+			FileName:    "26_11_23_20_52_19.png",
+			PrimaryPath: `D:\Games\NTE\Selfie\100001\ScreenShots\26_11_23_20_52_19.png`,
+			UIDs:        []string{"100001"}, HasCached: true, Available: true,
+		},
+		{
+			ID: 11, SHA256: "11eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+			MIMEType: "image/png", ByteSize: 1_650_000, Width: 1920, Height: 1080,
+			ModifiedAt: day2.Add(-35 * time.Minute), DisplayTime: day2.Add(-35 * time.Minute),
+			FileName:    "26_11_23_20_39_44.png",
+			PrimaryPath: `D:\Games\NTE\Selfie\200002\ScreenShots\26_11_23_20_39_44.png`,
+			UIDs:        []string{"200002"}, HasCached: true, HasArchived: true, Available: true,
+		},
+		{
+			ID: 12, SHA256: "12ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+			MIMEType: "image/png", ByteSize: 2_050_000, Width: 1920, Height: 1080,
+			ModifiedAt: day2.Add(-48 * time.Minute), DisplayTime: day2.Add(-48 * time.Minute),
+			FileName:    "26_11_23_20_26_10.png",
+			PrimaryPath: `D:\Games\NTE\Selfie\100001\ScreenShots\26_11_23_20_26_10.png`,
+			UIDs:        []string{"100001"}, HasCached: true, Available: true,
+		},
+	}
+	s.Model.Gallery.TotalCount = len(assets)
+	s.Model.Gallery.PhotoCount = 10
+	s.Model.Gallery.VideoCount = 2
+	s.Model.Gallery.FavoriteCount = 4
+	s.Model.Gallery.FilteredCount = len(assets)
+	s.Model.Gallery.CachedCount = 10
+	s.Model.Gallery.ExportedCount = 2
+	s.Model.Gallery.ArchivedCount = 6
+	s.Model.Gallery.ArchiveBytes = 12_500_000 + (48 << 20)
+	s.Model.Gallery.ArchivePhotoCount = 5
+	s.Model.Gallery.ArchivePhotoBytes = 12_500_000
+	s.Model.Gallery.ArchiveVideoCount = 1
+	s.Model.Gallery.ArchiveVideoBytes = 48 << 20
+	s.Model.Gallery.ArchiveFreeBytes = 186 << 30
+	s.gallery.assets = assets
+	s.gallery.uids = []string{"100001", "200002"}
+	s.gallery.albums = []GalleryAlbum{{ID: 1, Name: "海特洛夜景", Count: 5}, {ID: 2, Name: "角色合影", Count: 3}}
+	s.gallery.tags = []GalleryTag{{ID: 1, Name: "海特洛", Count: 4}, {ID: 2, Name: "夜景", Count: 3}, {ID: 3, Name: "霓虹", Count: 2}}
+	s.gallery.hasUnknownUID = true
+	s.gallery.rowsRev++
+	fb := newFakeGalleryBackend(s.gallery.assets...)
+	s.GalleryBackend = fb
+	for _, a := range s.gallery.assets {
+		if !a.Invalid && a.Available {
+			px, _, _ := fb.DecodeThumbnail(s.ctx, a, galleryThumbEdgeL1)
+			s.gallery.images.remember(galleryThumbKey{assetID: a.ID, edge: galleryThumbEdgeL1}, ui.NewBitmap(px))
+		}
 	}
 }

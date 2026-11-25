@@ -33,6 +33,15 @@ const (
 	GallerySortLargest
 )
 
+// GalleryViewMode switches between the free-panning Bravais infinite gallery
+// wall (default) and the date-grouped timeline list.
+type GalleryViewMode uint8
+
+const (
+	GalleryViewCanvas GalleryViewMode = iota
+	GalleryViewTimeline
+)
+
 // GalleryUIDUnknown filters assets whose UID cannot be confirmed (for example
 // exported or custom directories).
 const GalleryUIDUnknown = "__unknown__"
@@ -112,6 +121,7 @@ const (
 	GallerySetAsBackground
 	GalleryClearCustomBackground
 	GalleryCustomBackgroundLoaded
+	GallerySetViewMode
 	galleryEventLast
 )
 
@@ -175,6 +185,7 @@ type GalleryState struct {
 	Tag          string
 	Search       string
 	Sort         GallerySort
+	ViewMode     GalleryViewMode
 	SelectMode   bool
 	SelectedCnt  int
 	FocusedID    int64
@@ -237,6 +248,7 @@ func InitialGalleryState() GalleryState {
 type GalleryPayload struct {
 	Scope             GalleryScope
 	Sort              GallerySort
+	ViewMode          GalleryViewMode
 	UID               string
 	AlbumID           int64
 	Tag               string
@@ -1105,6 +1117,13 @@ func reduceGallery(m Model, e Event) (Model, []Effect, bool) {
 
 	case GalleryCustomBackgroundLoaded:
 		m.CustomBackground = e.Enabled
+		return m, nil, true
+
+	case GallerySetViewMode:
+		if m.Page != Gallery || m.Overlay != NoOverlay || e.Gallery.ViewMode > GalleryViewTimeline {
+			return m, nil, true
+		}
+		g.ViewMode = e.Gallery.ViewMode
 		return m, nil, true
 	}
 

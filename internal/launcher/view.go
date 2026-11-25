@@ -228,14 +228,19 @@ const (
 	galleryControlHeight        float32 = 34
 	galleryViewerBarHeight      float32 = 52
 	galleryViewerFootHeight     float32 = 64
-	gallerySettingsDialogWidth  float32 = 760
-	gallerySettingsDialogHeight float32 = 520
-	gallerySettingsNavWidth     float32 = 184
-	gallerySettingsCardRadius   float32 = 14
-	gallerySearchWidth          float32 = 196
-	galleryOrganizeDialogWidth  float32 = 520
-	galleryOrganizeDialogHeight float32 = 468
+	gallerySettingsDialogWidth  float32 = 720
+	gallerySettingsDialogHeight float32 = 480
+	gallerySettingsNavWidth     float32 = 168
+	gallerySearchWidth          float32 = 186
+	galleryOrganizeDialogWidth  float32 = 480
+	galleryOrganizeDialogHeight float32 = 440
 	galleryVideoBarHeight       float32 = 46
+	galleryCanvasTileW          float32 = 316
+	galleryCanvasTileH          float32 = 178
+	galleryCanvasGap            float32 = 22
+	galleryCanvasStaggerRatio   float32 = 0.44
+	galleryCanvasZoomMin        float32 = 0.45
+	galleryCanvasZoomMax        float32 = 1.85
 	monoFont                            = "Bahnschrift"
 )
 

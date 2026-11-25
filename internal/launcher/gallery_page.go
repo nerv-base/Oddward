@@ -4,6 +4,7 @@ package launcher
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/egoist/mygo/ui"
@@ -16,8 +17,11 @@ func (s *Shell) galleryPage(c *ui.Context) {
 	tone := s.tone()
 	prefs := c.Preferences()
 	opaque := prefs.HighContrast || prefs.ReduceTransparency
-	width, _ := c.Size()
-	available := max(width-railWidth-bezelWidth-2*galleryInset, 420)
+	width, height := c.Size()
+	surfaceW := max(width-railWidth-bezelWidth, 480)
+	surfaceH := max(height-2*bezelWidth, 360)
+	available := max(surfaceW-2*galleryInset, 420)
+	isCanvas := g.ViewMode == state.GalleryViewCanvas
 
 	// Handle page-level keyboard shortcuts when no modal is open and the search
 	// field does not hold focus (so Space / Ctrl+A / Ctrl+C work normally inside search).
@@ -27,6 +31,7 @@ func (s *Shell) galleryPage(c *ui.Context) {
 		copyImg := c.Shortcut(ui.Ctrl, ui.KeyC) && !c.ShortcutRepeated()
 		exportKey := c.Shortcut(ui.Ctrl, ui.KeyS) && !c.ShortcutRepeated()
 		previewKey := c.Shortcut(0, ui.KeySpace) && !c.ShortcutRepeated()
+		resetCanvas := c.Shortcut(0, ui.Key0) && !c.ShortcutRepeated() && isCanvas
 		escSelect := c.Shortcut(0, ui.KeyEscape) && !c.ShortcutRepeated() && g.SelectMode
 		switch {
 		case selectAll:
@@ -48,6 +53,8 @@ func (s *Shell) galleryPage(c *ui.Context) {
 				s.gallery.viewer.reset(id)
 				s.Dispatch(state.Event{Kind: state.GalleryOpenViewer, Gallery: state.GalleryPayload{AssetID: id}})
 			}
+		case resetCanvas:
+			s.gallery.canvas.recenter(computeGalleryLattice(len(s.gallery.assets)), surfaceW, surfaceH)
 		case escSelect:
 			s.Dispatch(state.Event{Kind: state.Dismiss})
 		}
@@ -61,7 +68,7 @@ func (s *Shell) galleryPage(c *ui.Context) {
 	if opaque {
 		surface.Background(s.theme.Surface)
 	} else {
-		surface.Material(frostedSurface{Tint: ui.RGBA(10, 11, 14, .58)})
+		surface.Material(frostedSurface{Tint: ui.RGBA(10, 11, 14, .64)})
 	}
 	surface.Children(func() {
 		if !opaque {
@@ -71,7 +78,50 @@ func (s *Shell) galleryPage(c *ui.Context) {
 			})
 		}
 
-		// Top header + toolbar + scope tabs.
+		gridTop := galleryGridTop
+		if g.Notice != "" {
+			gridTop = galleryGridTopNotice
+		}
+		gridBottom := galleryBottomInset + galleryStatusBarHeight + 8
+
+		// Main body: painted BEFORE floating chrome in infinite canvas mode so
+		// works glide edge-to-edge underneath the soft top veil.
+		switch {
+		case g.Phase == state.GalleryFailed && len(s.gallery.assets) == 0:
+			s.galleryEmptyCard(c, gridTop, "无法读取相册索引", g.Error, true)
+		case len(s.gallery.assets) == 0:
+			title, body := "还没有发现摄影作品", "在《异环》中拍照或录屏，或保存到系统图片/视频目录后，海特洛相册会自动发现并整理你的作品。也可以手动添加自定义文件夹。"
+			if g.Phase == state.GalleryScanning {
+				title, body = "正在扫描媒体目录", "正在读取游戏拍照、录像缓存与系统导出目录的元数据…"
+			} else if g.TotalCount > 0 {
+				title, body = "当前筛选条件下没有媒体", "清空搜索词，或切换分类、相册、标签与 UID 筛选器可查看全部已索引作品。"
+			}
+			s.galleryEmptyCard(c, gridTop, title, body, false)
+		case isCanvas:
+			s.galleryInfiniteCanvas(c, surfaceW, surfaceH, opaque, tone)
+			if !opaque {
+				// Soft top gradient veil keeps floating header crisp over any bright screenshot.
+				ui.Box(c).Absolute().Left(0).Right(0).Top(0).Height(168).PassThrough().LinearGradient(ui.LinearGradient{
+					Angle: 180,
+					Stops: []ui.GradientStop{
+						{Color: ui.RGBA(10, 11, 14, .90), At: 0},
+						{Color: ui.RGBA(10, 11, 14, .64), At: .66},
+						{Color: ui.Transparent, At: 1},
+					},
+				})
+				ui.Box(c).Absolute().Left(0).Right(0).Bottom(0).Height(88).PassThrough().LinearGradient(ui.LinearGradient{
+					Angle: 0,
+					Stops: []ui.GradientStop{
+						{Color: ui.RGBA(10, 11, 14, .78), At: 0},
+						{Color: ui.Transparent, At: 1},
+					},
+				})
+			}
+		default:
+			s.galleryVirtualGrid(c, available, gridTop, gridBottom, opaque, tone)
+		}
+
+		// Floating top header + scope tabs.
 		ui.Column(c.Key("gallery-header")).Absolute().Left(galleryInset).Right(galleryInset).Top(galleryHeaderTop).Gap(10).Children(func() {
 			s.galleryToolbar(c, g, tone, opaque)
 			s.galleryScopeBar(c, g, tone)
@@ -84,30 +134,8 @@ func (s *Shell) galleryPage(c *ui.Context) {
 			}
 		})
 
-		gridTop := galleryGridTop
-		if g.Notice != "" {
-			gridTop = galleryGridTopNotice
-		}
-		gridBottom := galleryBottomInset + galleryStatusBarHeight + 8
-
-		// Main body: loading/error/empty or virtualized date-grouped photo/video grid.
-		switch {
-		case g.Phase == state.GalleryFailed && len(s.gallery.assets) == 0:
-			s.galleryEmptyCard(c, gridTop, "无法读取相册索引", g.Error, true)
-		case len(s.gallery.assets) == 0:
-			title, body := "还没有发现摄影作品", "在《异环》中拍照或录屏，或保存到系统图片/视频目录后，海特洛相册会自动发现并整理你的作品。也可以手动添加自定义文件夹。"
-			if g.Phase == state.GalleryScanning {
-				title, body = "正在扫描媒体目录", "正在读取游戏拍照、录像缓存与系统导出目录的元数据…"
-			} else if g.TotalCount > 0 {
-				title, body = "当前筛选条件下没有媒体", "清空搜索词，或切换分类、相册、标签与 UID 筛选器可查看全部已索引作品。"
-			}
-			s.galleryEmptyCard(c, gridTop, title, body, false)
-		default:
-			s.galleryVirtualGrid(c, available, gridTop, gridBottom, opaque, tone)
-		}
-
-		// Bottom real-time status bar.
-		s.galleryStatusBar(c, g, tone)
+		// Bottom floating corner capsules (status on left, canvas zoom/reset on right).
+		s.galleryStatusBar(c, g, tone, surfaceW, surfaceH, isCanvas && len(s.gallery.assets) > 0)
 	})
 
 	if s.galleryImagesEnabled() && !s.gallery.images.active && len(s.gallery.images.wanted) > 0 {
@@ -124,6 +152,11 @@ func (s *Shell) galleryPage(c *ui.Context) {
 }
 
 func (s *Shell) galleryShortcutTargetID() int64 {
+	if s.Model.Gallery.ViewMode == state.GalleryViewCanvas && s.gallery.canvas.hoveredID > 0 {
+		if _, ok := s.galleryAssetByID(s.gallery.canvas.hoveredID); ok {
+			return s.gallery.canvas.hoveredID
+		}
+	}
 	if s.Model.Gallery.FocusedID > 0 {
 		if _, ok := s.galleryAssetByID(s.Model.Gallery.FocusedID); ok {
 			return s.Model.Gallery.FocusedID
@@ -143,7 +176,7 @@ func (s *Shell) galleryShortcutTargetID() int64 {
 }
 
 func (s *Shell) gallerySmallButton(c *ui.Context, key, label string, disabled bool) ui.Element {
-	b := s.quietButton(c, key, label, disabled).Height(galleryControlHeight).Radius(10).Padding(0, 11)
+	b := s.quietButton(c, key, label, disabled).Height(galleryControlHeight).Radius(10).Padding(0, 10)
 	if prefs := c.Preferences(); prefs.HighContrast || prefs.ReduceTransparency {
 		b.Background(s.theme.Surface).Border(1, muted)
 	}
@@ -151,17 +184,14 @@ func (s *Shell) gallerySmallButton(c *ui.Context, key, label string, disabled bo
 }
 
 func (s *Shell) galleryToolbar(c *ui.Context, g state.GalleryState, tone ui.Color, opaque bool) {
-	ui.Row(c.Key("gallery-toolbar")).FillWidth().Height(galleryToolbarHeight).AlignItems(ui.Center).Gap(7).Children(func() {
+	ui.Row(c.Key("gallery-toolbar")).FillWidth().Height(galleryToolbarHeight).AlignItems(ui.Center).Gap(6).Children(func() {
 		ui.Row(c).AlignItems(ui.Center).Gap(10).Grow(1).MinWidth(0).Children(func() {
-			ui.Text(c, "海特洛相册").FontSize(25).FontWeight(700).SingleLine()
+			ui.Text(c, "海特洛相册").FontSize(24).FontWeight(700).SingleLine()
 			countText := fmt.Sprintf("%d 项", g.TotalCount)
 			if g.FilteredCount != g.TotalCount {
 				countText = fmt.Sprintf("%d / %d", g.FilteredCount, g.TotalCount)
 			}
-			ui.Row(c).Height(24).Padding(0, 9).Radius(12).AlignItems(ui.Center).
-				Background(ui.RGBA(255, 255, 255, .06)).Border(1, hairline).Children(func() {
-				mono(c, countText, 12).TextColor(muted)
-			})
+			mono(c, countText, 12).TextColor(muted)
 		})
 
 		if g.SelectMode {
@@ -224,8 +254,8 @@ func (s *Shell) galleryToolbar(c *ui.Context, g state.GalleryState, tone ui.Colo
 			return
 		}
 
-		// Recessed frosted search field.
-		searchBg := ui.RGBA(0, 0, 0, .28)
+		// Recessed translucent search field.
+		searchBg := ui.RGBA(12, 14, 19, .58)
 		if opaque {
 			searchBg = s.theme.Surface
 		}
@@ -265,7 +295,7 @@ func (s *Shell) galleryToolbar(c *ui.Context, g state.GalleryState, tone ui.Colo
 		albumLabel := "相册 ▾"
 		if g.AlbumID > 0 {
 			if name := s.galleryAlbumName(g.AlbumID); name != "" {
-				albumLabel = truncateRunes(name, 6) + " ▾"
+				albumLabel = truncateRunes(name, 5) + " ▾"
 			}
 		}
 		s.gallerySmallButton(c, "gallery-album-filter", albumLabel, false).Label("相册筛选").Menu(func(m *ui.Menu) {
@@ -287,7 +317,7 @@ func (s *Shell) galleryToolbar(c *ui.Context, g state.GalleryState, tone ui.Colo
 		// Tag filter menu.
 		tagLabel := "标签 ▾"
 		if g.Tag != "" {
-			tagLabel = "#" + truncateRunes(g.Tag, 5) + " ▾"
+			tagLabel = "#" + truncateRunes(g.Tag, 4) + " ▾"
 		}
 		s.gallerySmallButton(c, "gallery-tag-filter", tagLabel, false).Label("标签筛选").Menu(func(m *ui.Menu) {
 			if m.Item("全部标签").Radio(g.Tag == "").Chosen() {
@@ -350,9 +380,31 @@ func (s *Shell) galleryToolbar(c *ui.Context, g state.GalleryState, tone ui.Colo
 			}
 		})
 
+		// View mode toggle: Bravais infinite gallery wall <-> Date-grouped timeline list.
+		toggleLabel := "日期列表"
+		toggleIcon := "\uE8FD"
+		nextMode := state.GalleryViewTimeline
+		if g.ViewMode == state.GalleryViewTimeline {
+			toggleLabel = "无限画廊"
+			toggleIcon = "\uE80A"
+			nextMode = state.GalleryViewCanvas
+		}
+		viewBtn := ui.ButtonBase(c.Key("gallery-view-mode")).Label(toggleLabel).Tooltip("切换到"+toggleLabel).
+			Height(galleryControlHeight).Padding(0, 10).Radius(10).Gap(5).Justify(ui.Center).
+			Border(1, hairline).Background(ui.RGBA(255, 255, 255, .05)).TextColor(paper)
+		if viewBtn.Hovered() || viewBtn.FocusVisible() {
+			viewBtn.Background(ui.RGBA(255, 255, 255, .10)).Border(1, tone.Alpha(.55))
+		}
+		viewBtn.Children(func() {
+			glyph(c, toggleIcon, 13)
+			ui.Text(c, toggleLabel).FontSize(12).FontWeight(500).SingleLine()
+		}).OnClick(func() {
+			s.Dispatch(state.Event{Kind: state.GallerySetViewMode, Gallery: state.GalleryPayload{ViewMode: nextMode}})
+		})
+
 		refreshLabel := "刷新"
 		if g.Phase == state.GalleryScanning {
-			refreshLabel = "扫描中…"
+			refreshLabel = "扫描中"
 		}
 		s.gallerySmallButton(c, "gallery-refresh", refreshLabel, g.Phase == state.GalleryScanning || g.Busy).OnClick(func() {
 			s.Dispatch(state.Event{Kind: state.GalleryRefresh})
@@ -362,7 +414,7 @@ func (s *Shell) galleryToolbar(c *ui.Context, g state.GalleryState, tone ui.Colo
 			s.Dispatch(state.Event{Kind: state.GalleryToggleSelectMode})
 		})
 
-		s.gallerySmallButton(c, "gallery-settings-btn", "相册设置", false).OnClick(func() {
+		s.gallerySmallButton(c, "gallery-settings-btn", "设置", false).Label("相册设置").Tooltip("相册设置").OnClick(func() {
 			s.Dispatch(state.Event{Kind: state.GalleryOpenSettings})
 		})
 	})
@@ -382,23 +434,24 @@ func (s *Shell) galleryScopeBar(c *ui.Context, g state.GalleryState, tone ui.Col
 		{"gallery-tab-exported", "已保存", g.ExportedCount, state.GalleryScopeExported},
 		{"gallery-tab-archived", "已归档", g.ArchivedCount, state.GalleryScopeArchived},
 	}
-	ui.Row(c.Key("gallery-scope-tabs")).FillWidth().Height(galleryTabsHeight).AlignItems(ui.Center).Gap(5).
+	ui.Row(c.Key("gallery-scope-tabs")).FillWidth().Height(galleryTabsHeight).AlignItems(ui.Center).Gap(4).
 		Role(ui.RoleTabList).Label("相册分类筛选").Children(func() {
 		for _, tab := range tabs {
 			tab := tab
 			selected := g.Scope == tab.scope
 			title := fmt.Sprintf("%s %d", tab.label, tab.count)
 			b := ui.ButtonBase(c.Key(tab.key)).Label(tab.label).Role(ui.RoleTab).Selected(selected).
-				Height(galleryTabsHeight).Padding(0, 11).Radius(8).Justify(ui.Center).TextColor(muted)
+				Height(galleryTabsHeight).Padding(0, 10).Radius(8).Justify(ui.Center).
+				Background(ui.Transparent).TextColor(muted)
 			if selected {
-				b.TextColor(paper).Background(ui.RGBA(255, 255, 255, .07))
+				b.TextColor(paper)
 			} else if b.Hovered() || b.FocusVisible() {
-				b.TextColor(paper).Background(ui.RGBA(255, 255, 255, .04))
+				b.TextColor(paper).Background(ui.RGBA(255, 255, 255, .06))
 			}
 			b.Children(func() {
 				ui.Text(c, title).FontSize(13).FontWeight(600).SingleLine()
 				if selected {
-					ui.Box(c).Absolute().Left(10).Right(10).Bottom(2).Height(2.5).Radius(1.25).Background(tone)
+					ui.Box(c).Absolute().Left(10).Right(10).Bottom(2).Height(2).Radius(1).Background(tone)
 				}
 			}).OnClick(func() {
 				s.Dispatch(state.Event{Kind: state.GallerySetScope, Gallery: state.GalleryPayload{Scope: tab.scope}})
@@ -407,13 +460,13 @@ func (s *Shell) galleryScopeBar(c *ui.Context, g state.GalleryState, tone ui.Col
 
 		ui.Box(c).Grow(1)
 
-		// Active removable filter chips for album, tag, UID or search.
+		// Active removable filter chips for album, tag or UID.
 		hasChip := false
 		chip := func(key, text string, onClear func()) {
 			hasChip = true
 			b := ui.ButtonBase(c.Key(key)).Label("清除筛选 "+text).
 				Height(24).Padding(0, 8).Radius(12).Gap(4).Justify(ui.Center).
-				Background(tone.Alpha(.16)).Border(1, tone.Alpha(.48)).TextColor(paper)
+				Background(tone.Alpha(.16)).TextColor(paper)
 			b.Children(func() {
 				ui.Text(c, text).FontSize(11).FontWeight(600).SingleLine()
 				ui.Text(c, "×").FontSize(12).TextColor(tone)
@@ -505,7 +558,7 @@ func (s *Shell) galleryVirtualGrid(c *ui.Context, available, top, bottom float32
 		cols = 6
 	}
 	tileW := (available - float32(cols-1)*galleryTileGap) / float32(cols)
-	imgH := tileW * 9 / 16 // 16:9 frame matching desktop widescreen captures; media renders with Contain!
+	imgH := tileW * 9 / 16
 	tileH := imgH + galleryTileFooterHeight
 	thumbEdge := galleryThumbEdge(s.gallery.dpiScale)
 
@@ -560,7 +613,6 @@ func (s *Shell) galleryVirtualGrid(c *ui.Context, available, top, bottom float32
 		})
 	}).Absolute().Left(galleryInset).Right(galleryInset).Top(top).Bottom(bottom).Scrollbars(true).Label("摄影作品网格").AutoFocus()
 
-	// Prefetch thumbnails for rows immediately above and below the visible window.
 	first, last := ls.Visible()
 	if first >= 0 && last >= first && len(rows) > 0 {
 		lo := max(0, first-2)
@@ -583,8 +635,6 @@ func (s *Shell) galleryTile(c *ui.Context, asset GalleryAsset, w, imgH, totalH f
 	focused := s.Model.Gallery.FocusedID == asset.ID
 	label := galleryAssetAccessibleLabel(asset)
 
-	// Wrap tile button and top-right favorite button as siblings inside one Box
-	// so clicking the heart never triggers the card's OnClick.
 	wrap := ui.Box(c.Key(fmt.Sprintf("gallery-tile-wrap-%d", asset.ID))).Size(w, totalH).Radius(galleryTileRadius).Clip()
 	wrap.Children(func() {
 		tile := ui.ButtonBase(c.Key(fmt.Sprintf("gallery-tile-%d", asset.ID))).
@@ -604,7 +654,6 @@ func (s *Shell) galleryTile(c *ui.Context, asset GalleryAsset, w, imgH, totalH f
 
 		tile.Children(func() {
 			ui.Column(c).Fill().Children(func() {
-				// Thumbnail stage: artwork always placed with ui.Contain per AGENTS.md.
 				stageBg := ui.RGBA(10, 11, 15, .95)
 				ui.Box(c).FillWidth().Height(imgH).Background(stageBg).Clip().Children(func() {
 					bmp := s.galleryThumb(asset, thumbEdge)
@@ -632,41 +681,37 @@ func (s *Shell) galleryTile(c *ui.Context, asset GalleryAsset, w, imgH, totalH f
 						})
 					}
 
-					// Top-left provenance/status badge.
 					badgeText, badgeBg, badgeFg := galleryStatusBadge(asset, tone, opaque, s.wishWarningColor())
 					if badgeText != "" {
 						ui.Row(c).Absolute().Left(8).Top(8).Height(20).Padding(0, 7).Radius(6).
-							AlignItems(ui.Center).Background(badgeBg).Border(1, ui.RGBA(255, 255, 255, .10)).PassThrough().Children(func() {
+							AlignItems(ui.Center).Background(badgeBg).PassThrough().Children(func() {
 							ui.Text(c, badgeText).FontSize(10).FontWeight(600).TextColor(badgeFg).SingleLine()
 						})
 					}
 
-					// Bottom-left compact tag badge when tagged.
 					if len(asset.Tags) > 0 {
 						tagTxt := "#" + truncateRunes(asset.Tags[0], 6)
 						if len(asset.Tags) > 1 {
 							tagTxt += fmt.Sprintf(" +%d", len(asset.Tags)-1)
 						}
 						ui.Row(c).Absolute().Left(8).Bottom(8).Height(20).Padding(0, 7).Radius(6).
-							AlignItems(ui.Center).Background(ui.RGBA(12, 14, 20, .82)).Border(1, ui.RGBA(255, 255, 255, .12)).PassThrough().Children(func() {
+							AlignItems(ui.Center).Background(ui.RGBA(12, 14, 20, .82)).PassThrough().Children(func() {
 							ui.Text(c, tagTxt).FontSize(10).FontWeight(600).TextColor(paper).SingleLine()
 						})
 					}
 
-					// Bottom-right video duration pill.
 					if asset.IsVideo() {
 						durText := "视频"
 						if asset.DurationMS > 0 {
 							durText = formatGalleryDuration(asset.DurationMS)
 						}
 						ui.Row(c).Absolute().Right(8).Bottom(8).Height(20).Padding(0, 7).Radius(6).Gap(4).
-							AlignItems(ui.Center).Background(ui.RGBA(10, 11, 15, .86)).Border(1, ui.RGBA(255, 255, 255, .14)).PassThrough().Children(func() {
+							AlignItems(ui.Center).Background(ui.RGBA(10, 11, 15, .86)).PassThrough().Children(func() {
 							ui.Box(c).TextColor(tone).Children(func() { glyph(c, "\uE768", 9) })
 							mono(c, durText, 10).TextColor(paper)
 						})
 					}
 
-					// Top-right selection indicator in multi-select mode.
 					if s.Model.Gallery.SelectMode {
 						checkBg := ui.RGBA(12, 13, 16, .72)
 						checkBorder := ui.RGBA(255, 255, 255, .45)
@@ -685,7 +730,6 @@ func (s *Shell) galleryTile(c *ui.Context, asset GalleryAsset, w, imgH, totalH f
 
 				ui.Box(c).FillWidth().Height(1).Background(ui.RGBA(255, 255, 255, .07)).PassThrough()
 
-				// Compact metadata footer.
 				ui.Row(c).FillWidth().Height(galleryTileFooterHeight-1).Padding(0, 10).AlignItems(ui.Center).Gap(6).PassThrough().Children(func() {
 					name := asset.FileName
 					if name == "" {
@@ -705,62 +749,9 @@ func (s *Shell) galleryTile(c *ui.Context, asset GalleryAsset, w, imgH, totalH f
 			s.gallery.viewer.reset(asset.ID)
 			s.Dispatch(state.Event{Kind: state.GalleryOpenViewer, Gallery: state.GalleryPayload{AssetID: asset.ID}})
 		}).ContextMenu(func(m *ui.Menu) {
-			viewLabel := "查看大图"
-			if asset.IsVideo() {
-				viewLabel = "播放视频"
-			}
-			if m.Item(viewLabel).Chosen() {
-				s.gallery.viewer.reset(asset.ID)
-				s.Dispatch(state.Event{Kind: state.GalleryOpenViewer, Gallery: state.GalleryPayload{AssetID: asset.ID}})
-			}
-			favItem := "加入收藏"
-			if asset.Favorited {
-				favItem = "取消收藏"
-			}
-			if m.Item(favItem).Chosen() {
-				s.Dispatch(state.Event{Kind: state.GalleryToggleFavorite, Enabled: !asset.Favorited, Gallery: state.GalleryPayload{AssetID: asset.ID}})
-			}
-			if m.Item("添加到相册…").Chosen() {
-				s.Dispatch(state.Event{Kind: state.GalleryOpenAlbumModal, Gallery: state.GalleryPayload{AssetID: asset.ID}})
-			}
-			if m.Item("管理标签…").Chosen() {
-				s.Dispatch(state.Event{Kind: state.GalleryOpenTagModal, Gallery: state.GalleryPayload{AssetID: asset.ID}})
-			}
-			if !asset.IsVideo() {
-				if m.Item("设为启动器背景").Disabled(!asset.Available || asset.Invalid).Chosen() {
-					s.Dispatch(state.Event{Kind: state.GallerySetAsBackground, Gallery: state.GalleryPayload{AssetID: asset.ID}})
-				}
-			}
-			m.Separator()
-			if !asset.IsVideo() {
-				if m.Item("复制图片").Disabled(!asset.Available || asset.Invalid).Chosen() {
-					s.Dispatch(state.Event{Kind: state.GalleryCopyImage, Gallery: state.GalleryPayload{AssetID: asset.ID}})
-				}
-			}
-			expLabel := "导出图片…"
-			if asset.IsVideo() {
-				expLabel = "导出视频…"
-			}
-			if m.Item(expLabel).Disabled(!asset.Available || asset.Invalid).Chosen() {
-				s.Dispatch(state.Event{Kind: state.GalleryExportSingle, Gallery: state.GalleryPayload{AssetID: asset.ID}})
-			}
-			if m.Item("打开文件位置").Disabled(!asset.Available).Chosen() {
-				s.Dispatch(state.Event{Kind: state.GalleryRevealAsset, Gallery: state.GalleryPayload{AssetID: asset.ID}})
-			}
-			m.Separator()
-			if !asset.HasArchived && asset.Available && !asset.Invalid {
-				if m.Item("归档副本").Chosen() {
-					s.Dispatch(state.Event{Kind: state.GalleryArchiveAsset, Gallery: state.GalleryPayload{AssetID: asset.ID}})
-				}
-			}
-			if asset.HasArchived {
-				if m.Item("删除 Oddward 归档副本…").Chosen() {
-					s.Dispatch(state.Event{Kind: state.GalleryRequestDeleteArchive, Gallery: state.GalleryPayload{AssetID: asset.ID}})
-				}
-			}
+			s.galleryAssetContextMenu(m, asset)
 		})
 
-		// Top-right favorite heart toggle (outside multi-select mode).
 		if !s.Model.Gallery.SelectMode && !asset.Invalid {
 			favLabel := "收藏 " + asset.FileName
 			iconKey := "\uEB51"
@@ -775,7 +766,7 @@ func (s *Shell) galleryTile(c *ui.Context, asset GalleryAsset, w, imgH, totalH f
 			favBtn := ui.ButtonBase(c.Key(fmt.Sprintf("gallery-fav-%d", asset.ID))).
 				Label(favLabel).Tooltip(favLabel).
 				Absolute().Right(8).Top(8).Size(26, 26).Radius(13).
-				Justify(ui.Center).Background(btnBg).Border(1, ui.RGBA(255, 255, 255, .14)).TextColor(iconColor)
+				Justify(ui.Center).Background(btnBg).TextColor(iconColor)
 			if favBtn.Hovered() || favBtn.FocusVisible() {
 				favBtn.Border(1, tone).Background(ui.RGBA(12, 14, 20, .90))
 			}
@@ -786,7 +777,7 @@ func (s *Shell) galleryTile(c *ui.Context, asset GalleryAsset, w, imgH, totalH f
 	})
 }
 
-func (s *Shell) galleryStatusBar(c *ui.Context, g state.GalleryState, tone ui.Color) {
+func (s *Shell) galleryStatusBar(c *ui.Context, g state.GalleryState, tone ui.Color, surfaceW, surfaceH float32, showCanvasControls bool) {
 	statusText := "空闲"
 	dot := muted
 	switch {
@@ -800,7 +791,7 @@ func (s *Shell) galleryStatusBar(c *ui.Context, g state.GalleryState, tone ui.Co
 	summary := fmt.Sprintf("共 %d 项（%d 照片 · %d 视频）· 已归档 %d 项 (%s)",
 		g.TotalCount, g.PhotoCount, g.VideoCount, g.ArchivedCount, formatGalleryBytes(g.ArchiveBytes))
 	if g.ArchiveFreeBytes > 0 {
-		summary += fmt.Sprintf(" · 磁盘剩余 %s", formatGalleryBytes(g.ArchiveFreeBytes))
+		summary += fmt.Sprintf(" · 剩余 %s", formatGalleryBytes(g.ArchiveFreeBytes))
 	}
 	if g.MissingCount > 0 {
 		summary += fmt.Sprintf(" · 缺失 %d", g.MissingCount)
@@ -809,31 +800,75 @@ func (s *Shell) galleryStatusBar(c *ui.Context, g state.GalleryState, tone ui.Co
 		summary += fmt.Sprintf(" · 损坏 %d", g.InvalidCount)
 	}
 
+	pillBg := ui.RGBA(12, 14, 18, .72)
 	ui.Row(c.Key("gallery-status-bar")).Absolute().Left(galleryInset).Right(galleryInset).Bottom(galleryBottomInset).
-		Height(galleryStatusBarHeight).Padding(0, 12).Radius(8).AlignItems(ui.Center).Gap(10).
-		Background(ui.RGBA(12, 14, 18, .55)).Border(1, hairline).Children(func() {
-		ui.Box(c).Size(6, 6).Radius(3).Background(dot)
-		ui.Text(c, statusText).FontSize(12).TextColor(paper).SingleLine()
-		ui.Box(c).Size(1, 12).Background(hairline)
-		ui.Text(c, summary).FontSize(12).TextColor(muted).SingleLine().Grow(1).Shrink(1).Tooltip(summary)
-		if s.OpenFolder != nil && (g.EffectiveArchive != "" || len(s.gallery.sources) > 0) {
-			folderBtn := ui.ButtonBase(c.Key("gallery-open-folder")).Label("打开文件夹").Tooltip("打开归档目录").
-				Height(22).Padding(0, 8).Radius(6).Gap(4).Justify(ui.Center).TextColor(muted)
-			if folderBtn.Hovered() || folderBtn.FocusVisible() {
-				folderBtn.Background(ui.RGBA(255, 255, 255, .08)).TextColor(paper)
-			}
-			folderBtn.Children(func() {
-				glyph(c, "\uE8B7", 12)
-				ui.Text(c, "打开目录").FontSize(11).SingleLine()
-			}).OnClick(func() {
-				target := g.EffectiveArchive
-				if target == "" && len(s.gallery.sources) > 0 {
-					target = s.gallery.sources[0].RootPath
+		Height(galleryStatusBarHeight).AlignItems(ui.Center).Gap(10).Children(func() {
+		// Left translucent status capsule.
+		ui.Row(c).Height(galleryStatusBarHeight).Padding(0, 12).Radius(16).AlignItems(ui.Center).Gap(8).
+			Background(pillBg).Border(1, ui.RGBA(255, 255, 255, .08)).Children(func() {
+			ui.Box(c).Size(6, 6).Radius(3).Background(dot)
+			ui.Text(c, statusText).FontSize(12).TextColor(paper).SingleLine()
+			ui.Text(c, "·").FontSize(12).TextColor(muted)
+			ui.Text(c, summary).FontSize(12).TextColor(muted).SingleLine().Tooltip(summary)
+			if s.OpenFolder != nil && (g.EffectiveArchive != "" || len(s.gallery.sources) > 0) {
+				folderBtn := ui.ButtonBase(c.Key("gallery-open-folder")).Label("打开文件夹").Tooltip("打开归档目录").
+					Height(22).Padding(0, 6).Radius(6).Gap(4).Justify(ui.Center).TextColor(muted)
+				if folderBtn.Hovered() || folderBtn.FocusVisible() {
+					folderBtn.Background(ui.RGBA(255, 255, 255, .08)).TextColor(paper)
 				}
-				s.Dispatch(state.Event{Kind: state.GalleryOpenFolder, Path: target})
+				folderBtn.Children(func() {
+					glyph(c, "\uE8B7", 12)
+				}).OnClick(func() {
+					target := g.EffectiveArchive
+					if target == "" && len(s.gallery.sources) > 0 {
+						target = s.gallery.sources[0].RootPath
+					}
+					s.Dispatch(state.Event{Kind: state.GalleryOpenFolder, Path: target})
+				})
+			}
+		})
+
+		ui.Box(c).Grow(1)
+
+		// Right floating canvas controls (zoom & recenter) or timeline shortcut hint.
+		if showCanvasControls {
+			layout := computeGalleryLattice(len(s.gallery.assets))
+			zoomPct := int(math.Round(float64(max(s.gallery.canvas.zoom, 0.1) * 100)))
+			ui.Row(c.Key("gallery-canvas-hud")).Height(galleryStatusBarHeight).Padding(0, 6).Radius(16).AlignItems(ui.Center).Gap(2).
+				Background(pillBg).Border(1, ui.RGBA(255, 255, 255, .08)).Children(func() {
+				ui.Text(c, "左键拖拽 · Ctrl+滚轮缩放").FontSize(11).TextColor(muted).Padding(0, 8, 0, 6).SingleLine()
+				zoomBtn := func(key, label, text string, onClick func()) {
+					b := ui.ButtonBase(c.Key(key)).Label(label).Tooltip(label).
+						Height(24).Padding(0, 7).Radius(12).Justify(ui.Center).TextColor(paper)
+					if b.Hovered() || b.FocusVisible() {
+						b.Background(ui.RGBA(255, 255, 255, .10))
+					}
+					b.Children(func() { mono(c, text, 11) }).OnClick(onClick)
+				}
+				zoomBtn("gallery-canvas-zoom-out", "缩小画廊", "−", func() {
+					s.adjustGalleryCanvasZoom(layout, surfaceW, surfaceH, 1/1.15, surfaceW/2, surfaceH/2)
+				})
+				resetBtn := ui.ButtonBase(c.Key("gallery-canvas-reset")).Label("重置画廊视角").Tooltip("重置视角与缩放 (0)").
+					Height(24).Padding(0, 8).Radius(12).Gap(5).Justify(ui.Center).TextColor(paper)
+				if resetBtn.Hovered() || resetBtn.FocusVisible() {
+					resetBtn.Background(ui.RGBA(255, 255, 255, .10))
+				}
+				resetBtn.Children(func() {
+					ui.Box(c).TextColor(muted).Children(func() { glyph(c, "\uE72A", 11) })
+					mono(c, fmt.Sprintf("%d%%", zoomPct), 11)
+				}).OnClick(func() {
+					s.gallery.canvas.recenter(layout, surfaceW, surfaceH)
+				})
+				zoomBtn("gallery-canvas-zoom-in", "放大画廊", "+", func() {
+					s.adjustGalleryCanvasZoom(layout, surfaceW, surfaceH, 1.15, surfaceW/2, surfaceH/2)
+				})
+			})
+		} else {
+			ui.Row(c).Height(galleryStatusBarHeight).Padding(0, 12).Radius(16).AlignItems(ui.Center).
+				Background(pillBg).Border(1, ui.RGBA(255, 255, 255, .08)).Children(func() {
+				ui.Text(c, "Space 预览 · Ctrl+A 全选 · Ctrl+S 导出").FontSize(11).TextColor(muted).SingleLine()
 			})
 		}
-		ui.Text(c, "Space 预览 · Ctrl+A 全选 · Ctrl+S 导出").FontSize(11).TextColor(muted).SingleLine()
 	})
 }
 

@@ -219,4 +219,19 @@ func TestGalleryP1SearchFavoritesAlbumsTagsBatchDeleteAndCustomBackground(t *tes
 	if len(fx) != 1 || fx[0].Kind != EffectGalleryClearCustomBackground {
 		t.Fatalf("ClearCustomBackground from LauncherSettings failed: %+v", fx)
 	}
+
+	// ViewMode defaults to Bravais infinite canvas and toggles cleanly to timeline and back.
+	m2 := Initial()
+	if m2.Gallery.ViewMode != GalleryViewCanvas {
+		t.Fatalf("default ViewMode = %v, want GalleryViewCanvas", m2.Gallery.ViewMode)
+	}
+	m2, _ = Reduce(m2, Event{Kind: Navigate, Page: Gallery})
+	m2, fx = Reduce(m2, Event{Kind: GallerySetViewMode, Gallery: GalleryPayload{ViewMode: GalleryViewTimeline}})
+	if m2.Gallery.ViewMode != GalleryViewTimeline || len(fx) != 0 {
+		t.Fatalf("switch to timeline failed: mode=%v fx=%+v", m2.Gallery.ViewMode, fx)
+	}
+	m2, _ = Reduce(m2, Event{Kind: GallerySetViewMode, Gallery: GalleryPayload{ViewMode: GalleryViewCanvas}})
+	if m2.Gallery.ViewMode != GalleryViewCanvas {
+		t.Fatal("switch back to infinite canvas failed")
+	}
 }

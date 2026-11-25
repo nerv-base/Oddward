@@ -51,6 +51,9 @@ var launcherIcons = map[string]*ui.SVG{
 	"\uE91B": lineIcon(`<rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8M12 18v3"/><path d="m6 15 4-4 3 3 3-3 2 2"/>`),
 	"\uE710": lineIcon(`<path d="M12 5v14M5 12h14"/>`),
 	"\uE70F": lineIcon(`<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/>`),
+	"\uE80A": lineIcon(`<rect x="3" y="4" width="8" height="6.5" rx="1.5"/><rect x="13" y="4" width="8" height="6.5" rx="1.5"/><rect x="6" y="13.5" width="8" height="6.5" rx="1.5"/><rect x="16" y="13.5" width="5" height="6.5" rx="1.5"/>`),
+	"\uE8FD": lineIcon(`<path d="M4 6h16M4 12h16M4 18h10"/>`),
+	"\uE72A": lineIcon(`<circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/>`),
 }
 
 func glyph(c *ui.Context, key string, size float32) {

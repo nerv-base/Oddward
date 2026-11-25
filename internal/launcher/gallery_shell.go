@@ -130,6 +130,7 @@ type galleryRuntime struct {
 	builtRev      uint64
 	images        galleryImageCache
 	viewer        galleryViewerState
+	canvas        galleryCanvasState
 	settingsTab   int
 
 	// UI-thread text inputs for search & centered organization modals.
@@ -156,6 +157,7 @@ func (s *Shell) initGallery() {
 	s.gallery.watchNotify = make(chan bool, 4)
 	s.gallery.viewer.fit = true
 	s.gallery.viewer.zoom = 1
+	s.gallery.canvas.zoom = 1
 }
 
 func (s *Shell) disposeGallery() {

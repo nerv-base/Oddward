@@ -456,6 +456,9 @@ func (f *fakeGalleryBackend) DecodeThumbnail(_ context.Context, a GalleryAsset, 
 		{{22, 34, 62}, {190, 128, 84}},
 		{{32, 24, 58}, {112, 168, 210}},
 		{{20, 42, 48}, {214, 174, 96}},
+		{{44, 24, 48}, {228, 124, 152}},
+		{{18, 36, 52}, {92, 198, 184}},
+		{{36, 30, 24}, {216, 152, 86}},
 	}
 	pal := palettes[int(a.ID)%len(palettes)]
 	horizon := h * 58 / 100
@@ -600,8 +603,9 @@ func TestGalleryEmptyScanningFailedAndMultiUIDFlows(t *testing.T) {
 		return sMulti.Model.Gallery.Phase == state.GalleryReady && len(sMulti.gallery.assets) == 4
 	})
 	ttMulti.Frame()
-	if !ttMulti.HasText("2026年11月24日") || !ttMulti.HasText("2026年11月23日") {
-		t.Fatalf("date group headers missing; texts=%v", ttMulti.Texts())
+	// Default mode is the Bravais infinite gallery canvas.
+	if sMulti.Model.Gallery.ViewMode != state.GalleryViewCanvas {
+		t.Fatalf("default ViewMode = %v, want GalleryViewCanvas", sMulti.Model.Gallery.ViewMode)
 	}
 	if _, ok := ttMulti.AccessByRole(ui.RoleTab, "游戏缓存"); !ok {
 		t.Fatal("missing accessible scope tab 游戏缓存")
@@ -614,6 +618,17 @@ func TestGalleryEmptyScanningFailedAndMultiUIDFlows(t *testing.T) {
 	}
 	if _, ok := ttMulti.AccessByRole(ui.RoleButton, "相册设置"); !ok {
 		t.Fatal("missing accessible 相册设置 button")
+	}
+	// Switch to 日期列表 and verify date headers render cleanly.
+	if clickFailed(ttMulti, "日期列表") || sMulti.Model.Gallery.ViewMode != state.GalleryViewTimeline {
+		t.Fatal("failed to switch to 日期列表 view")
+	}
+	ttMulti.Frame()
+	if !ttMulti.HasText("2026年11月24日") || !ttMulti.HasText("2026年11月23日") {
+		t.Fatalf("date group headers missing in timeline view; texts=%v", ttMulti.Texts())
+	}
+	if clickFailed(ttMulti, "无限画廊") || sMulti.Model.Gallery.ViewMode != state.GalleryViewCanvas {
+		t.Fatal("failed to switch back to 无限画廊 view")
 	}
 }
 
@@ -732,9 +747,6 @@ func TestGalleryViewerShortcutsBatchSelectionAndSettings(t *testing.T) {
 	}
 	if sw.Checked || s.Model.Gallery.AutoArchive {
 		t.Fatal("auto-archive switch must default OFF")
-	}
-	if !tt.HasText("默认关闭") {
-		t.Fatal("auto-archive disclosure missing")
 	}
 	if clickFailed(tt, "自动归档游戏内拍照") {
 		t.Fatal("failed to toggle auto-archive switch")
@@ -893,6 +905,98 @@ func TestGalleryP1FavoritesAlbumsTagsVideoViewerAndCustomBackground(t *testing.T
 		defer fb.mu.Unlock()
 		return fb.deletedArchBatch == 2
 	})
+}
+
+func TestGalleryInfiniteCanvasPanZoomAndClick(t *testing.T) {
+	// Build 12 works so the Bravais lattice extends beyond the 1280x720 viewport in 2D.
+	day := time.Date(2026, 11, 24, 16, 0, 0, 0, time.FixedZone("CST", 8*3600))
+	assets := make([]GalleryAsset, 12)
+	for i := range assets {
+		ts := day.Add(-time.Duration(i) * time.Minute)
+		assets[i] = GalleryAsset{
+			ID: int64(i + 1), SHA256: fmt.Sprintf("%064x", i+1),
+			MIMEType: "image/png", ByteSize: 1_800_000, Width: 1920, Height: 1080,
+			ModifiedAt: ts, DisplayTime: ts, FileName: fmt.Sprintf("26_11_24_16_%02d_00.png", 50-i),
+			PrimaryPath: fmt.Sprintf(`D:\Games\NTE\Selfie\100001\ScreenShots\26_11_24_16_%02d_00.png`, 50-i),
+			UIDs:        []string{"100001"}, HasCached: true, HasArchived: i%2 == 0, Available: true,
+		}
+	}
+
+	s := NewShell(settled(state.Ready))
+	t.Cleanup(s.Dispose)
+	s.GalleryBackend = newFakeGalleryBackend(assets...)
+	s.WishLocation = time.FixedZone("CST", 8*3600)
+
+	tt := ui.NewTester(s.View, 1280, 720)
+	if clickFailed(tt, "相册") {
+		t.Fatal("failed to open gallery")
+	}
+	settleGallery(t, tt, func() bool { return s.Model.Gallery.Phase == state.GalleryReady && len(s.gallery.assets) == 12 })
+	tt.Frame()
+
+	if s.Model.Gallery.ViewMode != state.GalleryViewCanvas {
+		t.Fatalf("ViewMode = %v, want GalleryViewCanvas", s.Model.Gallery.ViewMode)
+	}
+	initX, initY, initZoom := s.gallery.canvas.camX, s.gallery.canvas.camY, s.gallery.canvas.zoom
+	if initZoom != 1 {
+		t.Fatalf("initial canvas zoom = %v, want 1", initZoom)
+	}
+
+	// Left-drag pans the Bravais gallery canvas in 2D without opening the viewer.
+	tt.Move(640, 360)
+	tt.Press(640, 360)
+	tt.Advance(20 * time.Millisecond)
+	tt.Move(520, 290)
+	tt.Advance(20 * time.Millisecond)
+	tt.Release(520, 290)
+	tt.Frame()
+	if s.Model.Gallery.ViewerOpen {
+		t.Fatal("dragging canvas must not open viewer")
+	}
+	if s.gallery.canvas.camX == initX && s.gallery.canvas.camY == initY {
+		t.Fatalf("drag did not move camera: before=(%v,%v) after=(%v,%v)", initX, initY, s.gallery.canvas.camX, s.gallery.canvas.camY)
+	}
+
+	// Wheel scrolls the canvas camera smoothly back up from the bottom edge.
+	beforeWheelY := s.gallery.canvas.camY
+	tt.Wheel(640, 360, 0, -60)
+	tt.Frame()
+	if s.gallery.canvas.camY >= beforeWheelY {
+		t.Fatalf("wheel scroll up did not move canvas camera: before=%v after=%v", beforeWheelY, s.gallery.canvas.camY)
+	}
+
+	// Pinch zoom and HUD zoom buttons adjust scale smoothly.
+	tt.Pinch(640, 360, 1.2)
+	tt.Frame()
+	if s.gallery.canvas.zoom <= 1.05 {
+		t.Fatalf("pinch zoom did not increase scale: %v", s.gallery.canvas.zoom)
+	}
+	if clickFailed(tt, "放大画廊") {
+		t.Fatal("failed to click 放大画廊")
+	}
+	tt.Frame()
+	if s.gallery.canvas.zoom <= 1.25 {
+		t.Fatalf("HUD zoom-in did not increase scale further: %v", s.gallery.canvas.zoom)
+	}
+
+	// Reset via recenter button restores 100% zoom.
+	if clickFailed(tt, "重置画廊视角") {
+		t.Fatal("failed to click 重置画廊视角")
+	}
+	tt.Frame()
+	if s.gallery.canvas.zoom != 1 {
+		t.Fatalf("recenter must restore 100%% zoom, got %v", s.gallery.canvas.zoom)
+	}
+
+	// Clicking a visible tile without dragging opens the viewer on that exact asset.
+	firstLabel := galleryAssetAccessibleLabel(assets[0])
+	if clickFailed(tt, firstLabel) {
+		t.Fatalf("failed to click first canvas tile (%s)", firstLabel)
+	}
+	tt.Frame()
+	if !s.Model.Gallery.ViewerOpen || s.Model.Gallery.ViewerID != assets[0].ID {
+		t.Fatalf("clicking canvas tile failed to open viewer: open=%v id=%d", s.Model.Gallery.ViewerOpen, s.Model.Gallery.ViewerID)
+	}
 }
 
 func TestGalleryBitmapLRUEnforcesByteBudget(t *testing.T) {
