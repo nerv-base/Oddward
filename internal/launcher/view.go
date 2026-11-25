@@ -235,10 +235,8 @@ const (
 	galleryOrganizeDialogWidth  float32 = 480
 	galleryOrganizeDialogHeight float32 = 440
 	galleryVideoBarHeight       float32 = 46
-	galleryCanvasTileW          float32 = 316
-	galleryCanvasTileH          float32 = 178
-	galleryCanvasGap            float32 = 22
-	galleryCanvasStaggerRatio   float32 = 0.44
+	galleryCanvasTileW          float32 = 320
+	galleryCanvasTileH          float32 = 180
 	galleryCanvasZoomMin        float32 = 0.45
 	galleryCanvasZoomMax        float32 = 1.85
 	monoFont                            = "Bahnschrift"

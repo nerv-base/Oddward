@@ -12,7 +12,7 @@ import (
 	"github.com/nerv-base/Oddward/internal/launcher/state"
 )
 
-// galleryCanvasState owns the 2D Bravais staggered-lattice camera, inertia
+// galleryCanvasState owns the 2D seamless infinite gallery wall camera, inertia
 // physics and pointer drag gesture state strictly on the UI thread.
 type galleryCanvasState struct {
 	camX, camY float32 // world-space center currently at viewport center
@@ -22,6 +22,7 @@ type galleryCanvasState struct {
 
 	dragging     bool
 	dragMoved    bool
+	dragOnHeart  bool
 	dragAssetID  int64
 	dragStartX   float32
 	dragStartY   float32
@@ -44,6 +45,7 @@ func (st *galleryCanvasState) reset() {
 	st.velX, st.velY = 0, 0
 	st.dragging = false
 	st.dragMoved = false
+	st.dragOnHeart = false
 	st.dragAssetID = 0
 }
 
@@ -55,16 +57,15 @@ func (st *galleryCanvasState) recenter(layout galleryLatticeLayout, viewW, viewH
 }
 
 type galleryLatticeLayout struct {
-	count    int
-	cols     int
-	rows     int
-	pitchX   float32
-	pitchY   float32
-	staggerX float32
-	originX  float32 // world X of cell (0,0) top-left so lattice centers at (0,0)
-	originY  float32 // world Y of cell (0,0) top-left so lattice centers at (0,0)
-	worldW   float32
-	worldH   float32
+	count   int
+	cols    int
+	rows    int
+	pitchX  float32
+	pitchY  float32
+	originX float32 // world X of cell (0,0) top-left so wall centers at (0,0)
+	originY float32 // world Y of cell (0,0) top-left so wall centers at (0,0)
+	worldW  float32
+	worldH  float32
 }
 
 func computeGalleryLattice(n int) galleryLatticeLayout {
@@ -80,42 +81,33 @@ func computeGalleryLattice(n int) galleryLatticeLayout {
 	case n <= 6:
 		cols = 3
 	default:
-		cols = int(math.Ceil(math.Sqrt(float64(n) * 1.45)))
-		if cols < 3 {
-			cols = 3
+		cols = int(math.Round(math.Sqrt(float64(n) * 1.25)))
+		if cols < 4 {
+			cols = 4
 		}
 	}
 	rows := (n + cols - 1) / cols
-	pitchX := galleryCanvasTileW + galleryCanvasGap
-	pitchY := galleryCanvasTileH + galleryCanvasGap
-	staggerX := float32(0)
-	if rows > 1 {
-		staggerX = pitchX * galleryCanvasStaggerRatio
-	}
-	worldW := float32(cols-1)*pitchX + galleryCanvasTileW + staggerX
-	worldH := float32(rows-1)*pitchY + galleryCanvasTileH
+	pitchX := galleryCanvasTileW
+	pitchY := galleryCanvasTileH
+	worldW := float32(cols) * pitchX
+	worldH := float32(rows) * pitchY
 	return galleryLatticeLayout{
-		count:    n,
-		cols:     cols,
-		rows:     rows,
-		pitchX:   pitchX,
-		pitchY:   pitchY,
-		staggerX: staggerX,
-		originX:  -worldW / 2,
-		originY:  -worldH / 2,
-		worldW:   worldW,
-		worldH:   worldH,
+		count:   n,
+		cols:    cols,
+		rows:    rows,
+		pitchX:  pitchX,
+		pitchY:  pitchY,
+		originX: -worldW / 2,
+		originY: -worldH / 2,
+		worldW:  worldW,
+		worldH:  worldH,
 	}
 }
 
-// cellWorldRect returns the world-space rectangle for lattice cell (row, col).
+// cellWorldRect returns the flush world-space rectangle for cell (row, col).
 func (l galleryLatticeLayout) cellWorldRect(row, col int) ui.Rect {
-	shift := float32(0)
-	if row%2 == 1 {
-		shift = l.staggerX
-	}
 	return ui.Rect{
-		X: l.originX + float32(col)*l.pitchX + shift,
+		X: l.originX + float32(col)*l.pitchX,
 		Y: l.originY + float32(row)*l.pitchY,
 		W: galleryCanvasTileW,
 		H: galleryCanvasTileH,
@@ -129,12 +121,11 @@ func (l galleryLatticeLayout) cameraBounds(viewW, viewH, zoom float32) (minX, ma
 	if zoom <= 0 {
 		zoom = 1
 	}
-	// Reserve top headroom for the floating header HUD and modest margins on other sides.
-	hudTop := float32(152)
-	hudBottom := float32(76)
-	sideMargin := float32(64)
+	// Reserve top headroom for the floating header HUD; side edges run flush edge-to-edge.
+	hudTop := float32(148)
+	hudBottom := float32(64)
 
-	visW := max(viewW-2*sideMargin, 160) / zoom
+	visW := max(viewW, 160) / zoom
 	visH := max(viewH-hudTop-hudBottom, 160) / zoom
 	// Visual center offset caused by asymmetric top/bottom HUD clearance.
 	hudCenterOffsetY := (hudTop - hudBottom) / (2 * zoom)
@@ -307,19 +298,11 @@ func (s *Shell) galleryInfiniteCanvas(c *ui.Context, viewW, viewH float32, opaqu
 			if ev.Button != 0 {
 				return false
 			}
-			// Direct click on top-right favorite heart toggles favorite without dragging or opening viewer.
-			if tileAsset != nil && !s.Model.Gallery.SelectMode && !tileAsset.Invalid &&
-				heartRect.W > 0 && ev.X >= heartRect.X && ev.X <= heartRect.X+heartRect.W &&
-				ev.Y >= heartRect.Y && ev.Y <= heartRect.Y+heartRect.H {
-				s.Dispatch(state.Event{
-					Kind:    state.GalleryToggleFavorite,
-					Enabled: !tileAsset.Favorited,
-					Gallery: state.GalleryPayload{AssetID: tileAsset.ID},
-				})
-				return true
-			}
 			st.dragging = true
 			st.dragMoved = false
+			st.dragOnHeart = tileAsset != nil && !s.Model.Gallery.SelectMode && !tileAsset.Invalid &&
+				heartRect.W > 0 && ev.X >= heartRect.X && ev.X <= heartRect.X+heartRect.W &&
+				ev.Y >= heartRect.Y && ev.Y <= heartRect.Y+heartRect.H
 			st.velX, st.velY = 0, 0
 			st.dragStartX, st.dragStartY = cx, cy
 			st.dragLastX, st.dragLastY = cx, cy
@@ -370,9 +353,11 @@ func (s *Shell) galleryInfiniteCanvas(c *ui.Context, viewW, viewH float32, opaqu
 				return false
 			}
 			wasMoved := st.dragMoved
+			wasOnHeart := st.dragOnHeart
 			targetID := st.dragAssetID
 			st.dragging = false
 			st.dragMoved = false
+			st.dragOnHeart = false
 			st.dragAssetID = 0
 			if ev.Canceled {
 				st.velX, st.velY = 0, 0
@@ -380,7 +365,15 @@ func (s *Shell) galleryInfiniteCanvas(c *ui.Context, viewW, viewH float32, opaqu
 			}
 			if !wasMoved && targetID > 0 {
 				st.velX, st.velY = 0, 0
-				if s.Model.Gallery.SelectMode {
+				if wasOnHeart {
+					if a, ok := s.galleryAssetByID(targetID); ok && !a.Invalid {
+						s.Dispatch(state.Event{
+							Kind:    state.GalleryToggleFavorite,
+							Enabled: !a.Favorited,
+							Gallery: state.GalleryPayload{AssetID: targetID},
+						})
+					}
+				} else if s.Model.Gallery.SelectMode {
 					s.toggleGallerySelect(targetID)
 				} else {
 					s.gallery.viewer.reset(targetID)
@@ -404,7 +397,7 @@ func (s *Shell) galleryInfiniteCanvas(c *ui.Context, viewW, viewH float32, opaqu
 
 	rowStart := max(0, int(math.Floor(float64((visMinY-layout.originY)/layout.pitchY)))-1)
 	rowEnd := min(layout.rows-1, int(math.Ceil(float64((visMaxY-layout.originY)/layout.pitchY)))+1)
-	colStart := max(0, int(math.Floor(float64((visMinX-layout.originX-layout.staggerX)/layout.pitchX)))-1)
+	colStart := max(0, int(math.Floor(float64((visMinX-layout.originX)/layout.pitchX)))-1)
 	colEnd := min(layout.cols-1, int(math.Ceil(float64((visMaxX-layout.originX)/layout.pitchX)))+1)
 
 	thumbEdge := galleryThumbEdge(s.gallery.dpiScale * max(st.zoom, 1))
@@ -450,10 +443,13 @@ func (s *Shell) galleryInfiniteCanvas(c *ui.Context, viewW, viewH float32, opaqu
 					continue
 				}
 				wr := layout.cellWorldRect(row, col)
-				sx := viewW/2 + (wr.X-st.camX)*st.zoom
-				sy := viewH/2 + (wr.Y-st.camY)*st.zoom
-				sw := wr.W * st.zoom
-				sh := wr.H * st.zoom
+				// Snap both edges to integer DIPs so flush adjacent tiles never show subpixel hair cracks.
+				sx := float32(math.Round(float64(viewW/2 + (wr.X-st.camX)*st.zoom)))
+				sy := float32(math.Round(float64(viewH/2 + (wr.Y-st.camY)*st.zoom)))
+				sx1 := float32(math.Round(float64(viewW/2 + (wr.X+wr.W-st.camX)*st.zoom)))
+				sy1 := float32(math.Round(float64(viewH/2 + (wr.Y+wr.H-st.camY)*st.zoom)))
+				sw := max(sx1-sx, 1)
+				sh := max(sy1-sy, 1)
 				if sx+sw < -40 || sx > viewW+40 || sy+sh < -40 || sy > viewH+40 {
 					// Prefetch just outside viewport for silky panning.
 					s.prefetchGalleryThumb(assets[idx], thumbEdge)
@@ -477,15 +473,15 @@ func (s *Shell) galleryCanvasTile(
 	selected := s.gallery.selected[asset.ID]
 	focused := s.Model.Gallery.FocusedID == asset.ID
 	label := galleryAssetAccessibleLabel(asset)
-	radius := clampFloat32(12*s.gallery.canvas.zoom, 6, 16)
 	heartSize := float32(28)
 	heartRect := ui.Rect{X: sw - heartSize - 8, Y: 8, W: heartSize, H: heartSize}
 
+	// Flush seamless contact-sheet tile: sharp 90° corners, zero gap, zero shadow.
 	tile := ui.Box(c.Key(fmt.Sprintf("gallery-canvas-tile-%d", asset.ID))).
 		Absolute().Left(sx).Top(sy).Size(sw, sh).
-		Radius(radius).Clip().
+		Clip().
 		Role(ui.RoleButton).Label(label).Tooltip(label).
-		Background(ui.RGBA(14, 16, 22, .92))
+		Background(ui.RGBA(12, 13, 18, 1))
 	if opaque {
 		tile.Background(s.theme.Surface)
 	}
@@ -500,14 +496,15 @@ func (s *Shell) galleryCanvasTile(
 		tile.Cursor(ui.CursorPointer)
 	}
 
-	// Exhibition framing: calm hairline at rest, crisp accent halo on hover/select.
+	bmp := s.galleryThumb(asset, thumbEdge)
 	switch {
 	case selected:
-		tile.Border(2, tone).Shadow(0, 12, 32, 0, tone.Alpha(.24))
+		tile.Border(2, tone)
 	case hovered || focused:
-		tile.Border(1.5, tone.Alpha(.82)).Shadow(0, 16, 36, 0, ui.RGBA(0, 0, 0, .58))
-	default:
-		tile.Border(1, ui.RGBA(255, 255, 255, .08)).Shadow(0, 10, 26, 0, ui.RGBA(0, 0, 0, .42))
+		tile.Border(2, tone.Alpha(.88))
+	case bmp == nil:
+		// Keep placeholder tiles subtly legible against adjacent frames.
+		tile.Border(1, ui.RGBA(255, 255, 255, .06))
 	}
 
 	assetCopy := asset
@@ -516,10 +513,10 @@ func (s *Shell) galleryCanvasTile(
 	}).ContextMenu(func(m *ui.Menu) {
 		s.galleryAssetContextMenu(m, assetCopy)
 	}).Children(func() {
-		bmp := s.galleryThumb(asset, thumbEdge)
 		if bmp != nil {
+			// Full-bleed edge-to-edge cover on the seamless wall; clicking opens the uncropped viewer.
 			ui.Image(c.Key(fmt.Sprintf("gallery-cimg-%d", asset.ID)), bmp).
-				Absolute().Left(0).Right(0).Top(0).Bottom(0).Fit(ui.Contain).Label(asset.FileName).PassThrough()
+				Absolute().Left(0).Right(0).Top(0).Bottom(0).Fit(ui.Cover).Label(asset.FileName).PassThrough()
 		} else if asset.IsVideo() && asset.Available && !asset.Invalid {
 			ui.Column(c).Fill().Justify(ui.Center).AlignItems(ui.Center).Gap(6).PassThrough().Children(func() {
 				ui.Box(c).TextColor(tone.Alpha(.85)).Children(func() { glyph(c, "\uE714", 26) })
