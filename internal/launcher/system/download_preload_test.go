@@ -226,3 +226,177 @@ func TestSystemPreloadStagedAndRestoreRetainDedicatedCache(t *testing.T) {
 		t.Fatal("preload changed installed bytes")
 	}
 }
+
+func TestSystemPreloadOfferSnapshotKeepsFormalVersionWhenPreloadQueryFails(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/clientRes/PC_150/Version/Windows/config.xml":
+			fmt.Fprint(w, `<config><ResVersion>1.2.0</ResVersion><PreReleaseStatus>start</PreReleaseStatus><PreReleaseBranch>PC_160</PreReleaseBranch><PreReleaseVersion>1.3.0</PreReleaseVersion><Extra><listHash>d41d8cd98f00b204e9800998ecf8427e</listHash></Extra></config>`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	b := NewGameDownloadBackend(dbtest.Open(t), t.TempDir(), nil, srv.Client(), "test")
+	b.roots = []string{srv.URL + "/clientRes"}
+	b.free = func(string) (int64, error) { return 8 << 30, nil }
+	b.processes = func(context.Context) (downloadProcesses, error) { return downloadProcesses{}, nil }
+	root := preloadSystemBase(t, b)
+	latest, _, offered, err := b.preloadOfferSnapshot(context.Background(), root)
+	if err != nil || latest != "1.2.0" || offered {
+		t.Fatalf("offer snapshot lost formal update when preload 404d: latest=%q offered=%v err=%v", latest, offered, err)
+	}
+}
+
+func TestSystemPreloadReconcileReportsFailureAndMissingWorkDirAsStale(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	b := NewGameDownloadBackend(dbtest.Open(t), t.TempDir(), nil, srv.Client(), "test")
+	b.roots = []string{srv.URL + "/clientRes"}
+	b.free = func(string) (int64, error) { return 8 << 30, nil }
+	b.processes = func(context.Context) (downloadProcesses, error) { return downloadProcesses{}, nil }
+	root := preloadSystemBase(t, b)
+
+	// No preload record in DB -> reconcile must report PreloadStale, never hang on PreloadChecked.
+	req := launcher.DownloadRequest{Root: root, Kind: state.DownloadPreload, Effect: state.Effect{Kind: state.EffectPreloadCheck, Enabled: true}}
+	if ev := b.HandleDownload(ctx, req, nil); ev.Kind != state.PreloadStale {
+		t.Fatalf("missing preload record returned %+v, want PreloadStale", ev)
+	}
+
+	// Record exists, CDN errors -> reconcile must emit PreloadFailed (never silent PreloadChecked).
+	d := preloadSystemDelivery(t, srv.URL+"/clientRes")
+	_, snapshot, err := downloadPreloadEvidence(d, b.roots, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned, err := gameinstall.StartPreload(ctx, gameinstall.PreloadInput{
+		Advertisement: gameres.Config{PreReleaseStatus: "start", PreReleaseBranch: d.Branch, PreReleaseVersion: d.Config.ResVersion},
+		Snapshot:      snapshot, CurrentBranch: "PC_150", CurrentVersion: "1.0.0", BaselineTrusted: true,
+		Budget: gameres.BudgetInput{VolumeFreeBytes: 8 << 30, CacheFreeBytes: 8 << 30}, Now: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := planned.Record
+	r.State = gameinstall.PreloadWaitingRelease
+	store, err := b.preloadStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	if ev := b.HandleDownload(ctx, req, nil); ev.Kind != state.PreloadFailed {
+		t.Fatalf("CDN error during reconcile returned %+v, want PreloadFailed", ev)
+	}
+}
+
+func preloadSystemVersionedDelivery(t *testing.T, root, version string, payload []byte) gameDelivery {
+	t.Helper()
+	manifest := []byte(fmt.Sprintf(`<ResList version="%s" tag="baseTag"><Res filename="HT/Content/Paks/a.pak" md5="%x" filesize="%d"/></ResList>`, version, md5.Sum(payload), len(payload)))
+	cfgData := []byte(fmt.Sprintf(`<config><ResVersion>%s</ResVersion><Extra><listHash>%x</listHash></Extra></config>`, version, md5.Sum(manifest)))
+	cfg, err := gameres.ParseConfig(cfgData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	xml := gameres.ManifestXML{ResList: manifest}
+	m, g, err := gameres.ParseDelivery(cfg, xml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return gameDelivery{Config: cfg, Manifest: m, Graph: g, XML: xml, Branch: "PC_160", ConfigResponse: downloadResponse{Data: cfgData, Root: root, URL: root + "/observed-preload/config.xml"}}
+}
+
+func preloadSystemVersionedBase(t *testing.T, b *GameDownloadBackend, branch, version string, payload []byte) (string, gameinstall.InstallRecord) {
+	t.Helper()
+	root := t.TempDir()
+	pe := make([]byte, 90)
+	copy(pe, "MZ")
+	binary.LittleEndian.PutUint32(pe[60:64], 64)
+	copy(pe[64:68], "PE\x00\x00")
+	binary.LittleEndian.PutUint16(pe[68:70], 0x8664)
+	binary.LittleEndian.PutUint16(pe[84:86], 2)
+	binary.LittleEndian.PutUint16(pe[86:88], 2)
+	binary.LittleEndian.PutUint16(pe[88:90], 0x20b)
+	preloadSystemPut(t, root, "Client/WindowsNoEditor/HT/Binaries/Win64/HTGame.exe", pe)
+	preloadSystemPut(t, root, "Client/WindowsNoEditor/PatcherConfig/Patch_Windows.json", []byte(`{"appId":"1289","branchName":"`+branch+`"}`))
+	preloadSystemPut(t, root, "Client/WindowsNoEditor/HT/Content/Paks/a.pak", payload)
+	manifest := []byte(fmt.Sprintf(`<ResList version="%s" tag="baseTag"><Res filename="HT/Content/Paks/a.pak" md5="%x" filesize="%d"/></ResList>`, version, md5.Sum(payload), len(payload)))
+	preloadSystemPut(t, root, "NTELauncher/UserData/Patcher/PatcherSDK/ResList.xml", manifest)
+	preloadSystemPut(t, root, "NTELauncher/UserData/Patcher/PatcherSDK/config.xml", []byte(fmt.Sprintf(`<config><ResVersion>%s</ResVersion><Extra><listHash>%x</listHash></Extra></config>`, version, md5.Sum(manifest))))
+	s, err := b.installStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.AdoptQuick(context.Background(), root, nil); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := s.VerifyInstallation(context.Background(), root, nil); err != nil || len(res.Mismatches) != 0 {
+		t.Fatalf("verify fixture: %+v %v", res, err)
+	}
+	rec, err := s.ReadInstall(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root, rec
+}
+
+// A pre-release endpoint outage must not withhold an already confirmed formal
+// hotfix while a preload of the next major version is still staged.
+func TestSystemPreloadReconcileKeepsConfirmedFormalWhenPreloadQueryFails(t *testing.T) {
+	ctx := context.Background()
+	oldPak, newPak := []byte("old-1417"), []byte("new-150")
+	formalManifest := []byte(fmt.Sprintf(`<ResList version="1.4.18" tag="baseTag"><Res filename="HT/Content/Paks/a.pak" md5="%x" filesize="%d"/></ResList>`, md5.Sum(oldPak), len(oldPak)))
+	formalZip := preloadSyntheticArchive(t, formalManifest)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/clientRes/PC_150/Version/Windows/config.xml":
+			fmt.Fprintf(w, `<config><ResVersion>1.4.18</ResVersion><Extra><listHash>%x</listHash></Extra></config>`, md5.Sum(formalManifest))
+		case "/clientRes/PC_150/Version/Windows/version/1.4.18/ResList.bin.zip":
+			w.Write(formalZip)
+		default:
+			http.Error(w, "upstream unavailable", http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+	b := NewGameDownloadBackend(dbtest.Open(t), t.TempDir(), nil, srv.Client(), "test")
+	b.roots = []string{srv.URL + "/clientRes"}
+	b.free = func(string) (int64, error) { return 8 << 30, nil }
+	b.processes = func(context.Context) (downloadProcesses, error) { return downloadProcesses{}, nil }
+	root, _ := preloadSystemVersionedBase(t, b, "PC_150", "1.4.17", oldPak)
+	staged := preloadSystemVersionedDelivery(t, srv.URL+"/clientRes", "1.5.0", newPak)
+	_, snapshot, err := downloadPreloadEvidence(staged, b.roots, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned, err := gameinstall.StartPreload(ctx, gameinstall.PreloadInput{
+		Advertisement: gameres.Config{PreReleaseStatus: "start", PreReleaseBranch: staged.Branch, PreReleaseVersion: staged.Config.ResVersion},
+		Snapshot:      snapshot, CurrentBranch: "PC_150", CurrentVersion: "1.4.17", BaselineTrusted: true,
+		Budget: gameres.BudgetInput{VolumeFreeBytes: 8 << 30, CacheFreeBytes: 8 << 30}, Now: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := b.preloadStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagedRecord := planned.Record
+	stagedRecord.State = gameinstall.PreloadWaitingRelease
+	if err = store.Save(ctx, stagedRecord); err != nil {
+		t.Fatal(err)
+	}
+
+	req := launcher.DownloadRequest{Root: root, Kind: state.DownloadPreload, Effect: state.Effect{Kind: state.EffectPreloadCheck, Enabled: true}}
+	event := b.HandleDownload(ctx, req, nil)
+	if event.Kind != state.PreloadChecked || event.Body != "waiting-release" || event.CurrentVersion != "1.4.18" || !event.Focused {
+		t.Fatalf("preload outage withheld the confirmed hotfix: %+v", event)
+	}
+	kept, err := store.Load(ctx, stagedRecord.Branch, stagedRecord.Version)
+	if err != nil || kept.State != gameinstall.PreloadWaitingRelease {
+		t.Fatalf("staged preload was discarded during a transient outage: %+v %v", kept, err)
+	}
+}

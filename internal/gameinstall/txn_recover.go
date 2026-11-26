@@ -228,6 +228,7 @@ func txnValidateJournal(j *txnJournal, root, work string) error {
 	seen := map[string]bool{}
 	parents := map[string]bool{}
 	found := 0
+	branchSwitch := j.Kind == "update" && j.Candidate.Branch != j.Base.Branch
 	for _, e := range j.Files {
 		switch e.Step {
 		case "none", "staged", "backed_up", "placed", "pruned":
@@ -255,7 +256,7 @@ func txnValidateJournal(j *txnJournal, root, work string) error {
 					return ErrInvalidState
 				}
 				found++
-			} else if j.Kind != "install" || !txnBootstrapPath(e.Path) {
+			} else if (j.Kind != "install" && !branchSwitch) || !txnBootstrapPath(e.Path) {
 				return ErrInvalidState
 			}
 		}

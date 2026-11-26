@@ -203,7 +203,8 @@ func (s *Store) Commit(ctx context.Context, in TxnInput) (RecoveryStatus, error)
 	if fresh && in.Candidate.Mode != "fresh" {
 		return RecoveryStatus{}, errors.New("new installation requires fresh mode")
 	}
-	if !fresh && len(in.Bootstrap) > 0 {
+	branchSwitch := !fresh && in.Candidate.Branch != base.Branch
+	if !fresh && !branchSwitch && len(in.Bootstrap) > 0 {
 		return RecoveryStatus{}, ErrTargetExists
 	}
 	if !fresh && in.TxnID == base.TxnID {
@@ -346,7 +347,7 @@ func txnValidateInput(in TxnInput) error {
 			if f.Path != t.Path || f.MD5 != t.MD5 || f.Size != t.Size {
 				return ErrInvalidState
 			}
-		} else if !txnBootstrapPath(f.Path) || in.Candidate.Mode != "fresh" {
+		} else if !txnBootstrapPath(f.Path) {
 			return ErrUnsafeTarget
 		}
 	}
@@ -416,10 +417,12 @@ func (s *Store) txnPrepare(ctx context.Context, r *txnRoots, j *txnJournal, in T
 					return fmt.Errorf("baseline changed: %s", f.Path)
 				}
 				e.Old = &actual
-			} else if actual != t {
-				return fmt.Errorf("%w: %s", ErrTargetExists, f.Path)
-			} else {
+			} else if actual == t {
 				e.Reuse = true
+			} else if txnBootstrapPath(f.Path) && j.Kind == "update" && j.Candidate.Branch != j.Base.Branch {
+				e.Old = &actual
+			} else {
+				return fmt.Errorf("%w: %s", ErrTargetExists, f.Path)
 			}
 		} else if owned && !in.Repair {
 			return fmt.Errorf("baseline missing: %s", f.Path)

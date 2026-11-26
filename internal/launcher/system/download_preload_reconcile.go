@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"os"
 	"time"
 
 	"github.com/nerv-base/Oddward/internal/gameinstall"
@@ -28,7 +29,7 @@ func (b *GameDownloadBackend) preloadReconcileLocked(ctx context.Context, root s
 	if b.preloadQuery == nil {
 		return gameinstall.ReconcileResult{State: gameinstall.PreloadStale, Reason: "unverified"}, nil, nil
 	}
-	formal, err := b.metadata().delivery(ctx, base.Branch, "")
+	formal, err := b.metadata().formalDelivery(ctx, base.Branch)
 	if err != nil {
 		if errors.Is(err, errDownloadNotFound) {
 			return gameinstall.ReconcileResult{State: gameinstall.PreloadStale, Reason: "expired"}, nil, nil
@@ -43,17 +44,6 @@ func (b *GameDownloadBackend) preloadReconcileLocked(ctx context.Context, root s
 	if err = store.Save(ctx, r); err != nil {
 		return gameinstall.ReconcileResult{}, nil, err
 	}
-	pre, err := b.preloadQuery(ctx, r.Branch, r.Version)
-	if err != nil {
-		if errors.Is(err, errDownloadNotFound) {
-			return gameinstall.ReconcileResult{State: gameinstall.PreloadStale, Reason: "expired"}, nil, nil
-		}
-		return gameinstall.ReconcileResult{}, nil, err
-	}
-	_, preSnapshot, err := downloadPreloadEvidence(pre, b.metadata().roots, true)
-	if err != nil {
-		return gameinstall.ReconcileResult{}, nil, err
-	}
 	key, err := gameinstall.InstallKey(root)
 	if err != nil {
 		return gameinstall.ReconcileResult{}, nil, err
@@ -63,7 +53,27 @@ func (b *GameDownloadBackend) preloadReconcileLocked(ctx context.Context, root s
 		return gameinstall.ReconcileResult{}, nil, err
 	}
 	p := &downloadPlan{root: root, key: key, id: hex.EncodeToString(nonce[:]), kind: state.DownloadPreload, delivery: formal, base: base, preload: &r, workRoot: preloadSystemWork(root, r)}
+	pre, err := b.preloadQuery(ctx, r.Branch, r.Version)
+	if err != nil {
+		if errors.Is(err, errDownloadNotFound) {
+			return gameinstall.ReconcileResult{State: gameinstall.PreloadStale, Reason: "expired"}, nil, nil
+		}
+		// A pre-release endpoint outage must not withhold an already confirmed
+		// intermediate formal update. The existing staged preload is kept and
+		// the caller falls back to the ordinary update path.
+		if downloadVersionNewer(formal.Config.ResVersion, base.Version) && (formal.Branch != r.Branch || downloadVersionNewer(r.Version, formal.Config.ResVersion)) {
+			return gameinstall.ReconcileResult{State: gameinstall.PreloadWaitingRelease, Reason: "waiting-release"}, p, nil
+		}
+		return gameinstall.ReconcileResult{}, nil, err
+	}
+	_, preSnapshot, err := downloadPreloadEvidence(pre, b.metadata().roots, true)
+	if err != nil {
+		return gameinstall.ReconcileResult{}, nil, err
+	}
 	if _, err = downloadDirectory(p.workRoot, false); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return gameinstall.ReconcileResult{State: gameinstall.PreloadStale, Reason: "expired"}, nil, nil
+		}
 		return gameinstall.ReconcileResult{}, nil, err
 	}
 	engine, err := b.newDownloadEngine(ctx, p, nil)
@@ -131,22 +141,39 @@ func (b *GameDownloadBackend) preloadReconcileLocked(ctx context.Context, root s
 }
 
 func (b *GameDownloadBackend) preloadReconcile(ctx context.Context, req launcher.DownloadRequest, event state.Event, report func(state.Event)) (state.Event, error) {
-	event.Kind = state.PreloadChecked
-	r, err := b.preloadLatest(ctx, req.Root)
-	if err != nil {
+	fail := func(err error) (state.Event, error) {
+		event.Kind = state.PreloadFailed
+		if errors.Is(err, gameinstall.ErrRecoveryRequired) {
+			event.Kind = state.DownloadRecoveryNeeded
+		}
 		return event, err
+	}
+	r, err := b.preloadLatest(ctx, req.Root)
+	if errors.Is(err, os.ErrNotExist) {
+		event.Kind = state.PreloadStale
+		event.Body = "stale"
+		return event, nil
+	}
+	if err != nil {
+		return fail(err)
 	}
 	lease, err := preloadSystemRootLease(req.Root)
 	if err != nil {
-		return event, err
+		return fail(err)
 	}
 	defer lease.Close()
 	result, p, err := b.preloadReconcileLocked(ctx, req.Root, r)
 	if err != nil {
-		return event, err
+		return fail(err)
 	}
+	event.Kind = state.PreloadChecked
 	event.Message, event.Body = r.Version, result.Reason
 	switch result.State {
+	case gameinstall.PreloadWaitingRelease:
+		if p != nil {
+			event.CurrentVersion = p.delivery.Config.ResVersion
+			event.Focused = downloadVersionNewer(p.delivery.Config.ResVersion, p.base.Version)
+		}
 	case gameinstall.PreloadApplicable:
 		if result.CanApply {
 			b.putPlan(req.Root, p)
@@ -160,20 +187,20 @@ func (b *GameDownloadBackend) preloadReconcile(ctx context.Context, req launcher
 	case gameinstall.PreloadStale:
 		store, e := b.preloadStore(req.Root)
 		if e != nil {
-			return event, e
+			return fail(e)
 		}
 		r, e = store.Load(ctx, r.Branch, r.Version)
 		if e != nil {
-			return event, e
+			return fail(e)
 		}
 		r.State = gameinstall.PreloadStale
 		r.UpdatedAt = time.Now().UTC()
 		if e = store.Save(ctx, r); e != nil {
-			return event, e
+			return fail(e)
 		}
 		event.Kind = state.PreloadStale
 	case gameinstall.PreloadRecoveryRequired:
-		return event, gameinstall.ErrRecoveryRequired
+		return fail(gameinstall.ErrRecoveryRequired)
 	}
 	return event, nil
 }

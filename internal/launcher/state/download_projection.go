@@ -104,9 +104,11 @@ func PresentDownload(m Model) DownloadPresentation {
 	p.CanCancel = downloadUnfinished(d) && !downloadMutation(d) && d.Phase != DownloadRecoveryRequired && !d.cancelPending
 	p.CanVerify = m.Managed.Root != "" && !downloadUnfinished(d) && (!m.NormalMode || !ManagedBusy(m.Managed.Phase) && !ManagedActive(m.Managed.Phase))
 	p.CanCheckPreload = m.Managed.Root != "" && !downloadUnfinished(d) && networkOK && downloadCanDiscoverPreload(d)
-	p.CanReconcile = m.Managed.Root != "" && !downloadBusy(d) && (d.Preload == PreloadStateWaitingRelease || d.Preload == PreloadStateStaged || d.Preload == PreloadStateStale)
-	p.CanDiscard = !downloadBusy(d) && d.Preload != PreloadStateUnavailable && d.Preload != PreloadStateApplying && d.Preload != PreloadStateRecoveryRequired
-	p.CanApply = d.Preload == PreloadStateApplicable && !downloadBusy(d) && DownloadWriteBlocked(m) == ""
+	p.CanReconcile = m.Managed.Root != "" && !downloadUnfinished(d) && (d.Preload == PreloadStateWaitingRelease || d.Preload == PreloadStateStaged || d.Preload == PreloadStateStale)
+	// Discarding only removes the staged preload, but an unfinished ordinary task
+	// still owns the plan and work tree it would clear.
+	p.CanDiscard = !downloadUnfinished(d) && d.Preload != PreloadStateUnavailable && d.Preload != PreloadStateApplying && d.Preload != PreloadStateRecoveryRequired
+	p.CanApply = d.Preload == PreloadStateApplicable && !downloadUnfinished(d) && DownloadWriteBlocked(m) == ""
 	p.CanRecover = d.Phase == DownloadRecoveryRequired && d.operation != downloadOperationRecover
 	if d.Note != "" {
 		p.NextAction = DownloadNoteText(d.Note)
@@ -121,8 +123,11 @@ func PresentDownload(m Model) DownloadPresentation {
 		p.NextAction = "请完成上次更新；无法恢复时请联系维护者"
 		p.CanConfirm, p.CanPause, p.CanResume, p.CanCancel, p.CanVerify, p.CanApply = false, false, false, false, false, false
 	}
+	if d.Preload == PreloadStateReconcile {
+		p.StageText = "正在核对正式版本"
+	}
 	if d.Preload == PreloadStateWaitingRelease {
-		p.StageText = "预下载已完成，等待正式发布"
+		p.StageText = "预下载已完成，更新时自动使用"
 	}
 	if d.Preload == PreloadStateApplicable {
 		p.StageText = "预下载已就绪，可以应用"

@@ -19,6 +19,7 @@ func TestResourceURLs(t *testing.T) {
 		want string
 	}{
 		{"config", func() (string, error) { return ConfigURL(base, branch) }, "resource/prefix/PC_preview-1/Version/Windows/config.xml"},
+		{"version config", func() (string, error) { return VersionConfigURL(base, branch, version) }, "resource/prefix/PC_preview-1/Version/Windows/version/2.4.1/config.xml"},
 		{"manifest", func() (string, error) { return ManifestURL(base, branch, version) }, "resource/prefix/PC_preview-1/Version/Windows/version/2.4.1/ResList.bin.zip"},
 		{"diff", func() (string, error) { return DiffURL(base, branch, version) }, "resource/prefix/PC_preview-1/Version/Windows/version/2.4.1/lastdiff.bin"},
 		{"CAS", func() (string, error) { return CASURL(base, branch, object) }, "resource/prefix/PC_preview-1/Res/f/f23456789abcdef0123456789abcdef0.68719476736"},
@@ -38,6 +39,12 @@ func TestResourceURLsRejectUnsafeComponents(t *testing.T) {
 		t.Run(component, func(t *testing.T) {
 			if got, err := ConfigURL(base, component); got != "" || !errors.Is(err, ErrPathUnsafe) {
 				t.Fatalf("ConfigURL() = %q, %v; want %v", got, err, ErrPathUnsafe)
+			}
+			if got, err := VersionConfigURL(base, component, "2.4.1"); got != "" || !errors.Is(err, ErrPathUnsafe) {
+				t.Fatalf("VersionConfigURL(branch) = %q, %v; want %v", got, err, ErrPathUnsafe)
+			}
+			if got, err := VersionConfigURL(base, "preview", component); got != "" || !errors.Is(err, ErrPathUnsafe) {
+				t.Fatalf("VersionConfigURL(version) = %q, %v; want %v", got, err, ErrPathUnsafe)
 			}
 			if got, err := ManifestURL(base, "preview", component); got != "" || !errors.Is(err, ErrPathUnsafe) {
 				t.Fatalf("ManifestURL() = %q, %v; want %v", got, err, ErrPathUnsafe)

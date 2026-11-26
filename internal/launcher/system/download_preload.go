@@ -69,7 +69,7 @@ func (b *GameDownloadBackend) preloadOfferSnapshot(ctx context.Context, root str
 	if _, err = downloadDirectory(filepath.Join(b.StateRoot, "installs"), false); err != nil {
 		return "", "", false, err
 	}
-	input, _, _, err := b.preloadDiscovery(ctx, root)
+	input, _, _, err := b.preloadDiscoveryMode(ctx, root, true)
 	if err != nil {
 		return "", "", false, err
 	}
@@ -81,11 +81,15 @@ func (b *GameDownloadBackend) preloadOfferSnapshot(ctx context.Context, root str
 }
 
 func (b *GameDownloadBackend) preloadDiscovery(ctx context.Context, root string) (gameinstall.PreloadInput, gameDelivery, gameinstall.InstallRecord, error) {
+	return b.preloadDiscoveryMode(ctx, root, false)
+}
+
+func (b *GameDownloadBackend) preloadDiscoveryMode(ctx context.Context, root string, tolerateQueryErr bool) (gameinstall.PreloadInput, gameDelivery, gameinstall.InstallRecord, error) {
 	root, base, local, err := b.preloadBase(ctx, root)
 	if err != nil {
 		return gameinstall.PreloadInput{}, gameDelivery{}, base, err
 	}
-	ad, _, err := b.metadata().config(ctx, base.Branch)
+	ad, _, _, err := b.metadata().formalConfig(ctx, base.Branch)
 	if err != nil {
 		return gameinstall.PreloadInput{}, gameDelivery{}, base, err
 	}
@@ -102,18 +106,28 @@ func (b *GameDownloadBackend) preloadDiscovery(ctx context.Context, root string)
 	if ad.PreReleaseStatus != "start" || b.preloadQuery == nil {
 		return input, gameDelivery{}, base, nil
 	}
-	if _, e := gameres.ConfigURL(b.metadata().roots[0], ad.PreReleaseBranch); e != nil || !downloadVersion.MatchString(ad.PreReleaseVersion) {
+	if _, e := gameres.VersionConfigURL(b.metadata().roots[0], ad.PreReleaseBranch, ad.PreReleaseVersion); e != nil || !downloadVersion.MatchString(ad.PreReleaseVersion) {
 		return input, gameDelivery{}, base, nil
 	}
 	d, err := b.preloadQuery(ctx, ad.PreReleaseBranch, ad.PreReleaseVersion)
 	if err != nil {
+		if tolerateQueryErr && ctx.Err() == nil {
+			return input, gameDelivery{}, base, nil
+		}
 		return input, gameDelivery{}, base, err
 	}
 	d, input.Snapshot, err = downloadPreloadEvidence(d, b.metadata().roots, true)
 	if err != nil {
+		if tolerateQueryErr && ctx.Err() == nil {
+			return input, gameDelivery{}, base, nil
+		}
 		return input, gameDelivery{}, base, err
 	}
 	if d.Branch != ad.PreReleaseBranch || d.Config.ResVersion != ad.PreReleaseVersion {
+		if tolerateQueryErr {
+			input.Snapshot = gameinstall.PreloadManifest{}
+			return input, gameDelivery{}, base, nil
+		}
 		return input, gameDelivery{}, base, errDownloadMetadata
 	}
 	return input, d, base, nil
@@ -298,6 +312,13 @@ func (b *GameDownloadBackend) preloadRestore(ctx context.Context, root string) (
 		return r.Version, "stale", nil
 	}
 	if _, err = downloadDirectory(preloadSystemWork(root, r), false); err != nil {
+		// A record can outlive its staging directory (the user or a cleaner
+		// removed it). Reporting an error here would demand recovery on every
+		// startup and block an ordinary hotfix resume, so the preload is simply
+		// stale: it owns no bytes and the next reconcile re-plans from scratch.
+		if errors.Is(err, os.ErrNotExist) {
+			return r.Version, "stale", nil
+		}
 		return r.Version, "stale", err
 	}
 	stage, err := gamedl.Acquire(preloadSystemWork(root, r))
@@ -412,11 +433,27 @@ func (b *GameDownloadBackend) preloadDiscard(ctx context.Context, req launcher.D
 		if e != nil {
 			return event, e
 		}
-		defer stage.Close()
+		defer func() {
+			if stage != nil {
+				_ = stage.Close()
+			}
+		}()
+		var hadRefs bool
+		if err = gameinstall.DiscardPreload(ctx, store, r, func(ctx context.Context) (map[gameres.Object]bool, error) {
+			refs, e := b.preloadReferenceScan(ctx, req.Root, r)
+			hadRefs = len(refs) > 0
+			return refs, e
+		}); err != nil {
+			return event, err
+		}
+		_ = stage.Close()
+		stage = nil
+		if !hadRefs {
+			b.cleanupPreloadWork(req.Root, r)
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return event, err
-	}
-	if err = gameinstall.DiscardPreload(ctx, store, r, func(ctx context.Context) (map[gameres.Object]bool, error) {
+	} else if err = gameinstall.DiscardPreload(ctx, store, r, func(ctx context.Context) (map[gameres.Object]bool, error) {
 		return b.preloadReferenceScan(ctx, req.Root, r)
 	}); err != nil {
 		return event, err
@@ -433,4 +470,49 @@ func (b *GameDownloadBackend) preloadDiscard(ctx context.Context, req launcher.D
 	}
 	event.Kind = state.PreloadDiscarded
 	return event, nil
+}
+
+// cleanupPreloadWork removes one completed or discarded preload's dedicated
+// subtree after its engine and stage lease have closed. The caller holds the
+// root installation lease. Failures are non-fatal maintenance.
+func (b *GameDownloadBackend) cleanupPreloadWork(root string, r gameinstall.PreloadRecord) {
+	if r.Branch == "" || r.Version == "" {
+		return
+	}
+	for _, part := range []string{r.Branch, r.Version} {
+		if strings.ContainsAny(part, `/\`) || part == "." || part == ".." {
+			return
+		}
+		if _, err := gameres.NormalizePath("X/" + part); err != nil {
+			return
+		}
+	}
+	work := preloadSystemWork(root, r)
+	if _, err := downloadDirectory(work, false); err != nil {
+		return
+	}
+	safe := true
+	_ = filepath.WalkDir(work, func(_ string, d os.DirEntry, err error) error {
+		if err != nil {
+			safe = false
+			return err
+		}
+		info, lerr := d.Info()
+		if lerr != nil || downloadReparse(info) {
+			safe = false
+			return gameres.ErrPathUnsafe
+		}
+		return nil
+	})
+	if !safe {
+		return
+	}
+	anchor, err := os.OpenRoot(downloadWork(root))
+	if err != nil {
+		return
+	}
+	defer anchor.Close()
+	_ = anchor.RemoveAll(filepath.Join("preload", r.Branch, r.Version))
+	_ = anchor.Remove(filepath.Join("preload", r.Branch))
+	_ = anchor.Remove("preload")
 }

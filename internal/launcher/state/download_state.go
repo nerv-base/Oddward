@@ -2,7 +2,10 @@
 
 package state
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type DownloadKind uint8
 
@@ -75,6 +78,20 @@ const (
 	PreloadStateFailed
 )
 
+// preloadStateNote maps the backend's restore notes onto the preload state a
+// restart can prove from disk. An unknown note yields PreloadStateUnavailable.
+func preloadStateNote(note string) PreloadState {
+	switch note {
+	case "waiting-release", "staged":
+		return PreloadStateWaitingRelease
+	case "applicable":
+		return PreloadStateApplicable
+	case "stale":
+		return PreloadStateStale
+	}
+	return PreloadStateUnavailable
+}
+
 // DownloadPreferences carries only choices the user can still change.
 // Parallel transfers, cache limits, automatic resume and patch application are
 // fixed engine behavior.
@@ -113,13 +130,16 @@ type DownloadState struct {
 	OfficialRunning, GameRunning                     bool
 	// GameSince is the observation start reported by the backend; zero means
 	// the launcher has not confirmed a running game yet.
-	GameSince                        time.Time
-	AwaitingConfirmation, SpaceShort bool
-	Needed, Free, Suggested          int64
-	operation                        downloadOperation
-	pausePending, cancelPending      bool
-	locateInstall                    bool
-	verifyTask                       bool
+	GameSince                               time.Time
+	AwaitingConfirmation, SpaceShort        bool
+	Needed, Free, Suggested                 int64
+	operation                               downloadOperation
+	pausePending, cancelPending             bool
+	locateInstall                           bool
+	verifyTask                              bool
+	preloadAutoApply, preloadFallbackUpdate bool
+	preloadReconcileAfterStage              bool
+	preloadReconcileLoops                   uint8
 }
 type downloadOperation uint8
 
@@ -458,6 +478,29 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		}
 		return effect(EffectDownloadPlan)
 	}
+	clearPreloadFlow := func() {
+		d.preloadAutoApply = false
+		d.preloadFallbackUpdate = false
+		d.preloadReconcileAfterStage = false
+		d.preloadReconcileLoops = 0
+	}
+	startPreloadReconcile := func(autoApply, fallbackUpdate bool) (Model, []Effect, bool) {
+		d.Request++
+		d.Kind = DownloadPreload
+		d.Preload = PreloadStateReconcile
+		d.operation = downloadOperationReconcile
+		d.preloadAutoApply = autoApply
+		d.preloadFallbackUpdate = fallbackUpdate
+		d.preloadReconcileAfterStage = false
+		d.Downloaded, d.Total, d.PatchBytes, d.Reused, d.Rate, d.ETA = 0, 0, 0, 0, 0, 0
+		d.FilesDone, d.FilesTotal = 0, 0
+		d.Route = RouteUnknown
+		d.FallbackNote = false
+		d.CrossVolume, d.CacheBudget = false, false
+		d.AwaitingConfirmation, d.SpaceShort = false, false
+		d.Error, d.Note = "", ""
+		return m, []Effect{{Kind: EffectPreloadCheck, Token: d.Request, Path: m.Managed.Root, Enabled: true}}, true
+	}
 	beginCommit := func() (Model, []Effect, bool) {
 		if reason := DownloadWriteBlocked(m); reason != "" {
 			d.Note = reason
@@ -476,6 +519,11 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		if m.Overlay == OverlayInstallPath && !e.Enabled || downloadUnfinished(*d) && !downloadCanReplan(*d) || m.Managed.Root == "" || DownloadNetworkBlocked(m) != "" {
 			break
 		}
+		if !e.Enabled && (d.Preload == PreloadStateWaitingRelease || d.Preload == PreloadStateStaged || d.Preload == PreloadStateApplicable || downloadCanReplan(*d) && d.Kind == DownloadPreload && d.preloadAutoApply) {
+			d.preloadReconcileLoops = 0
+			return startPreloadReconcile(true, true)
+		}
+		clearPreloadFlow()
 		kind := DownloadUpdate
 		if e.Enabled {
 			kind = DownloadInstall
@@ -485,6 +533,7 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		if downloadUnfinished(*d) && !downloadCanReplan(*d) || !downloadCanDiscoverPreload(*d) && !(downloadCanReplan(*d) && d.Kind == DownloadPreload) || m.Managed.Root == "" || DownloadNetworkBlocked(m) != "" {
 			break
 		}
+		clearPreloadFlow()
 		d.Request++
 		d.Kind = DownloadPreload
 		d.operation = downloadOperationCheckPreload
@@ -497,16 +546,34 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		}
 		return effect(EffectPreloadCheck)
 	case PreloadChecked:
-		if current && d.operation == downloadOperationReconcile && !e.Enabled && e.Message != "" {
+		if current && d.operation == downloadOperationReconcile && !e.Enabled {
+			// Focused already carries the backend's numeric comparison between the
+			// trusted formal version and the installed one; a mirror that lags must
+			// not be read as evidence that an intermediate hotfix was skipped.
+			if e.Body == "waiting-release" && d.preloadFallbackUpdate && e.Focused {
+				d.operation = downloadOperationNone
+				d.Preload = PreloadStateWaitingRelease
+				clearPreloadFlow()
+				return startPlan(DownloadUpdate)
+			}
 			switch e.Body {
 			case "waiting-release", "disk-short", "game-running", "official-running", "locked":
 				d.operation = downloadOperationNone
 				d.Preload = PreloadStateWaitingRelease
-				d.PreloadVersion = e.Message
-				d.Version = e.Message
+				clearPreloadFlow()
+				if e.Message != "" {
+					d.PreloadVersion = e.Message
+					d.Version = e.Message
+				}
 				d.Phase, d.Stage = DownloadDone, StageIdle
 				d.Note = e.Body
 				d.Error = ""
+			default:
+				d.operation = downloadOperationNone
+				d.Preload = PreloadStateWaitingRelease
+				clearPreloadFlow()
+				d.Phase, d.Stage = DownloadError, StageIdle
+				d.Error = downloadErrorText(e.Message)
 			}
 			break
 		}
@@ -541,11 +608,15 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		if !current || d.operation != downloadOperationPlan && d.operation != downloadOperationReconcile || e.Message == "" || e.Total < 0 || e.Reused < 0 || e.Needed < 0 || e.Free < 0 || e.Suggested < 0 || d.PatchBytes > e.Total {
 			break
 		}
+		fromReconcile := d.operation == downloadOperationReconcile
 		d.Version, d.Total, d.Reused, d.FilesTotal = e.Message, e.Total, e.Reused, e.FilesTotal
 		d.Phase, d.Stage = DownloadPreparing, StagePlanning
 		d.Downloaded, d.FilesDone = 0, 0
 		if d.Kind == DownloadPreload {
 			d.Preload = PreloadStatePlanning
+		}
+		if fromReconcile {
+			d.preloadReconcileAfterStage = true
 		}
 		d.operation = downloadOperationNone
 		d.AwaitingConfirmation = true
@@ -669,13 +740,18 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		}
 		d.cancelPending = false
 		d.operation = downloadOperationNone
+		clearPreloadFlow()
 		d.Phase, d.Stage = DownloadIdle, StageIdle
 		d.Note = "cancelled"
 		if d.Kind == DownloadPreload {
 			d.Preload = PreloadStateUnavailable
 		}
 	case ApplyStarted:
-		if !current || d.Kind == DownloadPreload || d.pausePending || d.cancelPending || d.Phase != DownloadRunning && d.Phase != DownloadVerifying {
+		// A preload reaches apply before its transaction starts (StageApply) and
+		// rebuilds staged patches exactly like an update, so its progress and
+		// fallback notices must be visible until DownloadCommitStart.
+		preloadRebuild := d.Kind == DownloadPreload && d.Phase == DownloadCommitting && d.Stage != StageCommit
+		if !current || d.pausePending || d.cancelPending || d.Phase != DownloadRunning && d.Phase != DownloadVerifying && !preloadRebuild {
 			break
 		}
 		d.Phase, d.Stage = DownloadRebuilding, StageApply
@@ -714,10 +790,12 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		}
 		return beginCommit()
 	case DownloadCommitStart:
-		if !current || d.Phase != DownloadCommitting || DownloadWriteBlocked(m) != "" {
+		// The backend reports this only after it has started the transaction, so a
+		// game or login race observed asynchronously cannot drop the stage receipt.
+		if !current || d.Phase != DownloadCommitting && !(d.Kind == DownloadPreload && d.Phase == DownloadRebuilding) {
 			break
 		}
-		d.Stage = StageCommit
+		d.Phase, d.Stage = DownloadCommitting, StageCommit
 	case DownloadCommitted, PreloadApplied:
 		if !current || d.Phase != DownloadCommitting || e.Message == "" {
 			break
@@ -727,6 +805,7 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		}
 		d.Current, d.Verified, d.Phase, d.Stage = e.Message, true, DownloadDone, StageIdle
 		d.operation = downloadOperationNone
+		clearPreloadFlow()
 		d.Note, d.Error = "", ""
 		d.Rate, d.ETA = 0, 0
 		if e.Kind == PreloadApplied {
@@ -743,11 +822,12 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		d.operation = downloadOperationRecover
 		return m, []Effect{{Kind: EffectRecoverScan, Token: d.Request, Path: m.Managed.Root, Enabled: e.Kind == DownloadRecoverRequest}}, true
 	case DownloadRecoveryNeeded:
-		if !current || d.operation != downloadOperationRecover && d.Phase != DownloadCommitting {
+		if !current || d.operation != downloadOperationRecover && d.Phase != DownloadCommitting && d.Phase != DownloadRebuilding && d.operation != downloadOperationReconcile {
 			break
 		}
 		d.Phase, d.Stage = DownloadRecoveryRequired, StageIdle
 		d.operation = downloadOperationNone
+		clearPreloadFlow()
 		d.Note = "recovery-required"
 		d.Error = downloadErrorText(e.Message)
 		d.Rate, d.ETA = 0, 0
@@ -760,16 +840,7 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		}
 		restored := PreloadStateUnavailable
 		if DownloadKind(e.Index) == DownloadPreload && e.Stage == StageIdle {
-			switch e.Body {
-			case "waiting-release", "staged":
-				restored = PreloadStateWaitingRelease
-			case "applicable":
-				restored = PreloadStateApplicable
-			case "stale":
-				restored = PreloadStateStale
-			default:
-				break
-			}
+			restored = preloadStateNote(e.Body)
 			if restored == PreloadStateUnavailable {
 				break
 			}
@@ -790,6 +861,15 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 			if e.Stage == StageNetwork {
 				d.Preload = PreloadStatePaused
 			}
+		} else if e.Body != "" {
+			// A scan that resumed an ordinary task can still report the preload it
+			// found beside it. Only the preload fields are restored, so the resumed
+			// hotfix keeps its own kind, phase, stage and target version.
+			if note, preloadVersion, ok := strings.Cut(e.Body, ":"); ok && preloadVersion != "" {
+				if preload := preloadStateNote(note); preload != PreloadStateUnavailable {
+					d.Preload, d.PreloadVersion = preload, preloadVersion
+				}
+			}
 		}
 		if e.Stage == StageNetwork && e.Focused {
 			return reduceDownload(m, Event{Kind: DownloadResume})
@@ -806,6 +886,18 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		}
 		if e.CurrentVersion != "" {
 			d.Current, d.Verified = e.CurrentVersion, e.Enabled
+		}
+		// Recovery clears the persisted preload record, so the UI must leave the
+		// recovery state the same way the backend record did.
+		if d.Preload == PreloadStateRecoveryRequired {
+			switch e.Body {
+			case "completed":
+				d.Preload = PreloadStateCompleted
+			case "stale":
+				d.Preload = PreloadStateStale
+			default:
+				d.Preload = PreloadStateUnavailable
+			}
 		}
 	case InstallLocateRequest, InstallAdoptRequest, InstallVerifyRequest:
 		choosingDraft := m.Overlay == OverlayInstallPath && e.Kind == InstallLocateRequest && e.Enabled
@@ -891,23 +983,22 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		d.PreloadVersion = d.Version
 		d.Phase, d.Stage = DownloadDone, StageIdle
 		d.Rate, d.ETA = 0, 0
+		if d.preloadReconcileAfterStage {
+			d.preloadReconcileAfterStage = false
+			if d.preloadReconcileLoops < 2 {
+				d.preloadReconcileLoops++
+				return startPreloadReconcile(d.preloadAutoApply, d.preloadFallbackUpdate)
+			}
+			clearPreloadFlow()
+		}
 	case PreloadReconcileRequest:
-		if downloadBusy(*d) || d.Preload != PreloadStateWaitingRelease && d.Preload != PreloadStateStaged && d.Preload != PreloadStateStale || m.Managed.Root == "" {
+		if downloadUnfinished(*d) || d.Preload != PreloadStateWaitingRelease && d.Preload != PreloadStateStaged && d.Preload != PreloadStateStale || m.Managed.Root == "" {
 			break
 		}
-		d.Request++
-		d.Preload = PreloadStateReconcile
-		d.operation = downloadOperationReconcile
-		d.Downloaded, d.Total, d.PatchBytes, d.Reused, d.Rate, d.ETA = 0, 0, 0, 0, 0, 0
-		d.FilesDone, d.FilesTotal = 0, 0
-		d.Route = RouteUnknown
-		d.FallbackNote = false
-		d.CrossVolume, d.CacheBudget = false, false
-		d.AwaitingConfirmation, d.SpaceShort = false, false
-		d.Error, d.Note = "", ""
-		return m, []Effect{{Kind: EffectPreloadCheck, Token: d.Request, Path: m.Managed.Root, Enabled: true}}, true
+		d.preloadReconcileLoops = 0
+		return startPreloadReconcile(false, false)
 	case PreloadDiscardRequest:
-		if downloadBusy(*d) || d.Preload == PreloadStateUnavailable || d.Preload == PreloadStateApplying || d.Preload == PreloadStateRecoveryRequired {
+		if downloadUnfinished(*d) || d.Preload == PreloadStateUnavailable || d.Preload == PreloadStateApplying || d.Preload == PreloadStateRecoveryRequired {
 			break
 		}
 		d.Request++
@@ -918,18 +1009,39 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 			break
 		}
 		d.operation = downloadOperationNone
+		clearPreloadFlow()
 		d.Preload = PreloadStateUnavailable
 		d.PreloadVersion = ""
-		d.Phase, d.Stage = DownloadIdle, StageIdle
-		d.Version, d.Note, d.Error = "", "", ""
+		d.Note, d.Error = "", ""
+		// Discarding touches only the preload record; a paused or finished hotfix
+		// task keeps its own phase and version.
+		if d.Kind == DownloadPreload {
+			d.Phase, d.Stage = DownloadIdle, StageIdle
+			d.Version = ""
+		}
 	case PreloadAvailableToApply:
 		if !current || d.Kind != DownloadPreload || d.Preload != PreloadStateWaitingRelease && d.Preload != PreloadStateReconcile {
 			break
 		}
 		d.Preload = PreloadStateApplicable
 		d.operation = downloadOperationNone
+		autoApply := d.preloadAutoApply
+		clearPreloadFlow()
+		if autoApply {
+			if reason := DownloadWriteBlocked(m); reason != "" {
+				d.Note = reason
+				break
+			}
+			d.Request++
+			d.Preload = PreloadStateApplying
+			// The transaction has not started yet: the backend still rebuilds
+			// staged patches, and only DownloadCommitStart enters StageCommit.
+			d.Phase, d.Stage = DownloadCommitting, StageApply
+			d.Error, d.Note = "", ""
+			return effect(EffectPreloadApply)
+		}
 	case PreloadApplyRequest:
-		if d.Preload != PreloadStateApplicable || downloadBusy(*d) {
+		if d.Preload != PreloadStateApplicable || downloadUnfinished(*d) {
 			break
 		}
 		if reason := DownloadWriteBlocked(m); reason != "" {
@@ -938,18 +1050,27 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		}
 		d.Request++
 		d.Preload = PreloadStateApplying
-		d.Phase, d.Stage = DownloadCommitting, StageCommit
+		d.Phase, d.Stage = DownloadCommitting, StageApply
 		d.Error, d.Note = "", ""
 		return effect(EffectPreloadApply)
 	case PreloadStale:
-		if !current || d.Kind != DownloadPreload || d.Preload == PreloadStateApplying || d.Preload == PreloadStateUnavailable {
+		// Applying only owns the record once the transaction has started. Before
+		// StageCommit a stale plan or baseline still leaves the installation
+		// untouched, so the record must be released instead of sticking the UI in
+		// "applying" forever.
+		if !current || d.Kind != DownloadPreload || d.Preload == PreloadStateApplying && d.Stage == StageCommit || d.Preload == PreloadStateUnavailable {
 			break
 		}
+		fallback := d.preloadFallbackUpdate
+		clearPreloadFlow()
 		d.Preload = PreloadStateStale
 		d.Phase, d.Stage = DownloadStale, StageIdle
 		d.operation = downloadOperationNone
 		d.Note = "stale"
 		d.Rate, d.ETA = 0, 0
+		if fallback && DownloadNetworkBlocked(m) == "" {
+			return startPlan(DownloadUpdate)
+		}
 	case DownloadPlanFailed, DownloadFailed, InstallAdoptFailed, InstallVerifyFailed, InstallLocateFailed, PreloadFailed:
 		if !current {
 			break
@@ -962,9 +1083,25 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 				break
 			}
 		}
+		// A preload that fails before its transaction started (rebuilding staged
+		// patches, or committing without StageCommit) leaves the installation
+		// untouched, so it must stay recoverable instead of demanding a recovery.
+		if e.Kind == PreloadFailed && d.Kind == DownloadPreload && (d.Phase == DownloadRebuilding || d.Phase == DownloadCommitting && d.Stage != StageCommit) {
+			d.operation = downloadOperationNone
+			d.pausePending, d.cancelPending = false, false
+			d.AwaitingConfirmation = false
+			clearPreloadFlow()
+			d.Phase, d.Stage = DownloadError, StageIdle
+			d.Preload = PreloadStateWaitingRelease
+			d.Error = downloadErrorText(e.Message)
+			d.Rate, d.ETA = 0, 0
+			break
+		}
+		wasReconcile := d.operation == downloadOperationReconcile
 		d.operation = downloadOperationNone
 		d.pausePending, d.cancelPending = false, false
 		d.AwaitingConfirmation = false
+		clearPreloadFlow()
 		if d.Phase == DownloadCommitting {
 			d.Phase = DownloadRecoveryRequired
 			d.Note = "recovery-required"
@@ -975,7 +1112,14 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		d.Error = downloadErrorText(e.Message)
 		d.Rate, d.ETA = 0, 0
 		if d.Kind == DownloadPreload {
-			d.Preload = PreloadStateFailed
+			switch {
+			case d.Phase == DownloadRecoveryRequired:
+				d.Preload = PreloadStateRecoveryRequired
+			case wasReconcile:
+				d.Preload = PreloadStateWaitingRelease
+			default:
+				d.Preload = PreloadStateFailed
+			}
 		}
 	}
 	return m, nil, true

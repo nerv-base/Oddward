@@ -6,12 +6,11 @@ import (
 	"strings"
 )
 
-func downloadPreloadObserveFormal(r gameinstall.PreloadRecord, version string) gameinstall.PreloadRecord {
-	if !downloadVersion.MatchString(version) || !downloadVersion.MatchString(r.Version) {
-		return r
+func downloadVersionNewer(version, base string) bool {
+	if !downloadVersion.MatchString(version) || !downloadVersion.MatchString(base) {
+		return false
 	}
-	a, b := strings.Split(version, "."), strings.Split(r.Version, ".")
-	newer := false
+	a, b := strings.Split(version, "."), strings.Split(base, ".")
 	for i := 0; i < max(len(a), len(b)); i++ {
 		x, y := "0", "0"
 		if i < len(a) {
@@ -27,15 +26,17 @@ func downloadPreloadObserveFormal(r gameinstall.PreloadRecord, version string) g
 			y = "0"
 		}
 		if len(x) != len(y) {
-			newer = len(x) > len(y)
-			break
+			return len(x) > len(y)
 		}
 		if x != y {
-			newer = x > y
-			break
+			return x > y
 		}
 	}
-	if !newer {
+	return false
+}
+
+func downloadPreloadObserveFormal(r gameinstall.PreloadRecord, version string) gameinstall.PreloadRecord {
+	if !downloadVersionNewer(version, r.Version) {
 		return r
 	}
 	for _, seen := range r.ObservedFormalVersions {

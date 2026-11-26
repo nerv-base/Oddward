@@ -123,8 +123,8 @@ func TestDownloadOfferPollIsSingleFlightAndRejectsMovedTask(t *testing.T) {
 	}
 }
 
-func TestDownloadOfferPollSkipsUnadoptedAndStagedInstallations(t *testing.T) {
-	for _, kind := range []string{"unadopted", "waiting-release", "staged", "paused"} {
+func TestDownloadOfferPollSkipsUnadoptedAndActiveInstallations(t *testing.T) {
+	for _, kind := range []string{"unadopted", "downloading", "reconciling", "paused"} {
 		t.Run(kind, func(t *testing.T) {
 			m := offerFixture()
 			switch kind {
@@ -132,10 +132,10 @@ func TestDownloadOfferPollSkipsUnadoptedAndStagedInstallations(t *testing.T) {
 				m.Download.Current = ""
 				m.Download.Verified = false
 				m.Download.Located = false
-			case "waiting-release":
-				m.Download.Preload = state.PreloadStateWaitingRelease
-			case "staged":
-				m.Download.Preload = state.PreloadStateStaged
+			case "downloading":
+				m.Download.Preload = state.PreloadStateDownloading
+			case "reconciling":
+				m.Download.Preload = state.PreloadStateReconcile
 			case "paused":
 				m.Download.Phase = state.DownloadSuspended
 			}
@@ -154,5 +154,41 @@ func TestDownloadOfferPollSkipsUnadoptedAndStagedInstallations(t *testing.T) {
 			default:
 			}
 		})
+	}
+}
+
+func TestDownloadOfferPollContinuesWhilePreloadWaitsForRelease(t *testing.T) {
+	m := offerFixture()
+	m.Download.Kind = state.DownloadPreload
+	m.Download.Phase = state.DownloadDone
+	m.Download.Preload = state.PreloadStateWaitingRelease
+	m.Download.PreloadVersion = "1.5.0"
+	s := NewShell(m)
+	defer s.Dispose()
+	calls := make(chan DownloadRequest, 2)
+	wake := make(chan struct{}, 2)
+	s.RequestFrame = func() {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+	s.GameDownloads = downloadBackendFunc(func(_ context.Context, r DownloadRequest, _ func(state.Event)) state.Event {
+		calls <- r
+		return state.Event{Kind: state.DownloadOfferPolled, Path: r.Root, Message: "1.5.3"}
+	})
+	tt := ui.NewTester(s.View, 1280, 720)
+	tt.Advance(12 * time.Minute)
+	r := receiveDownload(t, calls)
+	if r.Effect.Kind != state.EffectDownloadOfferPoll {
+		t.Fatalf("expected offer poll in waiting-release, got %+v", r)
+	}
+	receiveDownload(t, wake)
+	tt.Frame()
+	if s.Model.Download.OfferVersion != "1.5.3" || s.Model.Download.Preload != state.PreloadStateWaitingRelease {
+		t.Fatalf("formal release not surfaced while preload waiting: %+v", s.Model.Download)
+	}
+	if _, ok := tt.AccessByRole(ui.RoleButton, "更新游戏"); !ok {
+		t.Fatalf("primary button did not switch to formal update: texts=%q", tt.Texts())
 	}
 }

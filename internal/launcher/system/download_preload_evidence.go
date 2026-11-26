@@ -13,8 +13,9 @@ import (
 )
 
 // Query-route admission is separate from manifest integrity. An advertisement
-// never establishes the remote query URL. The backend hook is nil in production
-// until that route has been observed and its semantics admitted.
+// never establishes the remote query URL: production binds preloadQuery to the
+// observed official versioned config route, while tests keep it nil until they
+// inject a verified route.
 func downloadPreloadEvidence(d gameDelivery, roots []string, known bool) (gameDelivery, gameinstall.PreloadManifest, error) {
 	if !known {
 		return gameDelivery{}, gameinstall.PreloadManifest{}, gameinstall.ErrPreloadBlocked
@@ -36,6 +37,9 @@ func downloadPreloadEvidence(d gameDelivery, roots []string, known bool) (gameDe
 	}
 	cfg, err := gameres.ParseConfig(d.ConfigResponse.Data)
 	if err != nil {
+		return gameDelivery{}, gameinstall.PreloadManifest{}, err
+	}
+	if _, err := gameres.VersionConfigURL(d.ConfigResponse.Root, d.Branch, cfg.ResVersion); err != nil {
 		return gameDelivery{}, gameinstall.PreloadManifest{}, err
 	}
 	manifest, graph, err := gameres.ParseDelivery(cfg, d.XML)

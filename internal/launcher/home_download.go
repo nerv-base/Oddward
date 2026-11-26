@@ -180,7 +180,7 @@ func (s *Shell) homeDockPrimary(c *ui.Context, p state.Presentation, d state.Dow
 	} else {
 		b.Children(func() {
 			switch p.Primary {
-			case "下载游戏", "更新游戏", "重试下载":
+			case "下载游戏", "更新游戏", "重试下载", "重试更新":
 				glyph(c, "\uE896", 14)
 			case "启动游戏", "重试启动":
 				glyph(c, "\uE768", 14)

@@ -3,10 +3,22 @@
 package gameres
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"encoding/xml"
 	"strconv"
 	"strings"
 )
+
+// ResConfig is the optional branch-migration descriptor carried inside <ResConfig>.
+// It is base64-encoded JSON matching Patch_Windows.json and redirects a retired
+// branch to its successor branch after a major version release.
+type ResConfig struct {
+	AppID        string   `json:"appId"`
+	Branch       string   `json:"branchName"`
+	UpdateBranch string   `json:"updateBranchName"`
+	ResourceURLs []string `json:"gameResUrl"`
+}
 
 // Config is the read-only projection of an official remote or local config.xml.
 // Optional fields are zero-valued when absent. Pre-release fields report the
@@ -19,6 +31,7 @@ type Config struct {
 	BaseVersions                                                      []string
 	PreReleaseStatus, PreReleaseBranch, PreReleaseVersion             string
 	PreReleaseTestStatus, PreReleaseTestBranch, PreReleaseTestVersion string
+	ResConfig                                                         *ResConfig
 	UnknownFields                                                     int
 }
 
@@ -77,6 +90,7 @@ type configDocument struct {
 	PreReleaseTestStatus  configText
 	PreReleaseTestBranch  configText
 	PreReleaseTestVersion configText
+	ResConfig             configText
 	BaseVerson            []struct {
 		Refs []struct {
 			Version string `xml:"version,attr"`
@@ -146,6 +160,10 @@ func ParseConfig(data []byte) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	resConfig, err := parseResConfig(doc.ResConfig.value)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		ResVersion: doc.ResVersion.value, UpdateResVersion: doc.UpdateResVersion.value,
 		Section: doc.Section.value, UpdateBranch: doc.UpdateBranchName.value, LocalBranch: doc.LocalBranch.value,
@@ -155,6 +173,7 @@ func ParseConfig(data []byte) (Config, error) {
 		PreReleaseStatus: doc.PreReleaseStatus.value, PreReleaseBranch: doc.PreReleaseBranch.value,
 		PreReleaseVersion: doc.PreReleaseVersion.value, PreReleaseTestStatus: doc.PreReleaseTestStatus.value,
 		PreReleaseTestBranch: doc.PreReleaseTestBranch.value, PreReleaseTestVersion: doc.PreReleaseTestVersion.value,
+		ResConfig:     resConfig,
 		UnknownFields: countUnknownConfigFields(doc.Other) + countUnknownConfigFields(extra.Other),
 	}
 	if len(doc.BaseVerson) != 0 {
@@ -167,6 +186,27 @@ func ParseConfig(data []byte) (Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+func parseResConfig(encoded string) (*ResConfig, error) {
+	if encoded == "" {
+		return nil, nil
+	}
+	if len(encoded) > 64<<10 {
+		return nil, ErrMalformedManifest
+	}
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, ErrMalformedManifest
+	}
+	var rc ResConfig
+	if err := json.Unmarshal(raw, &rc); err != nil {
+		return nil, ErrMalformedManifest
+	}
+	if !validURLComponent(rc.Branch) || (rc.UpdateBranch != "" && !validURLComponent(rc.UpdateBranch)) {
+		return nil, ErrMalformedManifest
+	}
+	return &rc, nil
 }
 
 func configUint(s string, bits int) (int64, error) {

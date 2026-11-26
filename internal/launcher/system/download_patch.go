@@ -121,6 +121,18 @@ func (b *GameDownloadBackend) patchDownloadFallback(ctx context.Context, p *down
 	return fallback, nil
 }
 
+// patchTargets counts the plan targets reconstructed from official patches, so
+// the UI can show rebuild progress before the first patch step reports.
+func (p *downloadPlan) patchTargets() int {
+	count := 0
+	for _, target := range p.plan.Targets {
+		if target.Action == gameres.ActionPatch {
+			count++
+		}
+	}
+	return count
+}
+
 func (b *GameDownloadBackend) applyDownloadPatches(ctx context.Context, p *downloadPlan, e *gamedl.Engine, report func(state.Event)) (bool, error) {
 	var total int64
 	seen := map[gameres.Object]bool{}

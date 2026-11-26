@@ -75,7 +75,6 @@ func (s *Shell) downloadSection(c *ui.Context) {
 // preload checks and clean-up live here, where they cannot compete with play.
 func (s *Shell) downloadMaintenance(c *ui.Context) {
 	p := state.PresentDownload(s.Model)
-	preload := state.PresentPreload(s.Model)
 	d := s.Model.Download
 	ui.Text(c, "更新与预下载").FontSize(15).FontWeight(500)
 	ui.Text(c, p.StageText).FontSize(downloadBodySize).SingleLine()
@@ -130,7 +129,7 @@ func (s *Shell) downloadMaintenance(c *ui.Context) {
 	if p.CanCheckPreload {
 		action("settings-preload-check", "检查预下载", true, state.PreloadCheckRequest)
 	}
-	if preload.Visible && preload.Action == state.PreloadRequest && preload.Enabled {
+	if p.CanCheckPreload && (d.Preload == state.PreloadStateAvailable || p.PreloadOfferVersion != "") {
 		action("settings-preload-start", "开始预下载", true, state.PreloadRequest)
 	}
 	if p.CanApply {

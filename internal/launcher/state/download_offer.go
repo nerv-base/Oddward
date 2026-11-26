@@ -9,7 +9,13 @@ func CanPollDownloadOffer(m Model) bool {
 }
 func downloadOfferIdle(m Model) bool {
 	d := m.Download
-	return m.NormalMode && m.Managed.Root != "" && (d.Located || d.Verified) && (d.Phase == DownloadIdle || d.Phase == DownloadDone) && !downloadUnfinished(d) && !ManagedBusy(m.Managed.Phase) && !ManagedActive(m.Managed.Phase) && m.Flow != Launching && m.Flow != Running && !d.GameRunning && !d.OfficialRunning && (d.Preload == PreloadStateUnavailable || d.Preload == PreloadStateAvailable || d.Preload == PreloadStateCompleted)
+	phaseOK := d.Phase == DownloadIdle || d.Phase == DownloadDone ||
+		d.Kind == DownloadPreload && (d.Phase == DownloadStale || d.Phase == DownloadError)
+	preloadOK := d.Preload == PreloadStateUnavailable || d.Preload == PreloadStateAvailable ||
+		d.Preload == PreloadStateStaged || d.Preload == PreloadStateWaitingRelease ||
+		d.Preload == PreloadStateApplicable || d.Preload == PreloadStateCompleted ||
+		d.Preload == PreloadStateStale || d.Preload == PreloadStateFailed
+	return m.NormalMode && m.Managed.Root != "" && (d.Located || d.Verified) && phaseOK && !downloadUnfinished(d) && !ManagedBusy(m.Managed.Phase) && !ManagedActive(m.Managed.Phase) && m.Flow != Launching && m.Flow != Running && !d.GameRunning && !d.OfficialRunning && preloadOK
 }
 func reduceDownloadOffer(m Model, e Event) (Model, []Effect, bool) {
 	d := &m.Download

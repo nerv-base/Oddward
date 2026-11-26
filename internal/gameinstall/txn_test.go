@@ -307,3 +307,59 @@ func TestTxnRecoveryRetainsEvidenceWhenCandidateOrBackupChanged(t *testing.T) {
 		})
 	}
 }
+
+func TestTxnBranchSwitchUpdatesAndRollsBackBootstrap(t *testing.T) {
+	for _, interrupt := range []bool{false, true} {
+		t.Run(fmt.Sprintf("interrupt=%t", interrupt), func(t *testing.T) {
+			s, in, old := txnFixture(t)
+			oldCfg := `{"appId":"1289","branchName":"PC_150","gameGetServerListUrl":["https://cdn.example.invalid/s.json"]}`
+			newCfg := `{"appId":"1289","branchName":"PC_160","gameGetServerListUrl":["https://cdn.example.invalid/s.json"]}`
+			txnPut(t, in.Root, txnPrefix+"PatcherConfig/Patch_Windows.json", oldCfg)
+			txnPut(t, in.WorkRoot, "bootstrap/config", newCfg)
+			cfgTarget := txnTarget(txnPrefix+"PatcherConfig/Patch_Windows.json", newCfg)
+			in.Bootstrap = []TxnFile{{Path: cfgTarget.Path, MD5: cfgTarget.MD5, Size: cfgTarget.Size, Source: "bootstrap/config", Origin: "bootstrap"}}
+
+			// Same-branch update must still reject bootstrap files.
+			if _, e := s.Commit(context.Background(), in); !errors.Is(e, ErrTargetExists) {
+				t.Fatalf("same-branch bootstrap = %v, want ErrTargetExists", e)
+			}
+
+			in.Candidate.Branch = "PC_160"
+			if interrupt {
+				in.Checkpoint = func(p string) error {
+					if p == "after-all-placements" {
+						return errors.New("stop")
+					}
+					return nil
+				}
+			}
+			_, e := s.Commit(context.Background(), in)
+			if interrupt {
+				if e == nil {
+					t.Fatal("expected checkpoint stop")
+				}
+				if _, e := s.Recover(context.Background(), in.Root, in.WorkRoot, in.Guard); e != nil {
+					t.Fatal(e)
+				}
+				if got := txnRead(t, in.Root, txnPrefix+"PatcherConfig/Patch_Windows.json"); got != oldCfg {
+					t.Fatalf("rollback did not restore Patch_Windows.json: got %q", got)
+				}
+				r, err := s.ReadInstall(in.Root)
+				if err != nil || r.Branch != old.Branch {
+					t.Fatalf("rollback changed branch: %+v %v", r, err)
+				}
+				return
+			}
+			if e != nil {
+				t.Fatal(e)
+			}
+			if got := txnRead(t, in.Root, txnPrefix+"PatcherConfig/Patch_Windows.json"); got != newCfg {
+				t.Fatalf("branch switch did not update Patch_Windows.json: got %q", got)
+			}
+			r, err := s.ReadInstall(in.Root)
+			if err != nil || r.Branch != "PC_160" {
+				t.Fatalf("record branch = %+v %v", r, err)
+			}
+		})
+	}
+}
