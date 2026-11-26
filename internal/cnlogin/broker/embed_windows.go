@@ -11,9 +11,18 @@ import (
 )
 
 const (
-	overlayChild   = uintptr(0x40000000)
-	overlayPopup   = uintptr(0x80000000)
-	overlayVisible = uintptr(0x10000000)
+	overlayChild       = uintptr(0x40000000)
+	overlayPopup       = uintptr(0x80000000)
+	overlayVisible     = uintptr(0x10000000)
+	overlayCaption     = uintptr(0x00C00000)
+	overlaySysMenu     = uintptr(0x00080000)
+	overlayThickFrame  = uintptr(0x00040000)
+	overlayMinimizeBox = uintptr(0x00020000)
+	overlayMaximizeBox = uintptr(0x00010000)
+	// Top-level decorations must be stripped with WS_POPUP when converting a
+	// frameless native window (such as MyGo) to WS_CHILD, otherwise user32
+	// paints a classic child title bar over its client area.
+	overlayChildClear = overlayPopup | overlayCaption | overlaySysMenu | overlayThickFrame | overlayMinimizeBox | overlayMaximizeBox
 )
 
 var errOverlayRestore = errors.New("cnlogin/broker: overlay recovery failed")
@@ -80,7 +89,7 @@ func embedWindow(ctx context.Context, window, gameWindow uintptr, before, target
 		return w, nil
 	}
 	childBound := func(w overlayWindow) bool {
-		return w.style&overlayChild != 0 && w.style&overlayPopup == 0 && w.parent == gameWindow && (w.owner == 0 || w.owner == before.owner) && !w.topLevel
+		return w.style&overlayChild != 0 && w.style&overlayChildClear == 0 && w.parent == gameWindow && (w.owner == 0 || w.owner == before.owner) && !w.topLevel
 	}
 	current, err := check()
 	if err != nil {
@@ -133,11 +142,11 @@ func embedWindow(ctx context.Context, window, gameWindow uintptr, before, target
 			result = errOverlayRestore
 		}
 	}()
-	if err := sys.setStyle(window, before.style&^overlayPopup|overlayChild); err != nil {
+	if err := sys.setStyle(window, before.style&^overlayChildClear|overlayChild); err != nil {
 		return errRemote
 	}
 	current, err = check()
-	if err != nil || current.style&overlayChild == 0 || current.style&overlayPopup != 0 {
+	if err != nil || current.style&overlayChild == 0 || current.style&overlayChildClear != 0 {
 		if err != nil {
 			return err
 		}

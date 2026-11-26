@@ -6,7 +6,7 @@
 // identity delivery.
 //
 // A Session owns the SDK IPC host, starts the game with that host's pipe in its
-// environment, and turns the authored WPF login window into a delivered game
+// environment, and turns the isolated login window into a delivered game
 // identity. It never persists a password and never delivers an identity before
 // the pre-login checks allowed it (see laohu.Admission).
 //

@@ -19,15 +19,17 @@ cmd/launcher
 
 | 目录 | 职责 |
 |---|---|
-| `cmd/launcher` | 命令行、素材、依赖注入及主窗口 |
+| `cmd/launcher` | 命令行、素材、依赖注入、主窗口与隔离登录界面角色（`--cnlogin-ui`） |
 | `cmd/stub` | 安装版按版本启动与回退 |
 | `internal/branding` | 原创图标的 SVG、PNG、ICO 源资源及 Go 嵌入数据 |
 | `internal/launcher/state` | Model、Event、Reduce、Present，以及抽卡页、签到页与游戏数据页规则 |
 | `internal/launcher` | MyGo 视图、Shell 和副作用调度 |
 | `internal/launcher/system` | 登录、设置、网络、更新、档案、签到等系统适配 |
 | `internal/cnlogin` | 国服登录、加密账号库、游戏启动及 SDK 会话 |
+| `internal/cnlogin/loginui/state` | 登录窗口与欢迎横幅的纯状态机（表单、校验、倒计时保留、键盘与重建恢复） |
+| `internal/cnlogin/loginui/native` | 纯 Go + MyGo Native UI 登录窗口与欢迎横幅独立助手进程实现（`--cnlogin-ui`） |
 | `internal/checkin` | 逐日签到记录、自动开关及跨进程互斥 |
-| `compat/loginui` | 自包含 WPF 登录窗口和窗口呈现 |
+| `internal/overlaywin` | Windows 窗口与进程身份适配：PID＋创建时间校验、WinEvent 监听、DPI 上下文与 HWND 绑定 |
 | `internal/game`、`gamelocate` | 只读安装检查与用户所选目录规范化 |
 | `internal/gameres` | 游戏资源元数据解析、补丁图和 baseTag 下载计划 |
 | `internal/process` | PID＋创建时间的进程身份及退出观察 |
@@ -50,7 +52,7 @@ cmd/launcher
 
 颜色和尺寸集中在 `internal/launcher/view.go`，强调色使用 `s.tone()`。共享控件放在 `controls.go`。素材以 contain 方式呈现，不假设宽高比；无障碍标签、高对比度及减少动态效果应覆盖每个可交互页面。主页体力卡内嵌官方「本性像素」「都市活力」图标，版权与来源见 `THIRD_PARTY_NOTICES.md`。
 
-应用图标统一来自 `internal/branding`：主窗口通过 MyGo `SetIcon` 设置任务栏图标，导航栏使用单色 SVG，WPF 通过项目资源引用同源图像。两个 Go 入口链接已提交的 Windows/amd64 COFF 图标资源，安装器直接使用同一 ICO；修改 ICO 后用 `scripts/update-icons.ps1` 再生成 COFF。
+应用图标统一来自 `internal/branding`：主窗口与内置 MyGo 登录助手通过 MyGo `SetIcon` 设置任务栏图标，导航栏与登录卡片使用单色 SVG（`symbol.svg`）。两个 Go 入口链接已提交的 Windows/amd64 COFF 图标资源，安装器直接使用同一 ICO；修改 ICO 后用 `scripts/update-icons.ps1` 再生成 COFF。
 
 ## 国服登录
 
@@ -61,17 +63,18 @@ cmd/launcher
 - `elevatedipc`、`broker`：受限宿主启动、私有 IPC、身份校验及请求转发。
 - `laohu`、`bootcfg`、`cnproto`：登录客户端、配置解析和 SDK 消息编码。
 - `accounts`：DPAPI、私有目录权限及账号保存事务。
-- `loginui`：与 WPF 助手的有界帧通信。
+- `loginui`：与独立登录 UI 助手（`oddward.exe --cnlogin-ui`）的有界帧通信。
+- `loginui/state` 与 `loginui/native`：纯 Go + MyGo Native UI 登录窗口与欢迎横幅状态机、DirectComposition 渲染及 Win32 窗口生命周期控制。
 
-主 UI、WPF、账号库和 HTTP 登录均为普通权限。受限宿主只持有游戏与 SDK 会话，不接受任意命令、账号文件或任意进程操作。窗口嵌入仅作用于本次会话的登录窗口和欢迎横幅，核对进程身份、窗口、隐藏状态与 DPI 后才完成绑定；WPF 等待请求确认及原生关系检查后显示。
+主 UI、登录 UI 助手（`--cnlogin-ui`）、账号库和 HTTP 登录均为普通权限。`--cnlogin-ui` 在 `cmd/launcher` 最早阶段分流，拒绝多余参数及非管道标准流，不打开数据库、账号库或主界面。受限宿主只持有游戏与 SDK 会话，不接受任意命令、账号文件或任意进程操作。窗口嵌入仅作用于本次会话的登录窗口和欢迎横幅，核对进程身份、窗口、隐藏状态与 DPI 后才完成绑定，并将 MyGo 无边框顶层装饰位（`WS_CAPTION|WS_SYSMENU|...`）随 `WS_POPUP` 一并清除；助手等待精确 `window_bound` 确认及原生关系检查后才显示。
 
-登录层优先使用原生子窗口，移动由 Windows 随父窗口处理，缩放由窗口事件同步。DPI 不匹配时回退为从属窗口。游戏主 HWND 销毁或切换时重建自己的隐藏窗口，未提交表单只在内存中保留。
+登录层优先使用原生子窗口（固定包含 PR #2248 上游 uncloak 修复的 MyGo 版本，无需应用侧 uncloak workaround），移动由 Windows 随父窗口处理，缩放由 WinEvent 钩子与低频兜底同步。DPI 不匹配时由受限宿主自动回退为从属窗口。游戏主 HWND 销毁或切换时，助手记录已销毁父窗口避免竞态回绑，仅在内存中保留未提交表单、光标选区与滚动位置并在新游戏窗口出现后重建。
 
 短信冷却以客户端为唯一状态源：有效请求开始即消费 60 秒，错误不返还，切页或重开不重置。界面刷新保留输入和选择状态。
 
 主页选定的账号就是本次登录使用的账号。SDK 请求登录时，若公告已确认且已保存账号，会话直接用最近使用的账号完成校验、准入和身份投递，不再打开登录窗口；凭据失效、服务拒绝或需要官方环境时回退到账号列表窗口并显示原因，由用户决定下一步。首次公告确认后仍停留在账号列表，等用户自己点「登录」。
 
-身份投递成功后显示欢迎横幅：会话换一个只带 `Banner` 的 `welcome` 快照给一个独立的助手进程（不占用登录窗口的通道），WPF 在游戏客户区顶部居中显示「<账号>，欢迎登录」，左侧是黑白的 Oddward 标记（矢量几何，取自 `internal/branding/symbol.svg`），淡入 220 ms、停留 2.4 s、淡出 380 ms 后自行退出；减少动态效果时跳过淡入淡出，只保留停留时间。横幅不获取焦点、不拦截鼠标、不进入任务栏，也不改变登录窗口的关闭计数。`welcome` 快照必须携带非空且不超过 256 字节的 `Banner`，其它屏幕不得携带；横幅启动失败不影响已经完成的身份投递。
+身份投递成功后显示欢迎横幅：会话换一个只带 `Banner` 的 `welcome` 快照给一个独立的助手进程（不占用登录窗口的通道），MyGo 横幅窗口同样优先使用原生子窗口（`embed_overlay`，DPI 不匹配时由受限宿主自动回退从属模式）并带 `WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE`，在游戏客户区顶部居中显示「<账号>，欢迎登录」，左侧是黑白的 Oddward 标记（矢量几何，取自 `internal/branding/symbol.svg`），淡入 220 ms、零重绘停留 2.4 s、淡出 380 ms 后自行退出；减少动态效果时跳过淡入淡出，只保留停留时间。横幅不获取焦点、不拦截鼠标、不进入任务栏，也不改变登录窗口的关闭计数。`welcome` 快照必须携带非空且不超过 256 字节的 `Banner`，其它屏幕不得携带；横幅启动失败不影响已经完成的身份投递。
 
 身份投递获得原生 ACK，且账号保存或回滚结束后关闭登录窗口；自动登录没有打开窗口时直接结束本次 SDK 请求。SDK 会话仍可回答后续查询。管道断开代表观察丢失，不能当作游戏已退出；只有实际进程退出才结束宿主生命周期。
 
@@ -142,7 +145,7 @@ HTTP 使用统一网络设置。媒体下载限制来源、重定向、大小及
 
 ## 依赖与许可
 
-Go 模块固定在 `go.mod` / `go.sum`，.NET SDK 固定在 `compat/loginui/global.json`，自包含运行库固定在项目文件中。当前主要依赖为 MyGo、purego、go-text/typesetting、golang.org/x 系列包，以及纯 Go 的 `modernc.org/sqlite`（静态链接 SQLite，不需要额外的 DLL 或运行库）。
+Go 模块固定在 `go.mod` / `go.sum`（其中 MyGo 固定到包含 PR #2248 native child uncloak 修复的不可变伪版本 `v0.10.1-0.20261124041827-c16fc5b6d8ed`）。当前主要依赖为 MyGo、purego、go-text/typesetting、golang.org/x 系列包，以及纯 Go 的 `modernc.org/sqlite`（静态链接 SQLite，不需要额外的 DLL 或运行库）。
 
 版本、来源和完整声明统一维护在 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) 与 `licenses/`。新增依赖前需核对许可证；发行构建会携带这些声明。官方游戏 SDK 与媒体不纳入源码或发行包。
 

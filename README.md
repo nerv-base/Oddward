@@ -16,7 +16,7 @@ Oddward 可以启动、校验和更新《异环》，在本机保存常用游戏
 
 ## 开始使用
 
-Oddward 支持 **Windows 10 / 11 x64**。在[最新发行页](https://github.com/nerv-base/Oddward/releases/latest)的 **Assets** 中下载 `oddward-<版本>-setup.exe` 并运行安装。安装包已包含登录窗口及其 .NET 运行库。[v0.1.0 发布说明](https://github.com/nerv-base/Oddward/releases/tag/v0.1.0)
+Oddward 支持 **Windows 10 / 11 x64**。在[最新发行页](https://github.com/nerv-base/Oddward/releases/latest)的 **Assets** 中下载 `oddward-<版本>-setup.exe` 并运行安装。启动器主界面、国服登录窗口与欢迎横幅均采用纯 Go + [MyGo Native UI](https://github.com/egoist/mygo)。[v0.1.0 发布说明](https://github.com/nerv-base/Oddward/releases/tag/v0.1.0)
 
 1. **已有游戏时**，点击主页操作栏下方的「定位游戏」并选择现有安装。定位后可重新校验文件或检查游戏更新。
 2. **首次安装时**，点击主页的「下载游戏」，选择空目录，等安装方案显示后确认下载。Oddward 会连同游戏资源一起下载并安装登录与启动所需的运行组件（约 30 MB），完成后主按钮直接变为「启动游戏」，不需要另外安装官方启动器。
@@ -84,7 +84,7 @@ Oddward 支持 **Windows 10 / 11 x64**。在[最新发行页](https://github.com
 
 ## 从源码构建
 
-准备 **PowerShell 7**、**Go 1.27.3 windows/amd64** 和 **.NET SDK 10.0.303**。Go 可以装在 `PATH`，也可以使用项目内工具链。
+准备 **PowerShell 7** 和 **Go 1.27.3 windows/amd64**。Go 可以装在 `PATH`，也可以使用项目内工具链。
 
 ```powershell
 git clone https://github.com/nerv-base/Oddward.git

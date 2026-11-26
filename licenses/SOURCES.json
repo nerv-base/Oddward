@@ -5,8 +5,8 @@
     {
       "file": "mygo/LICENSE.txt",
       "component": "github.com/egoist/mygo",
-      "version": "v0.10.0",
-      "source": "https://raw.githubusercontent.com/egoist/mygo/ebde9399baf2734b3361856a53f4036859973d1d/LICENSE",
+      "version": "v0.10.1-0.20261124041827-c16fc5b6d8ed",
+      "source": "https://raw.githubusercontent.com/egoist/mygo/c16fc5b6d8ed6ac997d5a4ac3f59d94847cc3723/LICENSE",
       "upstreamPath": "LICENSE",
       "sha256": "f0b56f4ab53beb6e18c5e155219c2e2b6000b5475c0ae3ddb3af3894fd9349b4",
       "sha256Lf": "f0b56f4ab53beb6e18c5e155219c2e2b6000b5475c0ae3ddb3af3894fd9349b4"
@@ -14,8 +14,8 @@
     {
       "file": "mygo/shader-LICENSE.txt",
       "component": "github.com/egoist/mygo/internal/shader and internal/shaderir",
-      "version": "v0.10.0",
-      "source": "https://raw.githubusercontent.com/egoist/mygo/ebde9399baf2734b3361856a53f4036859973d1d/internal/shader/LICENSE",
+      "version": "v0.10.1-0.20261124041827-c16fc5b6d8ed",
+      "source": "https://raw.githubusercontent.com/egoist/mygo/c16fc5b6d8ed6ac997d5a4ac3f59d94847cc3723/internal/shader/LICENSE",
       "upstreamPath": "internal/shader/LICENSE",
       "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1",
       "sha256Lf": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"
@@ -253,51 +253,6 @@
       "upstreamPath": "PATENTS",
       "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc",
       "sha256Lf": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
-    },
-    {
-      "file": "dotnet/microsoft.netcore.app.runtime.win-x64/LICENSE.TXT",
-      "component": "microsoft.netcore.app.runtime.win-x64",
-      "version": "10.0.11",
-      "source": "https://api.nuget.org/v3-flatcontainer/microsoft.netcore.app.runtime.win-x64/10.0.11/microsoft.netcore.app.runtime.win-x64.10.0.11.nupkg",
-      "upstreamPath": "LICENSE.TXT",
-      "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b",
-      "sha256Lf": "cfc21f5e8bd655ae997eec916138b707b1d290b83272c02a95c9f821b8c87310"
-    },
-    {
-      "file": "dotnet/microsoft.netcore.app.runtime.win-x64/THIRD-PARTY-NOTICES.TXT",
-      "component": "microsoft.netcore.app.runtime.win-x64",
-      "version": "10.0.11",
-      "source": "https://api.nuget.org/v3-flatcontainer/microsoft.netcore.app.runtime.win-x64/10.0.11/microsoft.netcore.app.runtime.win-x64.10.0.11.nupkg",
-      "upstreamPath": "THIRD-PARTY-NOTICES.TXT",
-      "sha256": "6d15e10a101c6bfff2ab4429ed061bf76c456fc4b23ad6b03e0d0f8377148a21",
-      "sha256Lf": "66f1d4e44973185519bb4aa8a9718eb22fc7af2cc532e3ae9cfc4c127ee7fc54"
-    },
-    {
-      "file": "dotnet/microsoft.windowsdesktop.app.runtime.win-x64/LICENSE.txt",
-      "component": "microsoft.windowsdesktop.app.runtime.win-x64",
-      "version": "10.0.11",
-      "source": "https://api.nuget.org/v3-flatcontainer/microsoft.windowsdesktop.app.runtime.win-x64/10.0.11/microsoft.windowsdesktop.app.runtime.win-x64.10.0.11.nupkg",
-      "upstreamPath": "LICENSE",
-      "sha256": "a89886665765362eb77e0f8e26602c924520041d1711b2eedc136434fe4d01ab",
-      "sha256Lf": "ae48df11a335dc1a615f4f938b69cba73bcf4485c4f97af49b38efb0f216353b"
-    },
-    {
-      "file": "dotnet/microsoft.windowsdesktop.app.runtime.win-x64/wpf-THIRD-PARTY-NOTICES.txt",
-      "component": "dotnet/wpf",
-      "version": "10.0.11 (e2f47b0110ed922f21a1522da67279133ce28f32)",
-      "source": "https://raw.githubusercontent.com/dotnet/dotnet/e2f47b0110ed922f21a1522da67279133ce28f32/src/wpf/THIRD-PARTY-NOTICES.TXT",
-      "upstreamPath": "src/wpf/THIRD-PARTY-NOTICES.TXT",
-      "sha256": "d23dba2fee20c6b59d8f7088ee9ed372459c952a319b7ca90f3eec370cc76eb9",
-      "sha256Lf": "d23dba2fee20c6b59d8f7088ee9ed372459c952a319b7ca90f3eec370cc76eb9"
-    },
-    {
-      "file": "dotnet/microsoft.windowsdesktop.app.runtime.win-x64/winforms-THIRD-PARTY-NOTICES.txt",
-      "component": "dotnet/winforms",
-      "version": "10.0.11 (e2f47b0110ed922f21a1522da67279133ce28f32)",
-      "source": "https://raw.githubusercontent.com/dotnet/dotnet/e2f47b0110ed922f21a1522da67279133ce28f32/src/winforms/THIRD-PARTY-NOTICES.TXT",
-      "upstreamPath": "src/winforms/THIRD-PARTY-NOTICES.TXT",
-      "sha256": "5a412b38efae0b162dc0893b319023f4cd14a8985a0f9f9ae01ac052b37a36eb",
-      "sha256Lf": "5a412b38efae0b162dc0893b319023f4cd14a8985a0f9f9ae01ac052b37a36eb"
     },
     {
       "file": "publicsuffix/LICENSE.txt",

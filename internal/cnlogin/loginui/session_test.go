@@ -22,6 +22,11 @@ func TestMain(m *testing.M) {
 // The optional transcript observes frames received by the owned synthetic child;
 // it never contains real credentials, HWNDs or account data.
 func runSyntheticHelper() int {
+	if want := os.Getenv("ODDWARD_SYNTHETIC_EXPECT_ARG"); want != "" {
+		if len(os.Args) != 2 || os.Args[1] != want {
+			return 2
+		}
+	}
 	var trace *os.File
 	if path := os.Getenv("ODDWARD_SYNTHETIC_FRAME_TRACE"); path != "" {
 		var err error
@@ -154,5 +159,29 @@ func TestSessionPreservesEventOrderAndClosesOwnedHelper(t *testing.T) {
 func TestSessionRejectsInvalidModelBeforeStarting(t *testing.T) {
 	if _, err := Start(context.Background(), Config{Executable: "missing.exe"}, Model{Screen: "invalid"}); !errors.Is(err, ErrProtocol) {
 		t.Fatal("invalid initial model not rejected")
+	}
+}
+
+func TestSessionForwardsFixedRoleArgs(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ODDWARD_SYNTHETIC_LOGINUI", "1")
+	t.Setenv("ODDWARD_SYNTHETIC_EXPECT_ARG", Mode)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s, err := Start(ctx, Config{Executable: exe, Args: []string{Mode}}, Model{Screen: "notice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	select {
+	case e := <-s.Events():
+		if e.Kind != "ready" {
+			t.Fatalf("expected ready got %s", e.Kind)
+		}
+	case <-ctx.Done():
+		t.Fatal("ready timed out")
 	}
 }

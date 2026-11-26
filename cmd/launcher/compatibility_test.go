@@ -5,15 +5,19 @@ package main
 import (
 	"path/filepath"
 	"testing"
+
+	"github.com/nerv-base/Oddward/internal/cnlogin/loginui"
 )
 
-func TestLoginUIHelperDefaultsNextToExecutableAndHonoursOverride(t *testing.T) {
+func TestResolveLoginUIDefaultsToBuiltInMyGoRoleAndHonoursOverride(t *testing.T) {
 	executable := filepath.Join(t.TempDir(), "自有 构建", "oddward.exe")
-	want := filepath.Join(filepath.Dir(executable), "login-compat", "Oddward.LoginUi.exe")
-	if got := loginUIExecutable(executable, ""); got != want {
-		t.Fatalf("login UI path=%q want=%q", got, want)
+
+	exe, args := resolveLoginUI(executable, "")
+	if exe == "" || len(args) != 1 || args[0] != loginui.Mode {
+		t.Fatalf("default login UI = (%q, %v), want running image with %q", exe, args, loginui.Mode)
 	}
-	if got := loginUIExecutable(executable, `D:\synthetic\helper.exe`); got != `D:\synthetic\helper.exe` {
-		t.Fatalf("login UI override=%q", got)
+
+	if got, gotArgs := resolveLoginUI(executable, `D:\synthetic\helper.exe`); got != `D:\synthetic\helper.exe` || len(gotArgs) != 0 {
+		t.Fatalf("explicit override = (%q, %v)", got, gotArgs)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/nerv-base/Oddward/internal/cnlogin/broker"
 	"github.com/nerv-base/Oddward/internal/cnlogin/elevatedipc"
 	"github.com/nerv-base/Oddward/internal/cnlogin/launch"
+	loginuinative "github.com/nerv-base/Oddward/internal/cnlogin/loginui/native"
 	"github.com/nerv-base/Oddward/internal/cnlogin/session"
 	"github.com/nerv-base/Oddward/internal/gamelocate"
 	"github.com/nerv-base/Oddward/internal/launcher"
@@ -27,12 +28,22 @@ func RunNativeHost(ctx context.Context, args []string) (bool, error) {
 	return true, broker.Run(ctx, args[1:])
 }
 
+// RunLoginUI dispatches the isolated MyGo Native UI login window / welcome
+// banner helper before cmd/launcher opens databases, account stores or the main
+// launcher window. It performs no work for ordinary launcher args.
+func RunLoginUI(args []string) (bool, int) {
+	return loginuinative.Run(args)
+}
+
 // NativeManagedBackend starts the game through the native CN login flow. The
-// login window is the authored WPF helper; the launcher itself never draws a
+// login window runs in an isolated child process (by default the same launcher
+// image invoked with loginui.Mode); the main launcher window never draws a
 // login form for this path.
 type NativeManagedBackend struct {
-	// LoginUI is the absolute path of the authored login window helper.
+	// LoginUI is the absolute path of the isolated login window helper.
 	LoginUI string
+	// LoginUIArgs are fixed internal role arguments passed to LoginUI.
+	LoginUIArgs []string
 	// Accounts is the saved-account store. It is required.
 	Accounts *accounts.Store
 	// HTTPClient is the launcher's shared transport.
@@ -73,6 +84,7 @@ func (b NativeManagedBackend) Prepare(ctx context.Context, root string, progress
 		Root:            found.Root,
 		ElevatedHost:    true,
 		LoginUI:         b.LoginUI,
+		LoginUIArgs:     b.LoginUIArgs,
 		Accounts:        b.Accounts,
 		HTTPClient:      b.HTTPClient,
 		LauncherVersion: b.LauncherVersion,

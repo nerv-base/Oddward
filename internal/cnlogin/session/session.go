@@ -103,8 +103,11 @@ type Config struct {
 	// ElevatedHost moves only SDK IPC and game creation to the same executable's
 	// restricted elevated mode. Accounts, HTTP and the login UI stay here.
 	ElevatedHost bool
-	// LoginUI is the path of the authored WPF login helper executable.
+	// LoginUI is the path of the login window helper executable.
 	LoginUI string
+	// LoginUIArgs holds optional fixed internal role arguments (for example
+	// []string{loginui.Mode} for the built-in MyGo login helper).
+	LoginUIArgs []string
 	// HostExecutable is the executable the game reports as its launcher. It
 	// defaults to the running process.
 	HostExecutable string
@@ -246,7 +249,7 @@ func (p *Plan) deps(host Host, game Game) deps {
 		now = time.Now
 	}
 	client := p.cfg.HTTPClient
-	uiConfig := loginui.Config{Executable: p.cfg.LoginUI}
+	uiConfig := loginui.Config{Executable: p.cfg.LoginUI, Args: p.cfg.LoginUIArgs}
 	if binder, ok := host.(interface {
 		BindOverlay(context.Context, process.Identity, uintptr, uintptr) error
 	}); ok {

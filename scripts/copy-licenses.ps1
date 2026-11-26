@@ -29,7 +29,6 @@ foreach ($entry in $manifest.files) {
 $copies.Add(@{ Source = $manifestPath; Relative = 'SOURCES.json' })
 $copies.Add(@{ Source = (Join-Path $root 'THIRD_PARTY_NOTICES.md'); Relative = 'THIRD_PARTY_NOTICES.md' })
 $copies.Add(@{ Source = (Join-Path $root 'LICENSE'); Relative = 'Oddward.LICENSE.txt' })
-$copies.Add(@{ Source = (Join-Path $root 'compat/loginui/LICENSES.md'); Relative = 'loginui/LICENSES.md' })
 foreach ($copy in $copies) {
     if (!(Test-Path -LiteralPath $copy.Source -PathType Leaf)) { throw "Missing license notice: $($copy.Source)" }
 }

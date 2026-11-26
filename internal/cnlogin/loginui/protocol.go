@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Package loginui is the presentation-only bridge to Oddward's authored WPF helper.
+// Package loginui is the presentation-only bridge to Oddward's isolated login UI helper.
 // Models never contain credentials. Events containing phone/captcha must not be logged.
 package loginui
 
@@ -59,12 +59,23 @@ type Event struct {
 	GameWindow string `json:"gameWindow,omitempty"`
 	RequestID  string `json:"requestId,omitempty"`
 }
-type envelope struct {
+
+// Envelope is one length-prefixed JSON wire frame between the launcher session
+// and the login UI helper process.
+type Envelope struct {
 	Version int    `json:"version"`
 	Type    string `json:"type"`
 	Model   *Model `json:"model,omitempty"`
 	Event   *Event `json:"event,omitempty"`
 }
+
+type envelope = Envelope
+
+// ReadFrame reads, bounds-checks and validates one wire frame from r.
+func ReadFrame(r io.Reader) (Envelope, error) { return readFrame(r) }
+
+// WriteFrame validates and writes one bounded wire frame to w.
+func WriteFrame(w io.Writer, m Envelope) error { return writeFrame(w, m) }
 
 func readFrame(r io.Reader) (envelope, error) {
 	var h [4]byte

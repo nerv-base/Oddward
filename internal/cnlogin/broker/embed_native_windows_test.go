@@ -25,27 +25,32 @@ func (s *nativeEmbedFailure) frameChanged(w uintptr) error {
 }
 
 // Only this process's hidden STATIC fixtures are changed. This does not verify
-// cross-integrity hosting, real WPF rendering, game movement or foreground focus.
+// cross-integrity hosting, real MyGo rendering, game movement or foreground focus.
 func TestNativeEmbedHiddenWindowParentStyleDPIAndRecovery(t *testing.T) {
-	for _, mode := range []string{"child", "child-owned", "recover", "recover-owned"} {
+	for _, mode := range []string{"child", "child-owned", "child-overlapped", "recover", "recover-owned", "recover-overlapped"} {
 		t.Run(mode, func(t *testing.T) {
 			runtime.LockOSThread()
 			defer runtime.UnlockOSThread()
 			create := overlayUser32.NewProc("CreateWindowExW")
 			destroy := overlayUser32.NewProc("DestroyWindow")
 			class := windows.StringToUTF16Ptr("STATIC")
-			newWindow := func() uintptr {
-				w, _, err := create.Call(0, uintptr(unsafe.Pointer(class)), 0, overlayPopup, 0, 0, 1, 1, 0, 0, 0, 0)
+			newWindow := func(style uintptr) uintptr {
+				w, _, err := create.Call(0, uintptr(unsafe.Pointer(class)), 0, style, 0, 0, 1, 1, 0, 0, 0, 0)
 				if w == 0 {
 					t.Fatalf("create hidden native fixture: %v", err)
 				}
 				return w
 			}
-			target := newWindow()
+			uiStyle := overlayPopup
+			if mode == "child-overlapped" || mode == "recover-overlapped" {
+				// Mirrors MyGo's frameless window styles: WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN.
+				uiStyle = overlayCaption | overlaySysMenu | overlayThickFrame | overlayMinimizeBox | overlayMaximizeBox | 0x02000000
+			}
+			target := newWindow(overlayPopup)
 			defer destroy.Call(target)
-			originalOwner := newWindow()
+			originalOwner := newWindow(overlayPopup)
 			defer destroy.Call(originalOwner)
-			ui := newWindow()
+			ui := newWindow(uiStyle)
 			defer destroy.Call(ui)
 			s := &nativeEmbedFailure{}
 			if mode == "child-owned" || mode == "recover-owned" {
@@ -64,7 +69,7 @@ func TestNativeEmbedHiddenWindowParentStyleDPIAndRecovery(t *testing.T) {
 			if !s.sameDPI(before.dpi, game.dpi) {
 				t.Skip("window DPI APIs unavailable for child native test")
 			}
-			s.failFrame = mode == "recover" || mode == "recover-owned"
+			s.failFrame = mode == "recover" || mode == "recover-owned" || mode == "recover-overlapped"
 			recovery := s.failFrame
 			err = embedWindow(context.Background(), ui, target, before, game, s, func() bool { return true })
 			actual, readErr := s.window(ui)
@@ -76,8 +81,8 @@ func TestNativeEmbedHiddenWindowParentStyleDPIAndRecovery(t *testing.T) {
 					t.Fatalf("native child rollback mismatch: %v", err)
 				}
 			} else {
-				if err != nil || actual.style&overlayChild == 0 || actual.style&overlayPopup != 0 || actual.parent != target || actual.owner != before.owner || actual.topLevel {
-					t.Fatalf("native child readback mismatch: %v", err)
+				if err != nil || actual.style&overlayChild == 0 || actual.style&overlayChildClear != 0 || actual.parent != target || actual.owner != before.owner || actual.topLevel {
+					t.Fatalf("native child readback mismatch: err=%v style=%#x", err, actual.style)
 				}
 				if err := embedWindow(context.Background(), ui, target, actual, game, s, func() bool { return true }); err != nil {
 					t.Fatal("native same-game child retry failed")
