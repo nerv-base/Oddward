@@ -41,15 +41,24 @@ func (b *GameDownloadBackend) stageRuntimeComponents(ctx context.Context, root s
 		return nil
 	}
 	total := launcherfiles.TotalSize(files)
+	meter := newThroughputMeter()
+	var lastDone int64
 	progress := func(done, total int64) {
+		if delta := done - lastDone; delta > 0 {
+			meter.Record(delta)
+			lastDone = done
+		}
 		if report == nil {
 			return
 		}
+		rate, eta := meter.Snapshot(done, total)
 		report(state.Event{
 			Kind:       state.DownloadProgress,
 			Stage:      state.StageComponents,
 			Downloaded: done,
 			Total:      total,
+			Rate:       rate,
+			ETASecs:    eta,
 		})
 	}
 	progress(0, total)

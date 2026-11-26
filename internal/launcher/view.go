@@ -27,13 +27,20 @@ var (
 	wishWarningCool = ui.Hex("#66DDFF")
 	// Starward's pity bar stops: green while the pull is early, red once it
 	// crosses the pool's colour threshold. The orange marks featured drops.
-	wishPityGreen = ui.Hex("#00E079")
-	wishPityRed   = ui.Hex("#C83C23")
-	wishUpAccent  = ui.Hex("#FF8A3D")
-	hairline      = ui.RGBA(255, 255, 255, .12)
-	bezel         = ui.Hex("#0E0F12")
-	glassInk      = ui.RGBA(14, 15, 19, .58)
-	homeDockTint  = ui.RGBA(14, 15, 19, .80)
+	wishPityGreen           = ui.Hex("#00E079")
+	wishPityRed             = ui.Hex("#C83C23")
+	wishUpAccent            = ui.Hex("#FF8A3D")
+	hairline                = ui.RGBA(255, 255, 255, .12)
+	bezel                   = ui.Hex("#0E0F12")
+	glassInk                = ui.RGBA(14, 15, 19, .58)
+	homeDockTint            = ui.RGBA(14, 15, 19, .80)
+	homeTransferTint        = ui.RGBA(14, 15, 19, .76)
+	homeTransferBorder      = ui.RGBA(255, 255, 255, .14)
+	homeTransferCancelFill  = ui.RGBA(255, 255, 255, .06)
+	homeTransferCancelHover = ui.RGBA(255, 107, 107, .18)
+	homeTransferCancelPress = ui.RGBA(255, 107, 107, .28)
+	homeTransferCancelText  = ui.Hex("#FF8E8E")
+	homeTransferNoteFill    = ui.RGBA(255, 200, 87, .11)
 )
 
 const (
@@ -52,8 +59,18 @@ const (
 	homePreloadChipWidth      float32 = 120
 	homePreloadChipGap        float32 = 8
 	homeDockBadgeSize         float32 = 34
-	homeDockPopupInset        float32 = 12
-	homeDockPopupRadius       float32 = 8
+	homeDockPopupInset        float32 = 14
+	homeDockPopupRadius       float32 = 14
+	homeTransferWidth         float32 = 236
+	homeTransferPaddingY      float32 = 12
+	homeTransferGap           float32 = 8
+	homeTransferDotSize       float32 = 6
+	homeTransferBarHeight     float32 = 3
+	homeTransferCancelHeight  float32 = 22
+	homeTransferCancelRadius  float32 = 6
+	homeTransferSpeedSize     float32 = 16
+	homeTransferTitleSize     float32 = 13
+	homeTransferMetaSize      float32 = 11
 	locateActionGap           float32 = 4
 	locateActionTextSize      float32 = 12
 	brandMarkSize             float32 = 40

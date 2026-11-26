@@ -53,10 +53,10 @@ func (s *Store) TransactionStatus(ctx context.Context, root, workRoot string) (R
 			return txnRequired(err)
 		}
 		defer roots.close()
-		if err := txnVerifyCandidate(ctx, roots, j); err != nil {
+		if err := txnVerifyCandidate(ctx, roots, j, nil); err != nil {
 			return txnRequired(err)
 		}
-		if err := txnCleanupEvidence(ctx, roots, j); err != nil {
+		if err := txnCleanupEvidence(ctx, roots, j, nil); err != nil {
 			return txnRequired(err)
 		}
 		return RecoveryStatus{State: "ready", TxnID: j.TxnID, Published: true, Action: "cleanup_pending"}, nil
@@ -311,7 +311,7 @@ func (s *Store) txnRecoverOne(ctx context.Context, r *txnRoots, j *txnJournal, g
 		if err := guard(ctx); err != nil {
 			return txnRequired(err)
 		}
-		return s.txnFinish(ctx, r, j, TxnInput{})
+		return s.txnFinish(ctx, r, j, TxnInput{}, nil)
 	}
 	if !txnBaseMatches(j, record) {
 		return txnRequired(errors.New("neither exact base nor transaction publication matches"))
@@ -327,16 +327,16 @@ func (s *Store) txnRecoverOne(ctx context.Context, r *txnRoots, j *txnJournal, g
 		return RecoveryStatus{State: "incomplete", TxnID: j.TxnID, LaunchBlocked: true, Resume: true, Action: "resume"}, nil
 	}
 	if j.Phase == "preparing" {
-		if err := txnValidateBeforeCommit(ctx, r, j); err != nil {
+		if err := txnValidateBeforeCommit(ctx, r, j, nil); err != nil {
 			return txnRequired(err)
 		}
-		if err := s.txnClear(ctx, r, j, TxnInput{}, false); err != nil {
+		if err := s.txnClear(ctx, r, j, TxnInput{}, false, nil); err != nil {
 			return txnRequired(err)
 		}
 		return RecoveryStatus{State: record.State, TxnID: j.TxnID, Action: "discarded"}, nil
 	}
 	if j.Phase == "staged" {
-		if err := txnValidateBeforeCommit(ctx, r, j); err != nil {
+		if err := txnValidateBeforeCommit(ctx, r, j, nil); err != nil {
 			return txnRequired(err)
 		}
 		return RecoveryStatus{State: j.Phase, TxnID: j.TxnID, LaunchBlocked: true, Resume: true, Action: "resume"}, nil
@@ -402,7 +402,7 @@ func (s *Store) txnRecoverOne(ctx context.Context, r *txnRoots, j *txnJournal, g
 			return txnRequired(err)
 		}
 	}
-	if err := s.txnClear(ctx, r, j, TxnInput{}, false); err != nil {
+	if err := s.txnClear(ctx, r, j, TxnInput{}, false, nil); err != nil {
 		return txnRequired(err)
 	}
 	return RecoveryStatus{State: record.State, TxnID: j.TxnID, Action: "rolled_back"}, nil
@@ -494,8 +494,8 @@ func txnValidateRollback(ctx context.Context, r *txnRoots, j *txnJournal) error 
 	}
 	return nil
 }
-func (s *Store) txnFinish(ctx context.Context, r *txnRoots, j *txnJournal, in TxnInput) (RecoveryStatus, error) {
-	if err := txnVerifyCandidate(ctx, r, j); err != nil {
+func (s *Store) txnFinish(ctx context.Context, r *txnRoots, j *txnJournal, in TxnInput, ledger *txnLedger) (RecoveryStatus, error) {
+	if err := txnVerifyCandidate(ctx, r, j, ledger); err != nil {
 		return txnRequired(err)
 	}
 	record, err := s.ReadInstall(j.Root)
@@ -515,6 +515,9 @@ func (s *Store) txnFinish(ctx context.Context, r *txnRoots, j *txnJournal, in Tx
 	if err := s.txnSave(j); err != nil {
 		return txnRequired(err)
 	}
+	if err := s.txnWriteVerify(r.install, j.Candidate); err != nil {
+		return txnRequired(err)
+	}
 	if j.Retention > 0 && time.Now().Before(j.RetainUntil) {
 		// Archive only after successful publication+verification. Archived committed
 		// backups do not gate a subsequent update and are never rollback evidence.
@@ -526,7 +529,7 @@ func (s *Store) txnFinish(ctx context.Context, r *txnRoots, j *txnJournal, in Tx
 		}
 		return RecoveryStatus{State: "ready", TxnID: j.TxnID, Published: true, Action: "retained"}, nil
 	}
-	if err := s.txnClear(ctx, r, j, in, true); err != nil {
+	if err := s.txnClear(ctx, r, j, in, true, ledger); err != nil {
 		var ioFailure txnCleanupIO
 		if errors.As(err, &ioFailure) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return s.txnCleanupPending(j, err)
@@ -554,30 +557,38 @@ func (s *Store) txnCleanupPending(j *txnJournal, err error) (RecoveryStatus, err
 	}
 	return RecoveryStatus{State: "ready", TxnID: j.TxnID, Published: true, Action: "cleanup_pending"}, fmt.Errorf("%w: %w", ErrCleanupPending, err)
 }
-func txnCleanupEvidence(ctx context.Context, r *txnRoots, j *txnJournal) error {
+func txnCleanupEvidence(ctx context.Context, r *txnRoots, j *txnJournal, ledger *txnLedger) error {
+	type check struct {
+		path string
+		want InstallTarget
+	}
+	var checks []check
 	for i, e := range j.Files {
 		if e.Old != nil && !e.Reuse {
-			if err := txnVerify(ctx, r.work, txnBackup(j, i), *e.Old); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
+			checks = append(checks, check{path: txnBackup(j, i), want: *e.Old})
 		}
 		if e.Target != nil {
-			if err := txnVerify(ctx, r.work, txnStage(j, i), *e.Target); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
+			checks = append(checks, check{path: txnStage(j, i), want: *e.Target})
 		}
 	}
 	for _, target := range j.RebuildCleanup {
-		if err := txnVerify(ctx, r.work, target.Path, target); err != nil && !errors.Is(err, os.ErrNotExist) {
+		checks = append(checks, check{path: target.Path, want: target})
+	}
+	return txnRunParallel(ctx, len(checks), func(pctx context.Context, idx int) error {
+		c := checks[idx]
+		if err := txnVerifyLedger(pctx, r.work, c.path, c.want, ledger, nil); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-	}
-	return nil
+		return nil
+	})
 }
-func (s *Store) txnClear(ctx context.Context, r *txnRoots, j *txnJournal, in TxnInput, published bool) error {
+func (s *Store) txnClear(ctx context.Context, r *txnRoots, j *txnJournal, in TxnInput, published bool, ledger *txnLedger) error {
+	if ledger == nil {
+		ledger = newTxnLedger()
+	}
 	deletedBackup, deletedPrune := false, false
 	if published {
-		if err := txnCleanupEvidence(ctx, r, j); err != nil {
+		if err := txnCleanupEvidence(ctx, r, j, ledger); err != nil {
 			return err
 		}
 	}
@@ -587,7 +598,7 @@ func (s *Store) txnClear(ctx context.Context, r *txnRoots, j *txnJournal, in Txn
 		}
 		if published && e.Old != nil && !e.Reuse {
 			name := txnBackup(j, i)
-			err := txnVerify(ctx, r.work, name, *e.Old)
+			err := txnVerifyLedger(ctx, r.work, name, *e.Old, ledger, nil)
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
@@ -610,7 +621,7 @@ func (s *Store) txnClear(ctx context.Context, r *txnRoots, j *txnJournal, in Txn
 		}
 		stage := txnStage(j, i)
 		if e.Target != nil {
-			err := txnVerify(ctx, r.work, stage, *e.Target)
+			err := txnVerifyLedger(ctx, r.work, stage, *e.Target, ledger, nil)
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
@@ -625,7 +636,7 @@ func (s *Store) txnClear(ctx context.Context, r *txnRoots, j *txnJournal, in Txn
 		return err
 	}
 	if published {
-		if err := txnCleanupRebuild(ctx, r, j); err != nil {
+		if err := txnCleanupRebuild(ctx, r, j, ledger); err != nil {
 			return err
 		}
 	}

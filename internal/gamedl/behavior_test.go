@@ -250,3 +250,149 @@ func TestReopeningTamperedBlobRejectsSameSizeBytes(t *testing.T) {
 	_, err = e.OpenBlob(context.Background(), obj)
 	requireKind(t, err, gamedl.ErrChecksum)
 }
+func TestVerifyBlobReportsHashedChunks(t *testing.T) {
+	data := bytes.Repeat([]byte("verify-stream-chunk-"), 20000)
+	e, task := fixture(t, data, nil)
+	if err := e.Run(context.Background(), task, nil); err != nil {
+		t.Fatal(err)
+	}
+	var hashed int64
+	if err := e.VerifyBlob(context.Background(), identity(data), func(n int64) { hashed += n }); err != nil {
+		t.Fatal(err)
+	}
+	if hashed != int64(len(data)) {
+		t.Fatalf("VerifyBlob reported %d hashed bytes, want %d", hashed, len(data))
+	}
+}
+func TestBlobPathValidatesMetadataAndRejectsHardlinksAndSizeMismatch(t *testing.T) {
+	data := []byte("blob path payload")
+	work, state := t.TempDir(), t.TempDir()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "fixture", zeroTime, bytes.NewReader(data))
+	}))
+	defer server.Close()
+	e, err := gamedl.New(gamedl.Options{DB: testDB(t), WorkRoot: work, StateRoot: state, Client: server.Client(), Resolve: func(context.Context, gameres.Source) ([]string, error) { return []string{server.URL}, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	obj := identity(data)
+	task := gamedl.Task{ID: "blobpath", Kind: gamedl.TaskPreloadFiles, ListHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Transfers: []gamedl.Transfer{{Object: obj, Source: gameres.Source{Kind: gameres.SourceCAS, Object: obj}}}}
+	if err := e.Run(context.Background(), task, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.BlobPath(obj)
+	if err != nil || got != "cache/blobs/"+obj.String() {
+		t.Fatalf("BlobPath=%q err=%v", got, err)
+	}
+	if _, err := e.BlobPath(identity([]byte("missing"))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing blob err=%v, want os.ErrNotExist", err)
+	}
+	wrongSize := obj
+	wrongSize.Size++
+	if _, err := e.BlobPath(wrongSize); err == nil {
+		t.Fatal("accepted mismatched size")
+	}
+	if _, err := e.BlobPath(gameres.Object{MD5: "not-a-md5", Size: 1}); err == nil {
+		t.Fatal("accepted invalid object")
+	}
+	blobFull := filepath.Join(work, filepath.FromSlash(got))
+	linkPath := filepath.Join(t.TempDir(), "hardlink")
+	if err := os.Link(blobFull, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.BlobPath(obj)
+	requireKind(t, err, gamedl.ErrPathUnsafe)
+}
+func TestPublishVerifiedValidatesSafetyAndPublishesWithoutRehash(t *testing.T) {
+	work, state := t.TempDir(), t.TempDir()
+	e, err := gamedl.New(gamedl.Options{
+		DB: testDB(t), WorkRoot: work, StateRoot: state,
+		Client:  &http.Client{},
+		Resolve: func(context.Context, gameres.Source) ([]string, error) { return nil, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	data := []byte("verified rebuilt output")
+	obj := identity(data)
+	part := "cache/tmp/rebuilt-1"
+	partFull := filepath.Join(work, filepath.FromSlash(part))
+	if err := os.WriteFile(partFull, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.PublishVerified(context.Background(), obj, part); err != nil {
+		t.Fatal(err)
+	}
+	assertBlob(t, e, obj, data)
+	if _, err := os.Stat(partFull); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source part survived publish: %v", err)
+	}
+	// Reject wrong size.
+	badPart := "cache/tmp/rebuilt-bad-size"
+	if err := os.WriteFile(filepath.Join(work, filepath.FromSlash(badPart)), []byte("short"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	requireKind(t, e.PublishVerified(context.Background(), obj, badPart), gamedl.ErrChecksum)
+	// Reject hardlinked temp file.
+	linkPart := "cache/tmp/rebuilt-linked"
+	linkFull := filepath.Join(work, filepath.FromSlash(linkPart))
+	otherObj := identity([]byte("another payload"))
+	if err := os.WriteFile(linkFull, []byte("another payload"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(linkFull, filepath.Join(t.TempDir(), "alias")); err != nil {
+		t.Fatal(err)
+	}
+	requireKind(t, e.PublishVerified(context.Background(), otherObj, linkPart), gamedl.ErrPathUnsafe)
+	// Reject path outside cache/tmp/.
+	requireKind(t, e.PublishVerified(context.Background(), otherObj, "cache/blobs/outside"), gamedl.ErrPathUnsafe)
+}
+func TestVerifyFileAndBlocksSinglePassAndConcurrentVerifyBlob(t *testing.T) {
+	// 2.5 MiB payload split into 3 contiguous manifest blocks (1 MiB + 1 MiB + 0.5 MiB).
+	data := bytes.Repeat([]byte("block-verify-payload-0123456789!"), (2<<20+512<<10)/32)
+	obj := identity(data)
+	b0 := identity(data[:1<<20])
+	b1 := identity(data[1<<20 : 2<<20])
+	b2 := identity(data[2<<20:])
+	blocks := []gameres.Block{
+		{Index: 0, Start: 0, Size: b0.Size, MD5: b0.MD5},
+		{Index: 1, Start: b0.Size, Size: b1.Size, MD5: b1.MD5},
+		{Index: 2, Start: b0.Size + b1.Size, Size: b2.Size, MD5: b2.MD5},
+	}
+	t.Run("valid-multi-block", func(t *testing.T) {
+		e, task := fixture(t, data, nil)
+		task.Transfers[0].ChunkSize = 1 << 20
+		task.Transfers[0].Blocks = blocks
+		if err := e.Run(context.Background(), task, nil); err != nil {
+			t.Fatal(err)
+		}
+		assertBlob(t, e, obj, data)
+		// Verify concurrent VerifyBlob calls succeed in parallel without blocking or racing.
+		errCh := make(chan error, 4)
+		for range 4 {
+			go func() {
+				var hashed int64
+				err := e.VerifyBlob(context.Background(), obj, func(n int64) { hashed += n })
+				if err == nil && hashed != obj.Size {
+					err = fmt.Errorf("hashed=%d want %d", hashed, obj.Size)
+				}
+				errCh <- err
+			}()
+		}
+		for range 4 {
+			if err := <-errCh; err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	t.Run("corrupt-block-md5-rejected", func(t *testing.T) {
+		badBlocks := append([]gameres.Block(nil), blocks...)
+		badBlocks[1].MD5 = "00000000000000000000000000000000"
+		e, task := fixture(t, data, nil)
+		task.Transfers[0].ChunkSize = 1 << 20
+		task.Transfers[0].Blocks = badBlocks
+		requireKind(t, e.Run(context.Background(), task, nil), gamedl.ErrChecksum)
+	})
+}

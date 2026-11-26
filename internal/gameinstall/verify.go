@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nerv-base/Oddward/internal/gamelocate"
@@ -94,11 +96,7 @@ func verifyCheckOfficial(r *os.Root, record InstallRecord) error {
 		return fmt.Errorf("%w: official config changed", ErrStaleState)
 	}
 	m, err := stateReadBounded(r, adoptOfficialDir+"ResList.xml")
-	if err != nil {
-		return fmt.Errorf("%w: official manifest changed", ErrStaleState)
-	}
-	sum := adoptDigest(append(append(c, 0), m...))
-	if sum != record.OfficialDigest {
+	if adoptOfficialDigest(c, m, err) != record.OfficialDigest {
 		return ErrStaleState
 	}
 	return nil
@@ -135,24 +133,41 @@ func (s *Store) TrustedTargets(ctx context.Context, root string) ([]InstallTarge
 	for _, e := range doc.Entries {
 		entries[e.Path] = e
 	}
-	var out []InstallTarget
-	for _, t := range record.Targets {
+	trusted := make([]bool, len(record.Targets))
+	var toHash []int
+	canFallback := record.State == "ready" && record.VerifyCoverage == "full" && record.VerifiedTargets == len(record.Targets)
+	for i, t := range record.Targets {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		entry, exists := entries[t.Path]
 		if verifyMatches(r, t, entry) {
-			out = append(out, t)
+			trusted[i] = true
 			continue
 		}
-		if !exists && record.State == "ready" && record.VerifyCoverage == "full" && record.VerifiedTargets == len(record.Targets) {
-			_, mismatch, err := verifyHashFile(ctx, r, t)
-			if err != nil {
-				return nil, err
+		if !exists && canFallback {
+			toHash = append(toHash, i)
+		}
+	}
+	if len(toHash) > 0 {
+		if err := txnRunParallel(ctx, len(toHash), func(pctx context.Context, k int) error {
+			idx := toHash[k]
+			_, mismatch, herr := verifyHashFile(pctx, r, record.Targets[idx], nil)
+			if herr != nil {
+				return herr
 			}
 			if mismatch == "" {
-				out = append(out, t)
+				trusted[idx] = true
 			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+	out := make([]InstallTarget, 0, len(record.Targets))
+	for i, t := range record.Targets {
+		if trusted[i] {
+			out = append(out, t)
 		}
 	}
 	return out, nil
@@ -216,32 +231,11 @@ func (s *Store) VerifyInstallation(ctx context.Context, selected string, report 
 		}
 	}
 	result.Record = record
-	var done, total int64
+	var total int64
 	for _, t := range record.Targets {
 		total += t.Size
 	}
-	for i, target := range record.Targets {
-		if err := ctx.Err(); err != nil {
-			return result, err
-		}
-		entry := previous[target.Path]
-		reused := verifyMatches(r, target, entry)
-		var mismatch string
-		if reused {
-			result.Reused++
-		} else {
-			entry, mismatch, err = verifyHashFile(ctx, r, target)
-			if err != nil {
-				return result, err
-			}
-		}
-		if mismatch != "" {
-			delete(previous, target.Path)
-			result.Mismatches = append(result.Mismatches, Mismatch{target.Path, mismatch})
-		} else {
-			previous[target.Path] = entry
-			result.Verified++
-		}
+	persistVerify := func() error {
 		// Keep only current baseline paths, including completed files from prior runs.
 		doc.Entries = nil
 		for _, t := range record.Targets {
@@ -249,12 +243,193 @@ func (s *Store) VerifyInstallation(ctx context.Context, selected string, report 
 				doc.Entries = append(doc.Entries, e)
 			}
 		}
-		if err := s.stateWrite(record.InstallKey+"/verify.json", doc, nil); err != nil {
+		return s.stateWrite(record.InstallKey+"/verify.json", doc, nil)
+	}
+	var reportMu sync.Mutex
+	lastReport := time.Now()
+	var lastReportedBytes, lastReportedHashed int64
+	var lastReportedFiles int
+	emitReport := func(path string, filesDone int, bytesDone, hashedBytes int64, reused, force bool) {
+		if report == nil {
+			return
+		}
+		reportMu.Lock()
+		defer reportMu.Unlock()
+		if ctx.Err() != nil {
+			return
+		}
+		now := time.Now()
+		if !force && now.Sub(lastReport) < 125*time.Millisecond {
+			return
+		}
+		if bytesDone > total {
+			bytesDone = total
+		}
+		if bytesDone < lastReportedBytes {
+			bytesDone = lastReportedBytes
+		}
+		if hashedBytes < lastReportedHashed {
+			hashedBytes = lastReportedHashed
+		}
+		if filesDone < lastReportedFiles {
+			filesDone = lastReportedFiles
+		}
+		lastReport = now
+		lastReportedBytes = bytesDone
+		lastReportedHashed = hashedBytes
+		lastReportedFiles = filesDone
+		report(VerifyReport{
+			Path:        path,
+			FilesDone:   filesDone,
+			FilesTotal:  len(record.Targets),
+			BytesDone:   bytesDone,
+			BytesTotal:  total,
+			HashedBytes: hashedBytes,
+			Reused:      reused,
+		})
+	}
+
+	var done int64
+	var filesDone int
+	type hashTask struct {
+		index  int
+		target InstallTarget
+	}
+	var toHash []hashTask
+	for i, target := range record.Targets {
+		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		done += target.Size
-		if report != nil {
-			report(VerifyReport{Path: target.Path, FilesDone: i + 1, FilesTotal: len(record.Targets), BytesDone: done, BytesTotal: total, Reused: reused})
+		entry := previous[target.Path]
+		if verifyMatches(r, target, entry) {
+			result.Reused++
+			result.Verified++
+			filesDone++
+			done += target.Size
+			emitReport(target.Path, filesDone, done, 0, true, true)
+			continue
+		}
+		toHash = append(toHash, hashTask{index: i, target: target})
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+
+	mismatchesByIdx := make([]string, len(record.Targets))
+	if len(toHash) > 0 {
+		wctx, cancelWorkers := context.WithCancel(ctx)
+		defer cancelWorkers()
+		var progressBytes atomic.Int64
+		progressBytes.Store(done)
+		var hashedTotal atomic.Int64
+		var completedFiles atomic.Int64
+		completedFiles.Store(int64(filesDone))
+
+		type verifyDone struct {
+			index    int
+			target   InstallTarget
+			entry    verifyEntry
+			mismatch string
+			read     int64
+			err      error
+		}
+		workers := txnWorkerCount(len(toHash))
+		jobs := make(chan hashTask)
+		completed := make(chan verifyDone, len(toHash))
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for task := range jobs {
+					if wctx.Err() != nil {
+						return
+					}
+					var fileRead int64
+					entry, mismatch, herr := verifyHashFile(wctx, r, task.target, func(n int64) {
+						fileRead += n
+						h := hashedTotal.Add(n)
+						b := progressBytes.Add(n)
+						emitReport(task.target.Path, int(completedFiles.Load()), b, h, false, false)
+					})
+					res := verifyDone{
+						index:    task.index,
+						target:   task.target,
+						entry:    entry,
+						mismatch: mismatch,
+						read:     fileRead,
+						err:      herr,
+					}
+					select {
+					case completed <- res:
+					case <-wctx.Done():
+						return
+					}
+				}
+			}()
+		}
+		go func() {
+			defer close(jobs)
+			for _, task := range toHash {
+				select {
+				case <-wctx.Done():
+					return
+				case jobs <- task:
+				}
+			}
+		}()
+
+		var loopErr error
+		for received := 0; received < len(toHash); received++ {
+			if err := ctx.Err(); err != nil {
+				loopErr = err
+				break
+			}
+			var res verifyDone
+			select {
+			case <-ctx.Done():
+				loopErr = ctx.Err()
+			case res = <-completed:
+			}
+			if loopErr != nil {
+				break
+			}
+			if err := ctx.Err(); err != nil {
+				loopErr = err
+				break
+			}
+			if res.err != nil {
+				loopErr = res.err
+				break
+			}
+			if res.mismatch != "" {
+				delete(previous, res.target.Path)
+				mismatchesByIdx[res.index] = res.mismatch
+			} else {
+				previous[res.target.Path] = res.entry
+				result.Verified++
+			}
+			if err := persistVerify(); err != nil {
+				loopErr = err
+				break
+			}
+			if rem := res.target.Size - res.read; rem > 0 {
+				progressBytes.Add(rem)
+			}
+			done += res.target.Size
+			filesDone++
+			completedFiles.Store(int64(filesDone))
+			emitReport(res.target.Path, filesDone, max(done, progressBytes.Load()), hashedTotal.Load(), false, true)
+		}
+		cancelWorkers()
+		wg.Wait()
+		if loopErr != nil {
+			return result, loopErr
+		}
+		for i, reason := range mismatchesByIdx {
+			if reason != "" {
+				result.Mismatches = append(result.Mismatches, Mismatch{record.Targets[i].Path, reason})
+			}
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -295,7 +470,7 @@ func verifyHasMismatch(m []Mismatch, path string) bool {
 	}
 	return false
 }
-func verifyHashFile(ctx context.Context, r *os.Root, target InstallTarget) (verifyEntry, string, error) {
+func verifyHashFile(ctx context.Context, r *os.Root, target InstallTarget, onRead func(int64)) (verifyEntry, string, error) {
 	f, err := r.Open(target.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return verifyEntry{}, "missing", nil
@@ -315,7 +490,9 @@ func verifyHashFile(ctx context.Context, r *os.Root, target InstallTarget) (veri
 		return verifyEntry{}, "size", nil
 	}
 	h := md5.New()
-	buf := make([]byte, 256<<10)
+	ptr := txnBufPool.Get().(*[]byte)
+	buf := *ptr
+	defer txnBufPool.Put(ptr)
 	for {
 		if err := ctx.Err(); err != nil {
 			return verifyEntry{}, "", err
@@ -323,6 +500,9 @@ func verifyHashFile(ctx context.Context, r *os.Root, target InstallTarget) (veri
 		n, err := f.Read(buf)
 		if n > 0 {
 			h.Write(buf[:n])
+			if onRead != nil {
+				onRead(int64(n))
+			}
 		}
 		if err == io.EOF {
 			break
@@ -346,4 +526,99 @@ func verifyHashFile(ctx context.Context, r *os.Root, target InstallTarget) (veri
 		return verifyEntry{}, "changed_during_verification", nil
 	}
 	return entry, "", nil
+}
+
+// TargetFingerprintMatches reports whether target currently matches a persisted
+// full-MD5 verification entry (size, mtime, and non-unknown NTFS file ID).
+func (s *Store) TargetFingerprintMatches(root string, target InstallTarget) bool {
+	if s == nil || root == "" {
+		return false
+	}
+	record, err := s.ReadInstall(root)
+	if err != nil || record.BaselineMismatch {
+		return false
+	}
+	r, err := os.OpenRoot(record.Root)
+	if err != nil {
+		return false
+	}
+	defer r.Close()
+	if err := verifyCheckOfficial(r, record); err != nil {
+		return false
+	}
+	doc, err := s.verifyRead(record)
+	if err != nil {
+		return false
+	}
+	for _, e := range doc.Entries {
+		if e.Path == target.Path {
+			return e.FileID != "unknown" && verifyMatches(r, target, e)
+		}
+	}
+	return false
+}
+
+func (s *Store) txnSeedVerifyLedger(install *os.Root, record InstallRecord) *txnLedger {
+	ledger := newTxnLedger()
+	s.txnSeedVerifyInto(install, record, ledger)
+	return ledger
+}
+
+func (s *Store) txnSeedVerifyInto(install *os.Root, record InstallRecord, ledger *txnLedger) {
+	if ledger == nil || record.InstallKey == "" || record.ManifestDigest == "" {
+		return
+	}
+	doc, err := s.verifyRead(record)
+	if err != nil || doc.ManifestDigest != record.ManifestDigest || len(doc.Entries) == 0 {
+		return
+	}
+	for _, e := range doc.Entries {
+		if e.FileID == "" || e.FileID == "unknown" {
+			continue
+		}
+		st, err := txnStatStamp(install, e.Path)
+		if err != nil || !st.valid() {
+			continue
+		}
+		if st.Size == e.Size && st.MtimeUnix == e.Mtime.UTC().UnixNano() && st.fileID() == e.FileID {
+			ledger.put(st, e.MD5)
+		}
+	}
+}
+
+func (s *Store) txnWriteVerify(install *os.Root, record InstallRecord) error {
+	if record.InstallKey == "" || record.ManifestDigest == "" || len(record.Targets) == 0 || len(record.Targets) > 65536 {
+		return nil
+	}
+	now := time.Now().UTC()
+	doc := verifyDocument{
+		Schema:         1,
+		InstallKey:     record.InstallKey,
+		ManifestDigest: record.ManifestDigest,
+		Entries:        make([]verifyEntry, 0, len(record.Targets)),
+	}
+	for _, t := range record.Targets {
+		f, err := install.Open(t.Path)
+		if err != nil {
+			return err
+		}
+		size, mtime, id, ferr := verifyFingerprint(f)
+		f.Close()
+		if ferr != nil || size != t.Size || mtime.IsZero() || id == "" {
+			continue
+		}
+		doc.Entries = append(doc.Entries, verifyEntry{
+			Path:       t.Path,
+			MD5:        t.MD5,
+			Size:       size,
+			Mtime:      mtime,
+			FileID:     id,
+			VerifiedAt: now,
+			Source:     "verify",
+		})
+	}
+	if len(doc.Entries) == 0 {
+		return nil
+	}
+	return s.stateWrite(record.InstallKey+"/verify.json", doc, nil)
 }

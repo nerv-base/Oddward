@@ -31,7 +31,7 @@ func preloadSystemPut(t *testing.T, root, name string, data []byte) {
 		t.Fatal(err)
 	}
 }
-func preloadSystemBase(t *testing.T, b *GameDownloadBackend) string {
+func officialInstallFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	pe := make([]byte, 90)
@@ -48,6 +48,11 @@ func preloadSystemBase(t *testing.T, b *GameDownloadBackend) string {
 	manifest := []byte(fmt.Sprintf(`<ResList version="1.0.0" tag="baseTag"><Res filename="HT/Content/Paks/a.pak" md5="%x" filesize="3"/></ResList>`, md5.Sum([]byte("old"))))
 	preloadSystemPut(t, root, "NTELauncher/UserData/Patcher/PatcherSDK/ResList.xml", manifest)
 	preloadSystemPut(t, root, "NTELauncher/UserData/Patcher/PatcherSDK/config.xml", []byte(fmt.Sprintf(`<config><ResVersion>1.0.0</ResVersion><Extra><listHash>%x</listHash></Extra></config>`, md5.Sum(manifest))))
+	return root
+}
+func preloadSystemBase(t *testing.T, b *GameDownloadBackend) string {
+	t.Helper()
+	root := officialInstallFixture(t)
 	s, err := b.installStore()
 	if err != nil {
 		t.Fatal(err)
@@ -157,9 +162,9 @@ func TestSystemPreloadUnknownQueryRouteFailsClosedWithoutFetching(t *testing.T) 
 	if event.Kind != state.PreloadChecked || event.Enabled || event.Body != "unverified" || calls != 1 {
 		t.Fatalf("discovery: %+v calls=%d", event, calls)
 	}
-	latest, preload, offered, err := b.preloadOfferSnapshot(context.Background(), root)
-	if err != nil || latest != "1.0.0" || preload != "1.1.0" || offered || calls != 2 {
-		t.Fatalf("read-only offer snapshot: latest=%q preload=%q offered=%v err=%v calls=%d", latest, preload, offered, err, calls)
+	offer, err := b.pollDownloadOffer(context.Background(), root, state.Event{})
+	if err != nil || offer.Message != "1.0.0" || offer.Body != "1.1.0" || offer.Enabled || calls != 2 {
+		t.Fatalf("read-only offer: %+v err=%v calls=%d", offer, err, calls)
 	}
 	if _, err := os.Stat(downloadWork(root)); !os.IsNotExist(err) {
 		t.Fatalf("unverified route created work tree: %v", err)
@@ -242,9 +247,9 @@ func TestSystemPreloadOfferSnapshotKeepsFormalVersionWhenPreloadQueryFails(t *te
 	b.free = func(string) (int64, error) { return 8 << 30, nil }
 	b.processes = func(context.Context) (downloadProcesses, error) { return downloadProcesses{}, nil }
 	root := preloadSystemBase(t, b)
-	latest, _, offered, err := b.preloadOfferSnapshot(context.Background(), root)
-	if err != nil || latest != "1.2.0" || offered {
-		t.Fatalf("offer snapshot lost formal update when preload 404d: latest=%q offered=%v err=%v", latest, offered, err)
+	offer, err := b.pollDownloadOffer(context.Background(), root, state.Event{})
+	if err != nil || offer.Message != "1.2.0" || offer.Enabled {
+		t.Fatalf("offer lost formal update when preload 404d: %+v err=%v", offer, err)
 	}
 }
 

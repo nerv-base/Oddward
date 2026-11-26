@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const ioBufferSize = 256 << 10
+const ioBufferSize = 1 << 20
 
 var buffers = sync.Pool{New: func() any { b := make([]byte, ioBufferSize); return &b }}
 
@@ -21,7 +21,7 @@ type Engine struct {
 	store        *Store
 	lease        *Lease
 	ownsLease    bool
-	mu           sync.Mutex
+	mu           sync.RWMutex
 	closed       bool
 	connections  chan struct{}
 	limiter      rateLimiter

@@ -135,3 +135,47 @@ func TestDownloadMetadataFormalFollowsResConfigAndRejectsLoopsOrForeignApp(t *te
 		t.Fatal("accepted foreign appId redirect")
 	}
 }
+
+func TestDownloadMetadataConfigAddsCacheBustingQueryAndPreservesCanonicalURL(t *testing.T) {
+	manifest := []byte(fmt.Sprintf(`<ResList version="1.5.8" tag="baseTag"><Res filename="HT/Content/Paks/a.pak" md5="%x" filesize="3"/></ResList>`, md5.Sum([]byte("new"))))
+	listHash := fmt.Sprintf("%x", md5.Sum(manifest))
+	zipData := preloadSyntheticArchive(t, manifest)
+	var headQuery, headCacheControl, versionQuery string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/clientRes/PC_150/Version/Windows/config.xml":
+			headQuery = r.URL.Query().Get("tValue")
+			headCacheControl = r.Header.Get("Cache-Control")
+			fmt.Fprintf(w, `<config><ResVersion>1.5.8</ResVersion><Extra><listHash>%s</listHash></Extra></config>`, listHash)
+		case "/clientRes/PC_150/Version/Windows/version/1.5.8/config.xml":
+			versionQuery = r.URL.RawQuery
+			fmt.Fprintf(w, `<config><ResVersion>1.5.8</ResVersion><Extra><listHash>%s</listHash></Extra></config>`, listHash)
+		case "/clientRes/PC_150/Version/Windows/version/1.5.8/ResList.bin.zip":
+			_, _ = w.Write(zipData)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	m := remoteDownloads{client: srv.Client(), roots: []string{srv.URL + "/clientRes"}}
+	cfg, res, err := m.config(context.Background(), "PC_150")
+	if err != nil || cfg.ResVersion != "1.5.8" {
+		t.Fatalf("config = %+v err=%v", cfg, err)
+	}
+	if headQuery == "" {
+		t.Fatal("mutable branch config.xml request missing tValue cache-busting query")
+	}
+	if headCacheControl != "no-cache" {
+		t.Fatalf("Cache-Control = %q, want no-cache", headCacheControl)
+	}
+	if res.URL != srv.URL+"/clientRes/PC_150/Version/Windows/config.xml" {
+		t.Fatalf("provenance URL polluted by query: %q", res.URL)
+	}
+	got, err := m.delivery(context.Background(), "PC_150", "1.5.8")
+	if err != nil || got.Config.ResVersion != "1.5.8" {
+		t.Fatalf("versioned delivery = %+v err=%v", got, err)
+	}
+	if versionQuery != "" {
+		t.Fatalf("immutable versioned config.xml had unexpected query %q", versionQuery)
+	}
+}

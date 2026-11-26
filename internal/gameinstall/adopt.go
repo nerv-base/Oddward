@@ -33,20 +33,37 @@ func (s *Store) AdoptQuick(ctx context.Context, selected string, remote *AdoptMe
 	configData, configErr := stateReadBounded(r, adoptOfficialDir+"config.xml")
 	manifestData, manifestErr := stateReadBounded(r, adoptOfficialDir+"ResList.xml")
 	officialDigest := ""
-	if configErr == nil && manifestErr == nil {
-		officialDigest = adoptDigest(append(append(append([]byte{}, configData...), 0), manifestData...))
+	if configErr == nil {
+		officialDigest = adoptOfficialDigest(configData, manifestData, manifestErr)
 	}
 	var cfg gameres.Config
 	var manifest gameres.ResList
 	var plain []byte
 	usable := false
-	if configErr == nil && manifestErr == nil {
+	if configErr == nil {
 		cfg, configErr = gameres.ParseConfig(configData)
+	}
+	installedConfig := cfg
+	if manifestErr == nil {
 		plain, manifest, manifestErr = adoptParseManifest(manifestData)
 		if manifestErr != nil && plain != nil {
 			return result, manifestErr
 		}
 		usable = configErr == nil && manifestErr == nil
+		if usable && cfg.ResSize != 0 {
+			// The installed projection can legitimately have a different digest
+			// from the CDN list. Its declared base size still covers every target.
+			var listedBytes int64
+			for _, file := range manifest.Files {
+				listedBytes += file.Size
+			}
+			for _, pack := range manifest.Packages {
+				for _, entry := range pack.Entries {
+					listedBytes += entry.Size
+				}
+			}
+			usable = listedBytes == cfg.ResSize
+		}
 	}
 	remoteHashMismatch := false
 	if usable && remote != nil {
@@ -65,6 +82,9 @@ func (s *Store) AdoptQuick(ctx context.Context, selected string, remote *AdoptMe
 		cfg, err = gameres.ParseConfig(remote.ConfigXML)
 		if err != nil {
 			return result, err
+		}
+		if installedConfig.ResVersion != "" && (cfg.ResVersion != installedConfig.ResVersion || installedConfig.LocalBranch != "" && installedConfig.LocalBranch != installation.Branch) {
+			return result, fmt.Errorf("%w: remote metadata differs from installed version or branch", ErrStaleState)
 		}
 		plain, manifest, err = adoptParseManifest(remote.Manifest)
 		if err != nil {
@@ -129,6 +149,20 @@ func (s *Store) AdoptQuick(ctx context.Context, selected string, remote *AdoptMe
 	return result, nil
 }
 func adoptDigest(data []byte) string { return fmt.Sprintf("%x", md5.Sum(data)) }
+
+// A versioned fallback can start with only an official config. Bind that
+// record to the config and to the absence of the manifest. Preserve the
+// original digest format for installations containing both files.
+func adoptOfficialDigest(config, manifest []byte, manifestErr error) string {
+	if errors.Is(manifestErr, os.ErrNotExist) {
+		return adoptDigest(config)
+	}
+	if manifestErr != nil {
+		return ""
+	}
+	return adoptDigest(append(append(config, 0), manifest...))
+}
+
 func adoptParseManifest(data []byte) ([]byte, gameres.ResList, error) {
 	plain := data
 	var err error

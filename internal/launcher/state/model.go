@@ -164,6 +164,8 @@ type Event struct {
 	Reused, PatchBytes      int64
 	ETASecs                 int32
 	Needed, Free, Suggested int64
+	// Preparation required by the local baseline before planning an offered update.
+	NeedsAdoption, NeedsVerification bool
 	// Rate is the measured transfer rate in bytes per second; 0 is unknown.
 	Rate    int64
 	Enabled bool

@@ -277,7 +277,7 @@ func TestApplyDownloadPatchesProgressAndReuse(t *testing.T) {
 		if event.Kind != state.ApplyProgress {
 			continue
 		}
-		if event.Stage != state.StageApply || event.Downloaded < written || event.FilesDone < done || event.Rate != 0 || event.ETASecs != 0 || event.Downloaded > event.Total {
+		if event.Stage != state.StageApply || event.Downloaded < written || event.FilesDone < done || event.Rate < 0 || event.ETASecs < 0 || event.Downloaded > event.Total {
 			t.Fatalf("untruthful progress %+v", event)
 		}
 		written, done = event.Downloaded, event.FilesDone

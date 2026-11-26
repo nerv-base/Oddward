@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nerv-base/Oddward/internal/gamedl"
@@ -251,14 +252,48 @@ func (b *GameDownloadBackend) buildDownloadPlan(ctx context.Context, root string
 			return nil, err
 		}
 		defer engine.Close()
+		var present []gameres.Object
 		for object := range downloadCacheCandidates(manifest, cacheGraph) {
 			if err = ctx.Err(); err != nil {
 				return nil, err
 			}
-			blob, err := engine.OpenBlob(ctx, object)
-			if err == nil {
-				local.cached[object] = true
-				blob.Close()
+			if _, err := engine.BlobPath(object); err == nil {
+				present = append(present, object)
+			}
+		}
+		if len(present) > 0 {
+			workers := verifyBlobWorkers(len(present))
+			jobs := make(chan gameres.Object)
+			var mu sync.Mutex
+			var wg sync.WaitGroup
+			for range workers {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for object := range jobs {
+						if ctx.Err() != nil {
+							return
+						}
+						if engine.VerifyBlob(ctx, object, nil) == nil {
+							mu.Lock()
+							local.cached[object] = true
+							mu.Unlock()
+						}
+					}
+				}()
+			}
+		sendLoop:
+			for _, object := range present {
+				select {
+				case <-ctx.Done():
+					break sendLoop
+				case jobs <- object:
+				}
+			}
+			close(jobs)
+			wg.Wait()
+			if err = ctx.Err(); err != nil {
+				return nil, err
 			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {

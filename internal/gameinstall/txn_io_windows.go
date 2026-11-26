@@ -11,12 +11,143 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/nerv-base/Oddward/internal/gameres"
 	"golang.org/x/sys/windows"
 )
+
+const txnIOBufSize = 1 << 20
+
+var txnBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, txnIOBufSize)
+		return &b
+	},
+}
+
+// txnHashObserver is a test-only hook called once per full file MD5 pass.
+var txnHashObserver func(name string, size int64)
+
+type txnStamp struct {
+	VolumeSerial uint32
+	IndexHigh    uint32
+	IndexLow     uint32
+	Size         int64
+	MtimeUnix    int64
+}
+
+func (st txnStamp) valid() bool {
+	return st.Size > 0 && (st.VolumeSerial != 0 || st.IndexHigh != 0 || st.IndexLow != 0)
+}
+func (st txnStamp) fileID() string {
+	return fmt.Sprintf("%08x:%08x%08x", st.VolumeSerial, st.IndexHigh, st.IndexLow)
+}
+
+// txnLedger caches verified (volume, NTFS file ID, size, mtime) -> MD5 mappings
+// strictly within a single Commit or cleanup invocation under an unbroken lease.
+// Same-volume renames preserve VolumeSerial and FileIndex, so a file verified
+// once does not need to be rehashed across staging, backup, placement, and
+// post-placement verification unless its metadata changes.
+type txnLedger struct {
+	mu      sync.Mutex
+	byStamp map[txnStamp]string
+}
+
+func newTxnLedger() *txnLedger {
+	return &txnLedger{byStamp: map[txnStamp]string{}}
+}
+func (l *txnLedger) get(st txnStamp) (string, bool) {
+	if l == nil || !st.valid() {
+		return "", false
+	}
+	l.mu.Lock()
+	md5Hex, ok := l.byStamp[st]
+	l.mu.Unlock()
+	return md5Hex, ok
+}
+func (l *txnLedger) put(st txnStamp, md5Hex string) {
+	if l == nil || !st.valid() || !stateValidMD5(md5Hex) {
+		return
+	}
+	l.mu.Lock()
+	l.byStamp[st] = md5Hex
+	l.mu.Unlock()
+}
+
+func txnWorkerCount(n int) int {
+	if n <= 1 {
+		return 1
+	}
+	w := runtime.NumCPU() / 2
+	if w < 2 {
+		w = 2
+	}
+	if w > 4 {
+		w = 4
+	}
+	if n < w {
+		return n
+	}
+	return w
+}
+
+func txnRunParallel(ctx context.Context, n int, fn func(context.Context, int) error) error {
+	if n <= 0 {
+		return nil
+	}
+	workers := txnWorkerCount(n)
+	if workers == 1 {
+		for i := 0; i < n; i++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := fn(ctx, i); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	pctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan int)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				if err := pctx.Err(); err != nil {
+					return
+				}
+				if err := fn(pctx, i); err != nil {
+					errs[i] = err
+					cancel()
+					return
+				}
+			}
+		}()
+	}
+	for i := 0; i < n; i++ {
+		select {
+		case <-pctx.Done():
+			i = n
+		case jobs <- i:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
 
 type txnRoots struct {
 	install, work         *os.Root
@@ -157,60 +288,110 @@ func txnIDValid(id string) bool {
 func txnBootstrapPath(name string) bool {
 	return name == "Client/WindowsNoEditor/PatcherConfig/Patch_Windows.json" || name == "Client/WindowsNoEditor/PatcherConfig/Patch_Windows.source.json"
 }
-func txnIdentity(ctx context.Context, r *os.Root, name string) (InstallTarget, error) {
-	if err := ctx.Err(); err != nil {
-		return InstallTarget{}, err
-	}
-	if err := txnSafe(r, name, false); err != nil {
-		return InstallTarget{}, err
-	}
-	f, err := r.Open(name)
+
+func txnHandleStamp(f *os.File) (txnStamp, error) {
+	st, err := f.Stat()
 	if err != nil {
-		return InstallTarget{}, err
+		return txnStamp{}, err
 	}
-	defer f.Close()
-	before, err := f.Stat()
-	if err != nil {
-		return InstallTarget{}, err
-	}
-	if !before.Mode().IsRegular() {
-		return InstallTarget{}, ErrUnsafeTarget
+	if !st.Mode().IsRegular() {
+		return txnStamp{}, ErrUnsafeTarget
 	}
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(windows.Handle(f.Fd()), &info); err != nil {
-		return InstallTarget{}, err
+		return txnStamp{}, err
 	}
 	if info.NumberOfLinks != 1 {
-		return InstallTarget{}, ErrUnsafeTarget
+		return txnStamp{}, ErrUnsafeTarget
+	}
+	return txnStamp{
+		VolumeSerial: info.VolumeSerialNumber,
+		IndexHigh:    info.FileIndexHigh,
+		IndexLow:     info.FileIndexLow,
+		Size:         st.Size(),
+		MtimeUnix:    st.ModTime().UTC().UnixNano(),
+	}, nil
+}
+
+func txnStatStamp(r *os.Root, name string) (txnStamp, error) {
+	if err := txnSafe(r, name, false); err != nil {
+		return txnStamp{}, err
+	}
+	f, err := r.Open(name)
+	if err != nil {
+		return txnStamp{}, err
+	}
+	defer f.Close()
+	return txnHandleStamp(f)
+}
+
+func txnIdentity(ctx context.Context, r *os.Root, name string) (InstallTarget, error) {
+	target, _, err := txnIdentityLedger(ctx, r, name, nil, nil)
+	return target, err
+}
+
+func txnIdentityLedger(ctx context.Context, r *os.Root, name string, ledger *txnLedger, onRead func(int64)) (InstallTarget, txnStamp, error) {
+	if err := ctx.Err(); err != nil {
+		return InstallTarget{}, txnStamp{}, err
+	}
+	if err := txnSafe(r, name, false); err != nil {
+		return InstallTarget{}, txnStamp{}, err
+	}
+	f, err := r.Open(name)
+	if err != nil {
+		return InstallTarget{}, txnStamp{}, err
+	}
+	defer f.Close()
+	before, err := txnHandleStamp(f)
+	if err != nil {
+		return InstallTarget{}, txnStamp{}, err
+	}
+	if md5Hex, ok := ledger.get(before); ok {
+		return InstallTarget{Path: name, MD5: md5Hex, Size: before.Size}, before, nil
 	}
 	h := md5.New()
-	buffer := make([]byte, 128<<10)
+	ptr := txnBufPool.Get().(*[]byte)
+	buffer := *ptr
+	defer txnBufPool.Put(ptr)
 	for {
 		if err := ctx.Err(); err != nil {
-			return InstallTarget{}, err
+			return InstallTarget{}, txnStamp{}, err
 		}
 		n, err := f.Read(buffer)
 		if n > 0 {
 			h.Write(buffer[:n])
+			if onRead != nil {
+				onRead(int64(n))
+			}
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return InstallTarget{}, err
+			return InstallTarget{}, txnStamp{}, err
 		}
 	}
-	after, err := f.Stat()
+	after, err := txnHandleStamp(f)
 	if err != nil {
-		return InstallTarget{}, err
+		return InstallTarget{}, txnStamp{}, err
 	}
-	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
-		return InstallTarget{}, errors.New("file changed while hashing")
+	if before != after {
+		return InstallTarget{}, txnStamp{}, errors.New("file changed while hashing")
 	}
-	return InstallTarget{Path: name, MD5: fmt.Sprintf("%x", h.Sum(nil)), Size: before.Size()}, nil
+	digest := fmt.Sprintf("%x", h.Sum(nil))
+	if obs := txnHashObserver; obs != nil {
+		obs(name, before.Size)
+	}
+	ledger.put(before, digest)
+	return InstallTarget{Path: name, MD5: digest, Size: before.Size}, before, nil
 }
+
 func txnVerify(ctx context.Context, r *os.Root, name string, want InstallTarget) error {
-	actual, err := txnIdentity(ctx, r, name)
+	return txnVerifyLedger(ctx, r, name, want, nil, nil)
+}
+
+func txnVerifyLedger(ctx context.Context, r *os.Root, name string, want InstallTarget, ledger *txnLedger, onRead func(int64)) error {
+	actual, _, err := txnIdentityLedger(ctx, r, name, ledger, onRead)
 	if err != nil {
 		return err
 	}
@@ -220,7 +401,8 @@ func txnVerify(ctx context.Context, r *os.Root, name string, want InstallTarget)
 	}
 	return nil
 }
-func txnCopy(ctx context.Context, r *os.Root, source, dest string) error {
+
+func txnCopyHashed(ctx context.Context, r *os.Root, source, dest string, want InstallTarget, ledger *txnLedger) (resultErr error) {
 	if err := txnSafe(r, source, false); err != nil {
 		return err
 	}
@@ -236,17 +418,37 @@ func txnCopy(ctx context.Context, r *os.Root, source, dest string) error {
 	if err != nil {
 		return err
 	}
-	defer dst.Close()
-	buf := make([]byte, 128<<10)
+	closed := false
+	defer func() {
+		if !closed {
+			if err := dst.Close(); resultErr == nil && err != nil {
+				resultErr = err
+			}
+		}
+		if resultErr != nil {
+			_ = r.Remove(dest)
+		}
+	}()
+	h := md5.New()
+	ptr := txnBufPool.Get().(*[]byte)
+	buf := *ptr
+	defer txnBufPool.Put(ptr)
+	var written int64
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		n, err := src.Read(buf)
 		if n > 0 {
-			if _, werr := dst.Write(buf[:n]); werr != nil {
+			w, werr := dst.Write(buf[:n])
+			if werr != nil {
 				return werr
 			}
+			if w != n {
+				return io.ErrShortWrite
+			}
+			h.Write(buf[:n])
+			written += int64(n)
 		}
 		if err == io.EOF {
 			break
@@ -255,8 +457,27 @@ func txnCopy(ctx context.Context, r *os.Root, source, dest string) error {
 			return err
 		}
 	}
-	return dst.Sync()
+	if err := dst.Sync(); err != nil {
+		return err
+	}
+	closed = true
+	if err := dst.Close(); err != nil {
+		return err
+	}
+	if written != want.Size || fmt.Sprintf("%x", h.Sum(nil)) != want.MD5 {
+		return fmt.Errorf("staging checksum mismatch: %s", want.Path)
+	}
+	st, err := txnStatStamp(r, dest)
+	if err != nil {
+		return err
+	}
+	if st.Size != want.Size {
+		return fmt.Errorf("staging checksum mismatch: %s", want.Path)
+	}
+	ledger.put(st, want.MD5)
+	return nil
 }
+
 func txnEmptyRoot(r *os.Root) error {
 	f, err := r.Open(".")
 	if err != nil {
@@ -274,7 +495,8 @@ func txnEmptyRoot(r *os.Root) error {
 	}
 	return nil
 }
-func txnCheckSpace(ctx context.Context, in TxnInput, r *txnRoots) error {
+
+func txnCheckSpace(ctx context.Context, in TxnInput, r *txnRoots, ledger *txnLedger) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -286,11 +508,11 @@ func txnCheckSpace(ctx context.Context, in TxnInput, r *txnRoots) error {
 			want := InstallTarget{Path: f.Path, MD5: f.MD5, Size: f.Size}
 			if txnIDValid(in.TxnID) {
 				stage := fmt.Sprintf("txn/%s/staged/%d", in.TxnID, i)
-				if txnVerify(ctx, r.work, stage, want) == nil {
+				if txnVerifyLedger(ctx, r.work, stage, want, ledger, nil) == nil {
 					continue
 				}
 			}
-			if in.Candidate.Mode == "fresh" && txnVerify(ctx, r.install, f.Path, want) == nil {
+			if in.Candidate.Mode == "fresh" && txnVerifyLedger(ctx, r.install, f.Path, want, ledger, nil) == nil {
 				continue
 			}
 			if err := ctx.Err(); err != nil {
@@ -340,24 +562,29 @@ func txnCheckSpace(ctx context.Context, in TxnInput, r *txnRoots) error {
 	}
 	return nil
 }
-func txnVerifyCandidate(ctx context.Context, r *txnRoots, j *txnJournal) error {
-	for _, e := range j.Files {
+
+func txnVerifyCandidate(ctx context.Context, r *txnRoots, j *txnJournal, ledger *txnLedger) error {
+	var indices []int
+	for i, e := range j.Files {
 		if e.Target != nil {
-			if err := txnVerify(ctx, r.install, e.Path, *e.Target); err != nil {
-				return err
-			}
+			indices = append(indices, i)
 		}
 	}
-	return nil
+	return txnRunParallel(ctx, len(indices), func(pctx context.Context, k int) error {
+		e := j.Files[indices[k]]
+		return txnVerifyLedger(pctx, r.install, e.Path, *e.Target, ledger, nil)
+	})
 }
-func txnValidateBeforeCommit(ctx context.Context, r *txnRoots, j *txnJournal) error {
-	for i, e := range j.Files {
-		actual, err := txnIdentity(ctx, r.install, e.Path)
+
+func txnValidateBeforeCommit(ctx context.Context, r *txnRoots, j *txnJournal, ledger *txnLedger) error {
+	return txnRunParallel(ctx, len(j.Files), func(pctx context.Context, i int) error {
+		e := j.Files[i]
+		actual, _, err := txnIdentityLedger(pctx, r.install, e.Path, ledger, nil)
 		if e.Reuse {
 			if err != nil || actual != *e.Target {
 				return errors.New("reused file changed before commit")
 			}
-			continue
+			return nil
 		}
 		if e.Old != nil {
 			if err != nil || actual != *e.Old {
@@ -372,12 +599,12 @@ func txnValidateBeforeCommit(ctx context.Context, r *txnRoots, j *txnJournal) er
 		}
 		if e.Target != nil {
 			if j.Kind == "install" && err == nil && actual == *e.Target {
-				continue
+				return nil
 			}
-			if err := txnVerify(ctx, r.work, txnStage(j, i), *e.Target); err != nil {
+			if err := txnVerifyLedger(pctx, r.work, txnStage(j, i), *e.Target, ledger, nil); err != nil {
 				return err
 			}
 		}
-	}
-	return nil
+		return nil
+	})
 }

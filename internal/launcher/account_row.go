@@ -40,7 +40,7 @@ func (s *Shell) homeAccountsPopup(c *ui.Context) ui.Element {
 		visible = 6
 	}
 	box := ui.Column(c.Key("home-account-popup")).Width(homeDockWidth).Padding(8).Gap(2).
-		Radius(homeDockPopupRadius).Background(homeDockTint).Border(1, hairline).
+		Radius(homeDockPopupRadius).Material(frostedSurface{Tint: homeTransferTint}).Border(1, homeTransferBorder).
 		Role(ui.RoleGroup).Label("已保存的账号")
 	box.Children(func() {
 		ui.Text(c, "下次使用的账号").FontSize(downloadCaptionSize).TextColor(muted).

@@ -10,8 +10,8 @@ import (
 // Remaining conservatively counts bytes that are not in verified cache blobs or
 // CRC-checked durable partial chunks. It does not repair state or use HTTP.
 func (e *Engine) Remaining(ctx context.Context, transfers []Transfer) (int64, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	if e.closed {
 		return 0, failure(ErrLocked, "closed engine", "", nil)
 	}

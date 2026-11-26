@@ -363,6 +363,10 @@ func TestDownloadProgressValidatesTokensStagesAndMonotonicCounters(t *testing.T)
 	if n.Download.Stage != StageVerify || n.Download.Downloaded != 0 || n.Download.Rate != 0 || n.Download.ETA != 0 {
 		t.Fatalf("stage reset failed: %+v", n.Download)
 	}
+	nVerify, _ := Reduce(n, Event{Kind: DownloadProgress, Token: n.Download.Request, Stage: StageVerify, Downloaded: 40, Total: 100, FilesDone: 2, FilesTotal: 4, Rate: 500, ETASecs: 4})
+	if nVerify.Download.Downloaded != 40 || nVerify.Download.Total != 100 || nVerify.Download.Rate != 500 || nVerify.Download.ETA != 4 {
+		t.Fatalf("verify throughput not recorded: %+v", nVerify.Download)
+	}
 	n2, _ := Reduce(n, Event{Kind: DownloadProgress, Token: n.Download.Request, Stage: StageNetwork, Downloaded: 80, Total: 100})
 	if n2 != n {
 		t.Fatal("late network stage resurrected")
@@ -375,22 +379,26 @@ func TestDownloadApplyVerifyCommitPublishOrder(t *testing.T) {
 		t.Fatalf("apply start: %+v", m.Download)
 	}
 	m, _ = Reduce(m, Event{Kind: ApplyProgress, Token: m.Download.Request, Stage: StageApply, Downloaded: 20, Total: 50, FilesDone: 1, FilesTotal: 2, Rate: 500, ETASecs: 3})
-	if m.Download.Rate != 0 || m.Download.ETA != 0 {
-		t.Fatal("apply advertised network speed")
+	if m.Download.Rate != 500 || m.Download.ETA != 3 {
+		t.Fatalf("apply throughput not recorded: %+v", m.Download)
 	}
 	m, fx := Reduce(m, Event{Kind: ApplyFinished, Token: m.Download.Request, FilesDone: 2, Enabled: true})
 	requireDownloadEffect(t, m, fx, EffectDownloadVerify)
-	if !m.Download.FallbackNote {
-		t.Fatal("fallback invisible")
+	if !m.Download.FallbackNote || m.Download.Rate != 0 || m.Download.ETA != 0 {
+		t.Fatalf("fallback invisible or apply rate leaked: %+v", m.Download)
 	}
 	m, fx = Reduce(m, downloadEvent(m, DownloadVerified))
 	requireDownloadEffect(t, m, fx, EffectDownloadCommit)
 	if m.Download.Current != "" || m.Download.Stage != StageCommit {
 		t.Fatal("published before commit")
 	}
-	m, _ = Reduce(m, Event{Kind: DownloadProgress, Token: m.Download.Request, Stage: StageFinalize})
-	if m.Download.Current != "" {
-		t.Fatal("finalize published version")
+	m, _ = Reduce(m, Event{Kind: DownloadProgress, Token: m.Download.Request, Stage: StageCommit, Downloaded: 30, Total: 50, FilesDone: 1, FilesTotal: 2, Rate: 1200, ETASecs: 2})
+	if m.Download.Downloaded != 30 || m.Download.Total != 50 || m.Download.Rate != 1200 || m.Download.ETA != 2 {
+		t.Fatalf("commit throughput not recorded: %+v", m.Download)
+	}
+	m, _ = Reduce(m, Event{Kind: DownloadProgress, Token: m.Download.Request, Stage: StageFinalize, Rate: 900, ETASecs: 9})
+	if m.Download.Current != "" || m.Download.Rate != 0 || m.Download.ETA != 0 {
+		t.Fatalf("finalize published version or advertised speed: %+v", m.Download)
 	}
 	m, _ = Reduce(m, Event{Kind: DownloadCommitted, Token: m.Download.Request, Message: "v2"})
 	if m.Download.Phase != DownloadDone || m.Download.Current != "v2" || !m.Download.Verified {

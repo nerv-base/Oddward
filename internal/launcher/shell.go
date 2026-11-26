@@ -126,6 +126,9 @@ type Shell struct {
 	RoleAvatar *ui.Bitmap
 	// staminaOpen keeps the home daily-note popover open across frames.
 	staminaOpen bool
+	// transferPeek keeps the hover transfer card open while the pointer moves
+	// from the bottom capsule up into the summary card.
+	transferPeek bool
 	// locateShown is the first-run link this frame's home built. It hangs in
 	// the strip the media lane reveals over, so View paints it after the lane
 	// and the lane ignores pointer moves over it.

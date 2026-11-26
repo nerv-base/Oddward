@@ -33,6 +33,7 @@ var (
 type Options struct {
 	OldPath, PatchPath, OutputPath string
 	OldExpect, PatchExpect, Expect gameres.Object
+	OldVerified, PatchVerified     bool
 	Progress                       func(written, total int64)
 }
 
@@ -71,24 +72,45 @@ func apply(ctx context.Context, o Options, stats *IOStats) (result error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	// Verify the patch before opening/reading the old source.
+	// Verify the patch before opening/reading the old source unless the caller
+	// already proved its identity under the active work lease.
 	patch, err := openReadOnly(o.PatchPath)
 	if err != nil {
 		return err
 	}
 	defer patch.Close()
 	buffer := make([]byte, bufferSize)
-	if err = verifyFile(ctx, measuredFile{patch, stats}, o.PatchExpect, buffer, ErrPatchMismatch); err != nil {
+	mpatch := measuredFile{patch, stats}
+	if o.PatchVerified {
+		if err = checkFileSize(mpatch, o.PatchExpect, ErrPatchMismatch); err != nil {
+			return err
+		}
+	} else if err = verifyFile(ctx, mpatch, o.PatchExpect, buffer, ErrPatchMismatch); err != nil {
 		return err
 	}
-	header, err := readHeader(measuredFile{patch, stats}, o.PatchExpect.Size)
+	header, err := readHeader(mpatch, o.PatchExpect.Size)
 	if err != nil {
+		if o.PatchVerified {
+			if verr := verifyFile(ctx, mpatch, o.PatchExpect, buffer, ErrPatchMismatch); verr != nil {
+				return verr
+			}
+		}
 		return err
 	}
 	if header.newSize != o.Expect.Size {
+		if o.PatchVerified {
+			if verr := verifyFile(ctx, mpatch, o.PatchExpect, buffer, ErrPatchMismatch); verr != nil {
+				return verr
+			}
+		}
 		return fmt.Errorf("%w: header newSize=%d expected=%d", ErrOutputMismatch, header.newSize, o.Expect.Size)
 	}
 	if header.oldSize != o.OldExpect.Size {
+		if o.PatchVerified {
+			if verr := verifyFile(ctx, mpatch, o.PatchExpect, buffer, ErrPatchMismatch); verr != nil {
+				return verr
+			}
+		}
 		return fmt.Errorf("%w: header oldSize=%d expected=%d", ErrSourceMismatch, header.oldSize, o.OldExpect.Size)
 	}
 	old, err := openReadOnly(o.OldPath)
@@ -96,10 +118,15 @@ func apply(ctx context.Context, o Options, stats *IOStats) (result error) {
 		return err
 	}
 	defer old.Close()
-	if err = verifyFile(ctx, measuredFile{old, stats}, o.OldExpect, buffer, ErrSourceMismatch); err != nil {
+	mold := measuredFile{old, stats}
+	if o.OldVerified {
+		if err = checkFileSize(mold, o.OldExpect, ErrSourceMismatch); err != nil {
+			return err
+		}
+	} else if err = verifyFile(ctx, mold, o.OldExpect, buffer, ErrSourceMismatch); err != nil {
 		return err
 	}
-	if stats != nil {
+	if stats != nil && !o.OldVerified {
 		stats.SourceVerifiedBytes += o.OldExpect.Size
 	}
 	temp, err := privateName()
@@ -118,11 +145,40 @@ func apply(ctx context.Context, o Options, stats *IOStats) (result error) {
 			result = errors.Join(result, err)
 		}
 	}()
-	if err = decode(ctx, measuredFile{old, stats}, measuredFile{patch, stats}, measuredFile{out, stats}, header, buffer, o.Progress); err != nil {
+	gotMD5, err := decode(ctx, mold, mpatch, measuredFile{out, stats}, header, buffer, o.Progress)
+	if err != nil {
+		if ctx.Err() == nil {
+			if o.PatchVerified {
+				if verr := verifyFile(ctx, mpatch, o.PatchExpect, buffer, ErrPatchMismatch); verr != nil {
+					return verr
+				}
+			}
+			if o.OldVerified {
+				if verr := verifyFile(ctx, mold, o.OldExpect, buffer, ErrSourceMismatch); verr != nil {
+					return verr
+				}
+			}
+		}
 		return fmt.Errorf("HDIFF13 oldSize=%d newSize=%d covers=%d: %w", header.oldSize, header.newSize, header.coverCount, err)
 	}
-	if err = verifyFile(ctx, measuredFile{out, stats}, o.Expect, buffer, ErrOutputMismatch); err != nil {
+	if gotMD5 != o.Expect.MD5 {
+		if o.PatchVerified {
+			if verr := verifyFile(ctx, mpatch, o.PatchExpect, buffer, ErrPatchMismatch); verr != nil {
+				return verr
+			}
+		}
+		if o.OldVerified {
+			if verr := verifyFile(ctx, mold, o.OldExpect, buffer, ErrSourceMismatch); verr != nil {
+				return verr
+			}
+		}
+		return fmt.Errorf("%w: whole-file MD5", ErrOutputMismatch)
+	}
+	if err = checkFileSize(out, o.Expect, ErrOutputMismatch); err != nil {
 		return err
+	}
+	if stats != nil && o.OldVerified {
+		stats.SourceVerifiedBytes += o.OldExpect.Size
 	}
 	if err = out.Sync(); err != nil {
 		return err
@@ -186,6 +242,17 @@ func openReadOnly(path string) (*os.File, error) {
 		return nil, fmt.Errorf("input is not a regular file")
 	}
 	return f, nil
+}
+
+func checkFileSize(f interface{ Stat() (os.FileInfo, error) }, want gameres.Object, kind error) error {
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() != want.Size {
+		return fmt.Errorf("%w: size=%d expected=%d", kind, info.Size(), want.Size)
+	}
+	return nil
 }
 
 func verifyFile(ctx context.Context, f readableFile, want gameres.Object, buffer []byte, kind error) error {
