@@ -19,12 +19,12 @@ func txnRebuildTargetValid(t InstallTarget) error {
 	}
 	return nil
 }
-func txnCleanupRebuild(ctx context.Context, r *txnRoots, j *txnJournal) error {
+func txnCleanupRebuild(ctx context.Context, r *txnRoots, j *txnJournal, ledger *txnLedger) error {
 	// Check every recorded surviving intermediate before deleting any of them.
 	// Missing files are expected after an interrupted cleanup; modified files are
 	// evidence of a conflict and remain untouched.
 	for _, target := range j.RebuildCleanup {
-		if err := txnVerify(ctx, r.work, target.Path, target); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := txnVerifyLedger(ctx, r.work, target.Path, target, ledger, nil); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}

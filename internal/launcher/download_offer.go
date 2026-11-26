@@ -97,6 +97,11 @@ func (s *Shell) syncDownloadOffers(c *ui.Context) {
 	if work.root != root {
 		work.root = root
 		work.next = time.Time{}
+		// The startup recovery scan has checked this root for unfinished work.
+		// Discover its first offer as soon as the state becomes idle.
+		if s.download.recoveredRoot == root {
+			work.next = s.now
+		}
 	}
 	if work.next.IsZero() {
 		work.next = s.now.Add(downloadOfferDelay())

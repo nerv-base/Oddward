@@ -60,31 +60,7 @@ func (b *GameDownloadBackend) preparePreloadWork(p *downloadPlan) error {
 	return preloadSystemMakeWork(p.root, *p.preload)
 }
 
-// preloadOfferSnapshot is a read-only offer check. Shell owns cadence and
-// eligibility; this method never creates an install state/work/cache/task tree.
-func (b *GameDownloadBackend) preloadOfferSnapshot(ctx context.Context, root string) (latest, preload string, offered bool, err error) {
-	if err = ctx.Err(); err != nil {
-		return "", "", false, err
-	}
-	if _, err = downloadDirectory(filepath.Join(b.StateRoot, "installs"), false); err != nil {
-		return "", "", false, err
-	}
-	input, _, _, err := b.preloadDiscoveryMode(ctx, root, true)
-	if err != nil {
-		return "", "", false, err
-	}
-	if err = ctx.Err(); err != nil {
-		return "", "", false, err
-	}
-	verdict := gameinstall.EvaluatePreload(input)
-	return input.Advertisement.ResVersion, verdict.Version, verdict.State == gameinstall.PreloadAvailable, nil
-}
-
 func (b *GameDownloadBackend) preloadDiscovery(ctx context.Context, root string) (gameinstall.PreloadInput, gameDelivery, gameinstall.InstallRecord, error) {
-	return b.preloadDiscoveryMode(ctx, root, false)
-}
-
-func (b *GameDownloadBackend) preloadDiscoveryMode(ctx context.Context, root string, tolerateQueryErr bool) (gameinstall.PreloadInput, gameDelivery, gameinstall.InstallRecord, error) {
 	root, base, local, err := b.preloadBase(ctx, root)
 	if err != nil {
 		return gameinstall.PreloadInput{}, gameDelivery{}, base, err
@@ -93,6 +69,10 @@ func (b *GameDownloadBackend) preloadDiscoveryMode(ctx context.Context, root str
 	if err != nil {
 		return gameinstall.PreloadInput{}, gameDelivery{}, base, err
 	}
+	return b.preloadFromAdvertisement(ctx, root, base, local, ad)
+}
+
+func (b *GameDownloadBackend) preloadFromAdvertisement(ctx context.Context, root string, base gameinstall.InstallRecord, local downloadLocal, ad gameres.Config) (gameinstall.PreloadInput, gameDelivery, gameinstall.InstallRecord, error) {
 	processes, err := b.observe(ctx)
 	if err != nil {
 		return gameinstall.PreloadInput{}, gameDelivery{}, base, errDownloadProcessCheck
@@ -111,23 +91,13 @@ func (b *GameDownloadBackend) preloadDiscoveryMode(ctx context.Context, root str
 	}
 	d, err := b.preloadQuery(ctx, ad.PreReleaseBranch, ad.PreReleaseVersion)
 	if err != nil {
-		if tolerateQueryErr && ctx.Err() == nil {
-			return input, gameDelivery{}, base, nil
-		}
 		return input, gameDelivery{}, base, err
 	}
 	d, input.Snapshot, err = downloadPreloadEvidence(d, b.metadata().roots, true)
 	if err != nil {
-		if tolerateQueryErr && ctx.Err() == nil {
-			return input, gameDelivery{}, base, nil
-		}
 		return input, gameDelivery{}, base, err
 	}
 	if d.Branch != ad.PreReleaseBranch || d.Config.ResVersion != ad.PreReleaseVersion {
-		if tolerateQueryErr {
-			input.Snapshot = gameinstall.PreloadManifest{}
-			return input, gameDelivery{}, base, nil
-		}
 		return input, gameDelivery{}, base, errDownloadMetadata
 	}
 	return input, d, base, nil

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"runtime"
+	"sync"
 	"time"
 
 	"github.com/nerv-base/Oddward/internal/gamedl"
@@ -104,6 +106,7 @@ func (b *GameDownloadBackend) runDownload(ctx context.Context, req launcher.Down
 		return event, err
 	}
 	defer lease.Close()
+	p.verifiedPatchToken = 0
 	if p.kind == state.DownloadPreload {
 		if err := b.preparePreloadWork(p); err != nil {
 			return event, err
@@ -224,10 +227,13 @@ func (b *GameDownloadBackend) runDownload(ctx context.Context, req launcher.Down
 		if err != nil {
 			return event, err
 		}
+		// Each patch target was verified by OpenBlob, Publish or the full
+		// download fallback. Its next verification may reuse that result.
+		p.verifiedPatchToken = req.Effect.Token
 		event.Kind, event.Enabled, event.FilesDone = state.ApplyFinished, fallback || appliedWithFallback, uint16(len(task.Rebuilds))
 		return event, nil
 	}
-	return b.verifyWithEngine(runCtx, p, e, event, report)
+	return b.verifyWithEngine(runCtx, p, e, false, event, report)
 }
 
 func (b *GameDownloadBackend) openPlanEngine(ctx context.Context, p *downloadPlan, lease *gamedl.Lease) (*gamedl.Engine, error) {
@@ -341,48 +347,105 @@ func (b *GameDownloadBackend) verifyPlan(ctx context.Context, req launcher.Downl
 		return event, err
 	}
 	defer lease.Close()
+	patchesVerified := req.Kind == p.kind && req.Effect.Token != 0 && p.verifiedPatchToken == req.Effect.Token
+	p.verifiedPatchToken = 0
 	engine, err := b.openPlanEngine(ctx, p, lease)
 	if err != nil {
 		return event, err
 	}
 	defer engine.Close()
-	return b.verifyWithEngine(ctx, p, engine, event, report)
+	return b.verifyWithEngine(ctx, p, engine, patchesVerified, event, report)
 }
 
-func (b *GameDownloadBackend) verifyWithEngine(ctx context.Context, p *downloadPlan, e *gamedl.Engine, event state.Event, report func(state.Event)) (state.Event, error) {
+func (b *GameDownloadBackend) verifyWithEngine(ctx context.Context, p *downloadPlan, e *gamedl.Engine, patchesVerified bool, event state.Event, report func(state.Event)) (state.Event, error) {
 	kind := state.DownloadProgress
 	if p.kind == state.DownloadPreload {
 		kind = state.PreloadProgress
 	}
 	var total, checked, hashed int64
-	var hashDuration time.Duration
-	for _, t := range p.plan.Targets {
-		if t.Action != gameres.ActionReuseInstalled {
-			total += t.Size
-		}
+	needsHash := func(t gameres.Target) bool {
+		return t.Action != gameres.ActionReuseInstalled && !(patchesVerified && t.Action == gameres.ActionPatch)
 	}
+	var toVerify []gameres.Object
 	var filesDone uint16
-	progress := func() {
-		report(state.Event{Kind: kind, Stage: state.StageVerify, Downloaded: checked, Total: total, FilesDone: filesDone, FilesTotal: uint16(len(p.plan.Targets)), Reused: p.plan.ReusedBytes})
-	}
-	progress()
 	for _, t := range p.plan.Targets {
-		if err := ctx.Err(); err != nil {
-			return event, err
+		if needsHash(t) {
+			total += t.Size
+			toVerify = append(toVerify, gameres.Object{MD5: t.MD5, Size: t.Size})
+		} else {
+			filesDone++
 		}
-		if t.Action != gameres.ActionReuseInstalled {
-			start := time.Now()
-			f, err := e.OpenBlob(ctx, gameres.Object{MD5: t.MD5, Size: t.Size})
+	}
+	meter := newThroughputMeter()
+	var progMu sync.Mutex
+	lastReport := time.Now()
+	progressLocked := func() {
+		rate, eta := meter.Snapshot(checked, total)
+		report(state.Event{Kind: kind, Stage: state.StageVerify, Downloaded: checked, Total: total, Rate: rate, ETASecs: eta, FilesDone: filesDone, FilesTotal: uint16(len(p.plan.Targets)), Reused: p.plan.ReusedBytes})
+	}
+	progressLocked()
+	var hashDuration time.Duration
+	if len(toVerify) > 0 {
+		meter.Start()
+		hashStart := time.Now()
+		workers := verifyBlobWorkers(len(toVerify))
+		wctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		jobs := make(chan int)
+		errs := make([]error, len(toVerify))
+		var wg sync.WaitGroup
+		for range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for idx := range jobs {
+					if wctx.Err() != nil {
+						return
+					}
+					obj := toVerify[idx]
+					err := e.VerifyBlob(wctx, obj, func(n int64) {
+						progMu.Lock()
+						checked += n
+						hashed += n
+						meter.Record(n)
+						now := time.Now()
+						if now.Sub(lastReport) >= 125*time.Millisecond {
+							lastReport = now
+							progressLocked()
+						}
+						progMu.Unlock()
+					})
+					if err != nil {
+						errs[idx] = err
+						cancel()
+						return
+					}
+					progMu.Lock()
+					filesDone++
+					lastReport = time.Now()
+					progressLocked()
+					progMu.Unlock()
+				}
+			}()
+		}
+		for i := range toVerify {
+			select {
+			case <-wctx.Done():
+				i = len(toVerify)
+			case jobs <- i:
+			}
+		}
+		close(jobs)
+		wg.Wait()
+		hashDuration = time.Since(hashStart)
+		for _, err := range errs {
 			if err != nil {
 				return event, err
 			}
-			f.Close()
-			hashDuration += time.Since(start)
-			hashed += t.Size
-			checked += t.Size
 		}
-		filesDone++
-		progress()
+		if err := ctx.Err(); err != nil {
+			return event, err
+		}
 	}
 	if hashDuration >= 20*time.Second {
 		_ = b.recordDownloadPerf(ctx, p.root, PerfSample{HashReadBytes: hashed, HashDuration: hashDuration})
@@ -425,4 +488,21 @@ func (b *GameDownloadBackend) cancelPlan(ctx context.Context, root string) error
 	b.putPlan(root, nil)
 	b.collectDownloadCache(ctx, p, lease)
 	return nil
+}
+
+func verifyBlobWorkers(n int) int {
+	if n <= 1 {
+		return 1
+	}
+	w := runtime.NumCPU() / 2
+	if w < 2 {
+		w = 2
+	}
+	if w > 4 {
+		w = 4
+	}
+	if n < w {
+		return n
+	}
+	return w
 }

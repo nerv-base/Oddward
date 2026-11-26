@@ -64,6 +64,9 @@ type downloadPlan struct {
 	cacheBudget        bool
 	resumeTask         *gamedl.Task
 	supersedes         string
+	// Used once by the verification following successful patch application.
+	// Access is serialized by the installation work lease; never persisted.
+	verifiedPatchToken uint64
 }
 
 type downloadProcesses struct{ official, game bool }
@@ -209,13 +212,7 @@ func (b *GameDownloadBackend) handleDownloadOperation(ctx context.Context, req l
 	case state.EffectDownloadRun, state.EffectPreloadRun:
 		return b.runDownload(ctx, req, event, report)
 	case state.EffectDownloadOfferPoll:
-		latest, preload, offered, err := b.preloadOfferSnapshot(ctx, root)
-		if err != nil {
-			event.Kind = state.DownloadOfferPollFailed
-			return event, err
-		}
-		event.Kind, event.Message, event.Body, event.Enabled = state.DownloadOfferPolled, latest, preload, offered
-		return event, nil
+		return b.pollDownloadOffer(ctx, root, event)
 	case state.EffectDownloadVerify:
 		return b.verifyPlan(ctx, req, event, report)
 	case state.EffectDownloadCommit, state.EffectPreloadApply:
@@ -256,14 +253,17 @@ func (b *GameDownloadBackend) handleDownloadOperation(ctx context.Context, req l
 			return event, err
 		}
 		if result.State == gameinstall.Detected && len(result.Record.Targets) == 0 {
-			delivery, fetchErr := b.metadata().delivery(ctx, found.Branch, "")
-			if fetchErr == nil {
-				result, err = store.AdoptQuick(ctx, found.Root, &gameinstall.AdoptMetadata{ConfigXML: delivery.ConfigResponse.Data, Manifest: delivery.XML.ResList, Branch: found.Branch})
-				if err != nil {
-					return event, err
-				}
-			} else if ctx.Err() != nil {
-				return event, ctx.Err()
+			version, err := gameinstall.ReadOfficialVersion(found)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return event, err
+			}
+			delivery, err := b.metadata().delivery(ctx, found.Branch, version)
+			if err != nil {
+				return event, err
+			}
+			result, err = store.AdoptQuick(ctx, found.Root, &gameinstall.AdoptMetadata{ConfigXML: delivery.ConfigResponse.Data, Manifest: delivery.XML.ResList, Branch: found.Branch})
+			if err != nil {
+				return event, err
 			}
 		}
 		event.Kind, event.Message = state.InstallAdopted, result.Record.Version
@@ -289,8 +289,15 @@ func (b *GameDownloadBackend) handleDownloadOperation(ctx context.Context, req l
 		if status.LaunchBlocked {
 			return event, gameinstall.ErrRecoveryRequired
 		}
+		meter := newThroughputMeter()
+		var lastHashed int64
 		result, err := store.VerifyInstallation(ctx, root, func(p gameinstall.VerifyReport) {
-			report(state.Event{Kind: state.InstallVerifyProgress, Stage: state.StageVerify, Downloaded: p.BytesDone, Total: p.BytesTotal, FilesDone: uint16(p.FilesDone), FilesTotal: uint16(p.FilesTotal)})
+			if delta := p.HashedBytes - lastHashed; delta > 0 {
+				meter.Record(delta)
+				lastHashed = p.HashedBytes
+			}
+			rate, eta := meter.Snapshot(p.BytesDone, p.BytesTotal)
+			report(state.Event{Kind: state.InstallVerifyProgress, Stage: state.StageVerify, Downloaded: p.BytesDone, Total: p.BytesTotal, Rate: rate, ETASecs: eta, FilesDone: uint16(p.FilesDone), FilesTotal: uint16(p.FilesTotal)})
 		})
 		if err != nil {
 			return event, err

@@ -31,12 +31,14 @@ func (s *Store) txnExpireArchives(ctx context.Context, r *txnRoots, root, work s
 		if current.State != "ready" || current.TxnID == "" || current.VerifyCoverage != "full" || current.VerifiedTargets != len(current.Targets) {
 			return errors.New("retained backup cleanup requires verified publication")
 		}
-		for _, target := range current.Targets {
-			if err := txnVerify(ctx, r.install, target.Path, target); err != nil {
-				return err
-			}
+		installLedger := s.txnSeedVerifyLedger(r.install, current)
+		if err := txnRunParallel(ctx, len(current.Targets), func(pctx context.Context, i int) error {
+			target := current.Targets[i]
+			return txnVerifyLedger(pctx, r.install, target.Path, target, installLedger, nil)
+		}); err != nil {
+			return err
 		}
-		if err := s.txnClear(ctx, r, j, TxnInput{}, true); err != nil {
+		if err := s.txnClear(ctx, r, j, TxnInput{}, true, nil); err != nil {
 			return err
 		}
 		sr, err := os.OpenRoot(s.stateRoot)

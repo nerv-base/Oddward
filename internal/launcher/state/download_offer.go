@@ -15,8 +15,15 @@ func downloadOfferIdle(m Model) bool {
 		d.Preload == PreloadStateStaged || d.Preload == PreloadStateWaitingRelease ||
 		d.Preload == PreloadStateApplicable || d.Preload == PreloadStateCompleted ||
 		d.Preload == PreloadStateStale || d.Preload == PreloadStateFailed
-	return m.NormalMode && m.Managed.Root != "" && (d.Located || d.Verified) && phaseOK && !downloadUnfinished(d) && !ManagedBusy(m.Managed.Phase) && !ManagedActive(m.Managed.Phase) && m.Flow != Launching && m.Flow != Running && !d.GameRunning && !d.OfficialRunning && preloadOK
+	existingRoot := (m.Managed.Phase == ManagedReady || d.Located || d.Verified) && !pendingGameInstall(d)
+	return m.NormalMode && m.Managed.Root != "" && existingRoot && phaseOK && !downloadUnfinished(d) && !ManagedBusy(m.Managed.Phase) && !ManagedActive(m.Managed.Phase) && m.Flow != Launching && m.Flow != Running && !d.GameRunning && !d.OfficialRunning && preloadOK
 }
+
+func hasFormalUpdateOffer(m Model) bool {
+	d := m.Download
+	return d.OfferVersion != "" && d.Current != d.OfferVersion && SameManagedRoot(d.offerResultRoot, m.Managed.Root)
+}
+
 func reduceDownloadOffer(m Model, e Event) (Model, []Effect, bool) {
 	d := &m.Download
 	switch e.Kind {
@@ -38,9 +45,13 @@ func reduceDownloadOffer(m Model, e Event) (Model, []Effect, bool) {
 		if e.Kind == DownloadOfferPollFailed || !SameManagedRoot(m.Managed.Root, d.offerRoot) || d.Request != d.offerTaskRequest || m.Managed.Request != d.offerManagedRequest || !downloadOfferIdle(m) {
 			break
 		}
+		if e.CurrentVersion != "" {
+			d.Current = e.CurrentVersion
+		}
 		d.OfferVersion = e.Message
 		d.PreloadOfferVersion = ""
 		d.offerResultRoot = m.Managed.Root
+		d.offerNeedsAdoption, d.offerNeedsVerification = e.NeedsAdoption, e.NeedsVerification
 		if e.Enabled {
 			d.PreloadOfferVersion = e.Body
 		}

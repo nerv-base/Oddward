@@ -17,6 +17,67 @@ func offerFixture() state.Model {
 	return m
 }
 
+func TestColdStartChecksInspectedGameAfterRecoveryScan(t *testing.T) {
+	m := normalFixture(state.ManagedReady)
+	s := NewShell(m)
+	defer s.Dispose()
+	calls := make(chan DownloadRequest, 4)
+	wake := make(chan struct{}, 4)
+	s.RequestFrame = func() { wake <- struct{}{} }
+	s.GameDownloads = downloadBackendFunc(func(_ context.Context, r DownloadRequest, _ func(state.Event)) state.Event {
+		calls <- r
+		switch r.Effect.Kind {
+		case state.EffectRecoverScan:
+			return state.Event{Kind: state.DownloadRecoveryCleared}
+		case state.EffectDownloadOfferPoll:
+			return state.Event{Kind: state.DownloadOfferPolled, Message: "1.5.8", CurrentVersion: "1.5.6", NeedsAdoption: true}
+		case state.EffectInstallAdopt:
+			return state.Event{Kind: state.InstallAdopted, Message: "1.5.6"}
+		case state.EffectInstallVerify:
+			return state.Event{Kind: state.InstallVerified, Message: "1.5.6"}
+		default:
+			return state.Event{}
+		}
+	})
+	tt := ui.NewTester(s.View, 1280, 720)
+	if r := receiveDownload(t, calls); r.Effect.Kind != state.EffectRecoverScan {
+		t.Fatalf("startup must restore outstanding work before polling: %+v", r)
+	}
+	receiveDownload(t, wake)
+	tt.Frame()
+	if !s.Model.Download.OfferPending {
+		t.Fatal("startup postponed first offer check for an existing game")
+	}
+	if _, ok := tt.AccessByRole(ui.RoleButton, "启动游戏"); !ok {
+		t.Fatal("waiting for an offer blocked launch")
+	}
+	if r := receiveDownload(t, calls); r.Effect.Kind != state.EffectDownloadOfferPoll || r.Root != m.Managed.Root {
+		t.Fatalf("startup should only check the selected root: %+v", r)
+	}
+	receiveDownload(t, wake)
+	tt.Frame()
+	if _, ok := tt.AccessByRole(ui.RoleButton, "更新游戏"); !ok {
+		t.Fatalf("official hotfix missing after first check: %q", tt.Texts())
+	}
+	tt.Advance(10 * time.Minute)
+	if s.Model.Download.OfferPending || s.Model.Download.OfferRequest != 1 {
+		t.Fatal("repeated startup poll before minimum interval plus jitter")
+	}
+	if err := tt.Click("更新游戏"); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []state.EffectKind{state.EffectInstallAdopt, state.EffectInstallVerify, state.EffectDownloadPlan} {
+		r := receiveDownload(t, calls)
+		if r.Effect.Kind != kind || r.Kind != state.DownloadUpdate || r.Root != m.Managed.Root {
+			t.Fatalf("expected update step %v for selected game, got %+v", kind, r)
+		}
+		if kind != state.EffectDownloadPlan {
+			receiveDownload(t, wake)
+			tt.Frame()
+		}
+	}
+}
+
 func TestDownloadOfferPollWaitsMinimumIntervalAndPreservesTask(t *testing.T) {
 	m := offerFixture()
 	s := NewShell(m)
@@ -123,12 +184,13 @@ func TestDownloadOfferPollIsSingleFlightAndRejectsMovedTask(t *testing.T) {
 	}
 }
 
-func TestDownloadOfferPollSkipsUnadoptedAndActiveInstallations(t *testing.T) {
-	for _, kind := range []string{"unadopted", "downloading", "reconciling", "paused"} {
+func TestDownloadOfferPollSkipsFreshAndActiveInstallations(t *testing.T) {
+	for _, kind := range []string{"fresh", "downloading", "reconciling", "paused"} {
 		t.Run(kind, func(t *testing.T) {
 			m := offerFixture()
 			switch kind {
-			case "unadopted":
+			case "fresh":
+				m.Download.Kind = state.DownloadInstall
 				m.Download.Current = ""
 				m.Download.Verified = false
 				m.Download.Located = false

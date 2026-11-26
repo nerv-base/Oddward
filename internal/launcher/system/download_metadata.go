@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/nerv-base/Oddward/internal/gameres"
@@ -47,6 +48,10 @@ type gameDelivery struct {
 }
 
 func (m remoteDownloads) get(ctx context.Context, root, address string, limit int64) (downloadResponse, error) {
+	return m.getWithOptions(ctx, root, address, limit, false)
+}
+
+func (m remoteDownloads) getWithOptions(ctx context.Context, root, address string, limit int64, noCache bool) (downloadResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
@@ -54,6 +59,10 @@ func (m remoteDownloads) get(ctx context.Context, root, address string, limit in
 		return downloadResponse{}, errDownloadMetadata
 	}
 	req.Header.Set("Accept-Encoding", "identity")
+	if noCache {
+		req.Header.Set("Cache-Control", "no-cache")
+		req.Header.Set("Pragma", "no-cache")
+	}
 	client := *m.client
 	client.Jar = nil
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -78,8 +87,8 @@ func (m remoteDownloads) get(ctx context.Context, root, address string, limit in
 	return downloadResponse{Data: data, Root: root, URL: address, ETag: resp.Header.Get("ETag"), LastModified: resp.Header.Get("Last-Modified"), ObservedAt: time.Now().UTC()}, nil
 }
 
-func (m remoteDownloads) fetchConfig(ctx context.Context, root, address string) (gameres.Config, downloadResponse, error) {
-	res, err := m.get(ctx, root, address, 8<<20)
+func (m remoteDownloads) fetchConfig(ctx context.Context, root, address string, noCache bool) (gameres.Config, downloadResponse, error) {
+	res, err := m.getWithOptions(ctx, root, address, 8<<20, noCache)
 	if err != nil {
 		return gameres.Config{}, downloadResponse{}, err
 	}
@@ -91,11 +100,20 @@ func (m remoteDownloads) fetchConfig(ctx context.Context, root, address string) 
 }
 
 func (m remoteDownloads) configAt(ctx context.Context, root, branch string) (gameres.Config, downloadResponse, error) {
-	address, err := gameres.ConfigURL(root, branch)
+	canonical, err := gameres.ConfigURL(root, branch)
 	if err != nil {
 		return gameres.Config{}, downloadResponse{}, err
 	}
-	return m.fetchConfig(ctx, root, address)
+	// Mutable branch-head config.xml uses the official ?tValue=<tick> cache
+	// buster and no-cache headers so edge caches never mask a newly published
+	// hotfix. Provenance keeps the canonical query-free URL.
+	fresh := canonical + "?tValue=" + strconv.FormatInt(time.Now().UnixMilli(), 10)
+	cfg, res, err := m.fetchConfig(ctx, root, fresh, true)
+	if err != nil {
+		return gameres.Config{}, downloadResponse{}, err
+	}
+	res.URL = canonical
+	return cfg, res, nil
 }
 
 func (m remoteDownloads) versionConfigAt(ctx context.Context, root, branch, version string) (gameres.Config, downloadResponse, error) {
@@ -103,7 +121,7 @@ func (m remoteDownloads) versionConfigAt(ctx context.Context, root, branch, vers
 	if err != nil {
 		return gameres.Config{}, downloadResponse{}, err
 	}
-	return m.fetchConfig(ctx, root, address)
+	return m.fetchConfig(ctx, root, address, false)
 }
 
 // formalConfigAt reads branch's config on root and follows validated <ResConfig>

@@ -115,6 +115,8 @@ type DownloadState struct {
 	offerRoot                                        string
 	offerTaskRequest, offerManagedRequest            uint64
 	offerResultRoot                                  string
+	offerNeedsAdoption, offerNeedsVerification       bool
+	preparingUpdateBaseline                          bool
 	Phase                                            DownloadPhase
 	Stage                                            DownloadStage
 	Kind                                             DownloadKind
@@ -478,6 +480,27 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		}
 		return effect(EffectDownloadPlan)
 	}
+	startBaselineCheck := func(adopt, forUpdate bool) (Model, []Effect, bool) {
+		d.Request++
+		d.preparingUpdateBaseline = forUpdate
+		d.Error, d.Note = "", ""
+		if forUpdate {
+			d.Kind = DownloadUpdate
+		}
+		if adopt {
+			d.operation = downloadOperationAdopt
+			if forUpdate {
+				d.Phase, d.Stage = DownloadPreparing, StagePlanning
+			}
+			return effect(EffectInstallAdopt)
+		}
+		d.operation = downloadOperationVerify
+		d.verifyTask = true
+		d.Phase, d.Stage = DownloadVerifying, StageVerify
+		d.Downloaded, d.Total, d.Rate, d.ETA = 0, 0, 0, 0
+		d.FilesDone, d.FilesTotal = 0, 0
+		return effect(EffectInstallVerify)
+	}
 	clearPreloadFlow := func() {
 		d.preloadAutoApply = false
 		d.preloadFallbackUpdate = false
@@ -518,6 +541,13 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 	case DownloadRequest:
 		if m.Overlay == OverlayInstallPath && !e.Enabled || downloadUnfinished(*d) && !downloadCanReplan(*d) || m.Managed.Root == "" || DownloadNetworkBlocked(m) != "" {
 			break
+		}
+		if !e.Enabled && hasFormalUpdateOffer(m) && (d.offerNeedsAdoption || d.offerNeedsVerification) {
+			if reason := DownloadWriteBlocked(m); reason != "" {
+				d.Note = reason
+				break
+			}
+			return startBaselineCheck(d.offerNeedsAdoption, true)
 		}
 		if !e.Enabled && (d.Preload == PreloadStateWaitingRelease || d.Preload == PreloadStateStaged || d.Preload == PreloadStateApplicable || downloadCanReplan(*d) && d.Kind == DownloadPreload && d.preloadAutoApply) {
 			d.preloadReconcileLoops = 0
@@ -740,6 +770,7 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		}
 		d.cancelPending = false
 		d.operation = downloadOperationNone
+		d.preparingUpdateBaseline = false
 		clearPreloadFlow()
 		d.Phase, d.Stage = DownloadIdle, StageIdle
 		d.Note = "cancelled"
@@ -909,23 +940,14 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		if e.Kind != InstallLocateRequest && m.Managed.Root == "" {
 			break
 		}
-		d.Request++
-		d.Error, d.Note = "", ""
 		if e.Kind == InstallLocateRequest {
+			d.Request++
+			d.Error, d.Note = "", ""
 			d.operation = downloadOperationLocate
 			d.locateInstall = e.Enabled
 			return m, []Effect{{Kind: EffectInstallLocate, Token: d.Request, Path: m.Managed.Root, Enabled: e.Enabled}}, true
 		}
-		if e.Kind == InstallAdoptRequest {
-			d.operation = downloadOperationAdopt
-			return effect(EffectInstallAdopt)
-		}
-		d.operation = downloadOperationVerify
-		d.verifyTask = true
-		d.Phase, d.Stage = DownloadVerifying, StageVerify
-		d.Downloaded, d.Total, d.Rate, d.ETA = 0, 0, 0, 0
-		d.FilesDone, d.FilesTotal = 0, 0
-		return effect(EffectInstallVerify)
+		return startBaselineCheck(e.Kind == InstallAdoptRequest, false)
 	case InstallLocated:
 		if !current || d.operation != downloadOperationLocate {
 			break
@@ -942,7 +964,7 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		}
 		if !SameManagedRoot(m.Managed.Root, root) {
 			m.Managed.RiskAccepted = false
-			d.Current = ""
+			d.Current, d.offerResultRoot = "", ""
 		}
 		m.Managed.Root, m.Managed.Phase, m.Managed.Error = root, ManagedReady, ""
 		m.Managed.restoredConsentRoot = ""
@@ -975,6 +997,15 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		d.Verified = e.Kind == InstallVerified || e.Enabled
 		d.Phase, d.Stage = DownloadIdle, StageIdle
 		d.Rate, d.ETA = 0, 0
+		if SameManagedRoot(d.offerResultRoot, m.Managed.Root) {
+			d.offerNeedsAdoption, d.offerNeedsVerification = false, !d.Verified
+		}
+		if d.preparingUpdateBaseline {
+			d.preparingUpdateBaseline = false
+			if hasFormalUpdateOffer(m) {
+				return reduceDownload(m, Event{Kind: DownloadRequest})
+			}
+		}
 	case PreloadStaged:
 		if !current || d.Kind != DownloadPreload || d.Phase != DownloadRunning && d.Phase != DownloadVerifying {
 			break
@@ -1099,6 +1130,7 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		}
 		wasReconcile := d.operation == downloadOperationReconcile
 		d.operation = downloadOperationNone
+		d.preparingUpdateBaseline = false
 		d.pausePending, d.cancelPending = false, false
 		d.AwaitingConfirmation = false
 		clearPreloadFlow()
@@ -1123,6 +1155,10 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		}
 	}
 	return m, nil, true
+}
+
+func downloadStageHasThroughput(stage DownloadStage) bool {
+	return stage == StageNetwork || stage == StageVerify || stage == StageApply || stage == StageCommit || stage == StageComponents
 }
 
 func downloadAcceptProgress(d *DownloadState, e Event) bool {
@@ -1159,7 +1195,7 @@ func downloadAcceptProgress(d *DownloadState, e Event) bool {
 	d.Downloaded, d.Total, d.FilesDone, d.FilesTotal = e.Downloaded, e.Total, e.FilesDone, e.FilesTotal
 	d.Reused = e.Reused
 	d.Rate, d.ETA = 0, 0
-	if e.Stage == StageNetwork {
+	if downloadStageHasThroughput(e.Stage) {
 		d.Rate = e.Rate
 		if e.ETASecs > 0 {
 			d.ETA = int64(e.ETASecs)

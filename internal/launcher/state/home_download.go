@@ -64,11 +64,13 @@ func homeDownloadPrimary(m Model) (Presentation, EventKind, bool) {
 		return status("检查游戏文件")
 	case d.Phase == DownloadError || d.Phase == DownloadStale:
 		out.Task = false
-		if d.Kind == DownloadUpdate && (d.Located || d.Verified) {
-			if d.offerResultRoot != "" && SameManagedRoot(d.offerResultRoot, m.Managed.Root) && d.OfferVersion != "" && d.OfferVersion != d.Current {
+		if d.Kind == DownloadUpdate {
+			if hasFormalUpdateOffer(m) {
 				return action("重试更新", DownloadRequest)
 			}
-			return Presentation{}, 0, false
+			if d.Located || d.Verified {
+				return Presentation{}, 0, false
+			}
 		}
 		if d.Kind == DownloadUpdate || d.Kind == DownloadInstall {
 			return action("重试下载", DownloadRequest)

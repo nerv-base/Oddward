@@ -55,25 +55,58 @@ func TestPreloadRuntimeCapNotePreservesOperationalMessagesAndActivity(t *testing
 	}
 }
 
-func TestDownloadProjectionOnlyExposesMeasuredNetworkProgress(t *testing.T) {
-	m := downloadModel()
-	m.Download = DownloadState{Phase: DownloadRunning, Stage: StageNetwork, Route: RouteMixed, Downloaded: 40, Total: 100, PatchBytes: 30, Reused: 900, FilesDone: 2, FilesTotal: 4}
-	p := PresentDownload(m)
-	if !p.ShowProgress || p.ShowRate || p.ShowETA || !p.CanPause || !p.CanCancel || p.Downloaded != 40 || p.Total != 100 || p.PatchBytes != 30 || p.Reused != 900 || p.StageText != "正在下载" || p.RouteText == "" {
-		t.Fatalf("network projection: %+v", p)
+func TestDownloadProjectionExposesMeasuredThroughputAcrossActiveStages(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		phase     DownloadPhase
+		stage     DownloadStage
+		stageText string
+	}{
+		{"network", DownloadRunning, StageNetwork, "正在下载"},
+		{"verify", DownloadVerifying, StageVerify, "正在校验"},
+		{"apply", DownloadRebuilding, StageApply, "正在重建文件"},
+		{"commit", DownloadCommitting, StageCommit, "正在提交更新"},
+		{"components", DownloadRunning, StageComponents, "正在准备运行组件"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := downloadModel()
+			m.Download = DownloadState{Phase: tc.phase, Stage: tc.stage, Route: RouteMixed, Downloaded: 40, Total: 100, PatchBytes: 30, Reused: 900, FilesDone: 2, FilesTotal: 4}
+			p := PresentDownload(m)
+			if !p.ShowProgress || p.ShowRate || p.ShowETA || p.Downloaded != 40 || p.Total != 100 || p.StageText != tc.stageText {
+				t.Fatalf("unmeasured projection: %+v", p)
+			}
+			m.Download.Rate, m.Download.ETA = 50, 2
+			p = PresentDownload(m)
+			if !p.ShowRate || !p.ShowETA || p.Rate != 50 || p.ETA != 2 {
+				t.Fatalf("measured values hidden: %+v", p)
+			}
+			m.Download.pausePending = true
+			p = PresentDownload(m)
+			if p.ShowRate || p.ShowETA || p.Rate != 0 || p.ETA != 0 {
+				t.Fatalf("pause pending kept stale throughput: %+v", p)
+			}
+		})
 	}
-	m.Download.Rate, m.Download.ETA = 50, 2
-	p = PresentDownload(m)
-	if !p.ShowRate || !p.ShowETA || p.Rate != 50 || p.ETA != 2 {
-		t.Fatalf("measured values hidden: %+v", p)
-	}
-	for _, stage := range []DownloadStage{StagePlanning, StageVerify, StageApply, StageCommit, StageFinalize} {
-		m.Download.Stage = stage
-		p = PresentDownload(m)
+	for _, tc := range []struct {
+		phase DownloadPhase
+		stage DownloadStage
+	}{
+		{DownloadPreparing, StagePlanning},
+		{DownloadRunning, StagePlanning},
+		{DownloadCommitting, StageFinalize},
+		{DownloadSuspended, StageNetwork},
+		{DownloadSuspended, StageVerify},
+		{DownloadRunning, StageVerify},
+		{DownloadRunning, StageApply},
+		{DownloadRunning, StageCommit},
+	} {
+		m := downloadModel()
+		m.Download = DownloadState{Phase: tc.phase, Stage: tc.stage, Downloaded: 40, Total: 100, Rate: 50, ETA: 2}
+		p := PresentDownload(m)
 		if p.ShowRate || p.ShowETA || p.Rate != 0 || p.ETA != 0 || p.StageText == "" {
-			t.Fatalf("non-network speed at %d: %+v", stage, p)
+			t.Fatalf("unexpected speed at phase=%d stage=%d: %+v", tc.phase, tc.stage, p)
 		}
-		if stage == StagePlanning && p.ShowProgress {
+		if tc.stage == StagePlanning && p.ShowProgress {
 			t.Fatal("planning invented percentage")
 		}
 	}

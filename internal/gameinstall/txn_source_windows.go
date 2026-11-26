@@ -5,6 +5,7 @@ package gameinstall
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -120,59 +121,75 @@ func txnOpenSource(r *txnRoots, source string) error {
 // and checked. A normal failure removes only this invocation's exclusive temp;
 // abrupt process death may leave an unreferenced temp, which is never inferred
 // as valid staging or used as authority to delete any other file.
-func txnCopyExternalTemp(ctx context.Context, sourceRoot, destRoot *os.Root, source, parent string, size int64) (name string, resultErr error) {
+func txnCopyExternalTemp(ctx context.Context, sourceRoot, destRoot *os.Root, source, parent string, size int64) (name string, digest string, written int64, resultErr error) {
 	if err := txnSafe(sourceRoot, source, false); err != nil {
-		return "", err
+		return "", "", 0, err
 	}
 	if err := txnSafe(destRoot, parent, false); err != nil {
-		return "", err
+		return "", "", 0, err
 	}
 	src, err := sourceRoot.Open(source)
 	if err != nil {
-		return "", err
+		return "", "", 0, err
 	}
 	defer src.Close()
 	name = parent + "/copy-" + rand.Text() + ".part"
 	dst, err := destRoot.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
-		return "", err
+		return "", "", 0, err
 	}
+	closed := false
 	defer func() {
-		if err := dst.Close(); resultErr == nil && err != nil {
-			resultErr = err
+		if !closed {
+			if err := dst.Close(); resultErr == nil && err != nil {
+				resultErr = err
+			}
 		}
 		if resultErr != nil {
 			destRoot.Remove(name)
 		}
 	}()
 	reader := io.LimitReader(src, size+1)
-	buffer := make([]byte, 128<<10)
+	h := md5.New()
+	ptr := txnBufPool.Get().(*[]byte)
+	buffer := *ptr
+	defer txnBufPool.Put(ptr)
 	for {
 		if err := ctx.Err(); err != nil {
-			return name, err
+			return name, "", written, err
 		}
 		n, err := reader.Read(buffer)
 		if n > 0 {
-			written, e := dst.Write(buffer[:n])
+			w, e := dst.Write(buffer[:n])
 			if e != nil {
-				return name, e
+				return name, "", written, e
 			}
-			if written != n {
-				return name, io.ErrShortWrite
+			if w != n {
+				return name, "", written, io.ErrShortWrite
 			}
+			h.Write(buffer[:n])
+			written += int64(n)
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return name, err
+			return name, "", written, err
 		}
 	}
-	return name, dst.Sync()
+	if err := dst.Sync(); err != nil {
+		return name, "", written, err
+	}
+	closed = true
+	if err := dst.Close(); err != nil {
+		return name, "", written, err
+	}
+	return name, fmt.Sprintf("%x", h.Sum(nil)), written, nil
 }
-func txnStageExternal(ctx context.Context, r *txnRoots, j *txnJournal, index int, file TxnFile, in TxnInput) error {
+func txnStageExternal(ctx context.Context, r *txnRoots, j *txnJournal, index int, file TxnFile, in TxnInput, ledger *txnLedger) error {
 	stage := txnStage(j, index)
-	if err := txnVerify(ctx, r.source, file.Source, *j.Files[index].Target); err != nil {
+	want := *j.Files[index].Target
+	if err := txnVerifyLedger(ctx, r.source, file.Source, want, ledger, nil); err != nil {
 		return fmt.Errorf("external source identity: %w", err)
 	}
 	tempParent := "cache/tmp/txn-copy-" + j.TxnID
@@ -182,16 +199,21 @@ func txnStageExternal(ctx context.Context, r *txnRoots, j *txnJournal, index int
 	if err := r.work.MkdirAll(tempParent, 0700); err != nil {
 		return err
 	}
-	temp, err := txnCopyExternalTemp(ctx, r.source, r.work, file.Source, tempParent, file.Size)
+	temp, gotMD5, written, err := txnCopyExternalTemp(ctx, r.source, r.work, file.Source, tempParent, file.Size)
 	if err != nil {
 		return err
 	}
 	defer r.work.Remove(tempParent)
 	defer r.work.Remove(temp)
-	if err := txnVerify(ctx, r.work, temp, *j.Files[index].Target); err != nil {
+	if written != want.Size || gotMD5 != want.MD5 {
+		return fmt.Errorf("external staged identity: checksum mismatch: %s", temp)
+	}
+	tempStamp, err := txnStatStamp(r.work, temp)
+	if err != nil || tempStamp.Size != want.Size {
 		return fmt.Errorf("external staged identity: %w", err)
 	}
-	if err := txnVerify(ctx, r.source, file.Source, *j.Files[index].Target); err != nil {
+	ledger.put(tempStamp, want.MD5)
+	if err := txnVerifyLedger(ctx, r.source, file.Source, want, ledger, nil); err != nil {
 		return fmt.Errorf("external source changed during copy: %w", err)
 	}
 	if err := txnSafe(r.work, stage, true); err != nil {

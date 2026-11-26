@@ -46,13 +46,13 @@ func TestDownloadOfferPollResultsFenceRootTokenAndTaskGeneration(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			m := pollableDownloadModel()
 			m, _ = Reduce(m, Event{Kind: DownloadOfferPollRequest})
-			e := Event{Kind: DownloadOfferPolled, Token: m.Download.OfferRequest, Path: m.Managed.Root, Message: "v2", Body: "v3", Enabled: true}
+			e := Event{Kind: DownloadOfferPolled, Token: m.Download.OfferRequest, Path: m.Managed.Root, Message: "v2", Body: "v3", Enabled: true, CurrentVersion: "stale-local", NeedsAdoption: true}
 			tt.change(&m)
 			if tt.staleEnvelope {
 				e.Token++
 			}
 			m, fx := Reduce(m, e)
-			if len(fx) != 0 || m.Download.OfferVersion != "" || m.Download.PreloadOfferVersion != "" {
+			if len(fx) != 0 || m.Download.OfferVersion != "" || m.Download.PreloadOfferVersion != "" || m.Download.Current != "" || m.Download.offerNeedsAdoption {
 				t.Fatal("stale aggregate admitted")
 			}
 			if m.Download.OfferPending != tt.staleEnvelope {
@@ -61,14 +61,109 @@ func TestDownloadOfferPollResultsFenceRootTokenAndTaskGeneration(t *testing.T) {
 		})
 	}
 }
-func TestDownloadOfferPollOnlyAdmitsIdleAdoptedRoot(t *testing.T) {
+func TestLocatedGameOfferUsesObservedVersionWithoutClaimingVerification(t *testing.T) {
+	const root = `D:\SyntheticGame`
+	m := InitialNormal()
+	m, _ = Reduce(m, Event{Kind: ManagedLoad})
+	m, _ = Reduce(m, Event{Kind: ManagedLoaded, Token: m.Managed.Request, Path: root})
+	m, _ = Reduce(m, Event{Kind: ManagedLocated, Token: m.Managed.Request, Path: root})
+	for _, tc := range []struct{ official, primary string }{{"1.5.6", "启动游戏"}, {"1.5.8", "更新游戏"}} {
+		n, fx := Reduce(m, Event{Kind: DownloadOfferPollRequest})
+		if len(fx) != 1 || fx[0].Kind != EffectDownloadOfferPoll || fx[0].Path != root {
+			t.Fatalf("inspected existing root did not trigger a check: %+v", fx)
+		}
+		n, fx = Reduce(n, Event{Kind: DownloadOfferPolled, Token: n.Download.OfferRequest, Path: root, CurrentVersion: "1.5.6", Message: tc.official})
+		if len(fx) != 0 || n.Download.Verified || n.Download.Located || PresentDownload(n).Current != "1.5.6" || Present(n).Primary != tc.primary {
+			t.Fatalf("observed 1.5.6, official %s: primary=%q, download=%+v, effects=%+v", tc.official, Present(n).Primary, n.Download, fx)
+		}
+	}
+}
+
+func TestOfferedUpdatePreparesBaselineOnlyAfterClick(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		adopt, verify bool
+	}{{"official install", true, false}, {"adopted metadata", false, true}, {"fully verified", false, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := downloadModel()
+			m, _ = Reduce(m, Event{Kind: DownloadOfferPollRequest})
+			m, fx := Reduce(m, Event{Kind: DownloadOfferPolled, Token: m.Download.OfferRequest, Path: m.Managed.Root, Message: "1.5.8", CurrentVersion: "1.5.6", NeedsAdoption: tc.adopt, NeedsVerification: tc.verify})
+			if len(fx) != 0 || Present(m).Primary != "更新游戏" {
+				t.Fatalf("offer performed work or failed to appear: %+v", fx)
+			}
+			m, fx = Reduce(m, Event{Kind: Primary})
+			if tc.adopt {
+				requireDownloadEffect(t, m, fx, EffectInstallAdopt)
+				if Present(m).Enabled {
+					t.Fatal("update button remains active while adopting")
+				}
+				m, fx = Reduce(m, Event{Kind: InstallAdopted, Token: m.Download.Request, Message: "1.5.6"})
+			}
+			if tc.adopt || tc.verify {
+				requireDownloadEffect(t, m, fx, EffectInstallVerify)
+				if m.Download.Phase != DownloadVerifying || Present(m).Primary != "检查游戏文件" {
+					t.Fatalf("verification hidden: %+v", Present(m))
+				}
+				m, fx = Reduce(m, Event{Kind: InstallVerified, Token: m.Download.Request, Message: "1.5.6"})
+			}
+			requireDownloadEffect(t, m, fx, EffectDownloadPlan)
+			if m.Download.Kind != DownloadUpdate {
+				t.Fatalf("planned kind %v", m.Download.Kind)
+			}
+		})
+	}
+}
+
+func TestFailedOfferedUpdateRetriesOnlyItsFailedBaselineStep(t *testing.T) {
+	m := downloadModel()
+	m, _ = Reduce(m, Event{Kind: DownloadOfferPollRequest})
+	m, _ = Reduce(m, Event{Kind: DownloadOfferPolled, Token: m.Download.OfferRequest, Path: m.Managed.Root, Message: "1.5.8", CurrentVersion: "1.5.6", NeedsAdoption: true})
+	m, _ = Reduce(m, Event{Kind: Primary})
+	for _, step := range []struct {
+		failure, success EventKind
+		retry            EffectKind
+	}{
+		{InstallAdoptFailed, InstallAdopted, EffectInstallAdopt}, {InstallVerifyFailed, InstallVerified, EffectInstallVerify},
+	} {
+		token := m.Download.Request
+		failed, fx := Reduce(m, Event{Kind: step.failure, Token: token, Message: "无法验证"})
+		if len(fx) != 0 || Present(failed).Primary != "重试更新" || failed.Download.Error != "无法验证" {
+			t.Fatalf("failed preparation: %+v, %+v", Present(failed), fx)
+		}
+		stale, fx := Reduce(failed, Event{Kind: step.success, Token: token, Message: "1.5.6"})
+		if stale != failed || len(fx) != 0 {
+			t.Fatal("late success advanced a failed update")
+		}
+		m, fx = Reduce(failed, Event{Kind: Primary})
+		requireDownloadEffect(t, m, fx, step.retry)
+		m, _ = Reduce(m, Event{Kind: step.success, Token: m.Download.Request, Message: "1.5.6"})
+	}
+	if m.Download.Kind != DownloadUpdate || m.Download.Stage != StagePlanning {
+		t.Fatal("retry did not resume formal update")
+	}
+}
+
+func TestChangingLocatedRootDiscardsObservedVersion(t *testing.T) {
+	m := downloadModel()
+	m, _ = Reduce(m, Event{Kind: DownloadOfferPollRequest})
+	m, _ = Reduce(m, Event{Kind: DownloadOfferPolled, Token: m.Download.OfferRequest, Path: m.Managed.Root, Message: "1.5.8", CurrentVersion: "1.5.6", NeedsAdoption: true})
+	const other = `E:\OtherGame`
+	m.Overlay = LocateGame
+	m, _ = Reduce(m, Event{Kind: ManagedSelectPath, Path: other})
+	m, _ = Reduce(m, Event{Kind: ManagedLocated, Token: m.Managed.Request, Path: other})
+	if p := PresentDownload(m); p.Current != "" || p.OfferVersion != "" {
+		t.Fatalf("previous installation visible on another root: %+v", p)
+	}
+}
+
+func TestDownloadOfferPollOnlyAdmitsIdleExistingRoot(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		change func(*Model)
 	}{
 		{"demo", func(m *Model) { m.NormalMode = false }},
 		{"no root", func(m *Model) { m.Managed.Root = "" }},
-		{"unadopted", func(m *Model) { m.Download.Located = false }},
+		{"fresh install destination", func(m *Model) { m.Download.Located = false; m.Download.Kind = DownloadInstall }},
 		{"running", func(m *Model) { m.Download.Phase = DownloadRunning }},
 		{"paused", func(m *Model) { m.Download.Phase = DownloadSuspended }},
 		{"preload downloading", func(m *Model) { m.Download.Preload = PreloadStateDownloading }},

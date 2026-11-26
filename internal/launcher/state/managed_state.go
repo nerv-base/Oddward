@@ -189,6 +189,10 @@ func reduceManaged(m Model, e Event) (Model, []Effect, bool) {
 			p.RiskAccepted = false
 		}
 		p.restoredConsentRoot = ""
+		if !SameManagedRoot(p.Root, e.Path) {
+			m.Download.Current, m.Download.offerResultRoot = "", ""
+			m.Download.Located, m.Download.Verified = false, false
+		}
 		p.Root, p.Message, p.Error = e.Path, e.Message, ""
 		p.Phase = ManagedReady
 		m.Overlay = NoOverlay

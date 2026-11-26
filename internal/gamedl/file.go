@@ -4,7 +4,6 @@ package gamedl
 import (
 	"context"
 	"errors"
-	"io"
 	"net/url"
 	"os"
 	"sync"
@@ -105,9 +104,7 @@ func (e *Engine) download(ctx context.Context, tr Transfer, progress *progressSt
 				return f.snapshot(), classify("sync part", tr.Object.String(), err)
 			}
 			progress.emit("verifying")
-			if err = f.verifyBlocks(ctx); err == nil {
-				err = verify(ctx, file, tr.Object)
-			}
+			err = f.verifyCompleted(ctx)
 		}
 		if err != nil {
 			var te *TaskError
@@ -124,7 +121,7 @@ func (e *Engine) download(ctx context.Context, tr Transfer, progress *progressSt
 			return f.snapshot(), err
 		}
 		file = nil
-		if err = e.publish(ctx, tr.Object, partPath(tr.Object)); err != nil {
+		if err = e.publish(ctx, tr.Object, partPath(tr.Object), false); err != nil {
 			return f.snapshot(), err
 		}
 		if err = removeSafe(e.root, bitmapPath(tr.Object)); err != nil {
@@ -310,31 +307,26 @@ func (f *fileTransfer) chunk(ctx context.Context, index uint32) error {
 	}
 }
 func (f *fileTransfer) commit(ctx context.Context, index uint32, digest string) error {
-	f.mu.Lock()
-	if err := f.file.Sync(); err != nil {
-		f.mu.Unlock()
-		return classify("sync chunk", f.transfer.Object.String(), err)
+	if err := ctx.Err(); err != nil {
+		return classify("chunk verify", f.transfer.Object.String(), err)
 	}
 	start := int64(index) * f.transfer.ChunkSize
 	size := f.bm.size(index)
-	actual, err := hashReader(ctx, io.NewSectionReader(f.file, start, size), size)
-	if err == nil && actual != digest {
-		err = failure(ErrChecksum, "chunk readback", f.transfer.Object.String(), nil)
-	}
-	if err == nil && f.blocksTrusted() {
+	if f.blocksTrusted() {
 		for _, block := range f.transfer.Blocks {
-			if block.Start == start && block.Size == size && block.MD5 != actual {
-				err = failure(ErrChecksum, "manifest block", f.transfer.Object.String(), nil)
-				break
+			if block.Start == start && block.Size == size && block.MD5 != digest {
+				return classify("chunk verify", f.transfer.Object.String(), failure(ErrChecksum, "manifest block", f.transfer.Object.String(), nil))
 			}
 		}
 	}
-	if err != nil {
-		f.mu.Unlock()
-		return classify("chunk verify", f.transfer.Object.String(), err)
-	}
+	// Each chunk's exact written bytes were hashed during fetch; full file.Sync
+	// plus single-pass whole-file + block readback verification run before
+	// publishing the blob. Keeping rank.bm atomically written per chunk preserves
+	// crash/kill resume without serializing workers behind per-chunk file.Sync
+	// and disk readback.
+	f.mu.Lock()
 	f.bm.set(index)
-	if err = atomicWrite(f.engine.root, bitmapPath(f.transfer.Object), f.bm.marshal()); err != nil {
+	if err := atomicWrite(f.engine.root, bitmapPath(f.transfer.Object), f.bm.marshal()); err != nil {
 		f.bm.bits[index/8] &= ^(byte(1) << uint(index%8))
 		f.mu.Unlock()
 		return err
@@ -395,18 +387,9 @@ func (f *fileTransfer) sequential(ctx context.Context) error {
 func (f *fileTransfer) blocksTrusted() bool {
 	return f.transfer.Source.Kind != gameres.SourcePatchBlob || f.transfer.PatchBlocksTrusted
 }
-func (f *fileTransfer) verifyBlocks(ctx context.Context) error {
-	if !f.blocksTrusted() {
-		return nil
+func (f *fileTransfer) verifyCompleted(ctx context.Context) error {
+	if !f.blocksTrusted() || len(f.transfer.Blocks) == 0 {
+		return verify(ctx, f.file, f.transfer.Object)
 	}
-	for _, block := range f.transfer.Blocks {
-		actual, err := hashReader(ctx, io.NewSectionReader(f.file, block.Start, block.Size), block.Size)
-		if err != nil {
-			return err
-		}
-		if actual != block.MD5 {
-			return failure(ErrChecksum, "manifest block MD5", f.transfer.Object.String(), nil)
-		}
-	}
-	return nil
+	return verifyFileAndBlocks(ctx, f.file, f.transfer.Object, f.transfer.Blocks)
 }

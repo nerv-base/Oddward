@@ -38,7 +38,7 @@ func (s *Store) ResumeCommit(ctx context.Context, root, workRoot string, guard f
 		return txnRequired(err)
 	}
 	if txnPublished(j, record) {
-		return s.txnFinish(ctx, roots, j, TxnInput{})
+		return s.txnFinish(ctx, roots, j, TxnInput{}, nil)
 	}
 	if !txnBaseMatches(j, record) {
 		return txnRequired(errors.New("resume baseline identity changed"))
@@ -50,7 +50,7 @@ func (s *Store) ResumeCommit(ctx context.Context, root, workRoot string, guard f
 	} else if j.Phase != "staged" {
 		return txnRequired(errors.New("only staged replacements may resume"))
 	}
-	status, err := s.txnCommit(ctx, roots, j, TxnInput{Root: root, WorkRoot: workRoot, Guard: guard, FreeBytes: free, RequiredFreeBytes: required})
+	status, err := s.txnCommit(ctx, roots, j, TxnInput{Root: root, WorkRoot: workRoot, Guard: guard, FreeBytes: free, RequiredFreeBytes: required}, nil)
 	if err != nil {
 		var stop txnStop
 		if errors.As(err, &stop) {

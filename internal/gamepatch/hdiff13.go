@@ -8,9 +8,17 @@ package gamepatch
 import (
 	"bufio"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"math"
+)
+
+const (
+	maxSectionBuffer = 256 << 10
+	oldWindowSize    = 1 << 20
+	oldDirectCutover = 256 << 10
 )
 
 type section struct {
@@ -19,7 +27,11 @@ type section struct {
 }
 
 func newSection(f io.ReaderAt, offset, size int64) *section {
-	return &section{bufio.NewReaderSize(io.NewSectionReader(f, offset, size), 4096), size}
+	bufSize := int(min(size, maxSectionBuffer))
+	if bufSize < 16 {
+		bufSize = 16
+	}
+	return &section{bufio.NewReaderSize(io.NewSectionReader(f, offset, size), bufSize), size}
 }
 func (s *section) ReadByte() (byte, error) {
 	if s.left == 0 {
@@ -192,13 +204,65 @@ func (r *rle) consume(ctx context.Context, data []byte, add bool) error {
 	return nil
 }
 
-func decode(ctx context.Context, old, patch io.ReaderAt, out io.Writer, h patchHeader, buffer []byte, report func(int64, int64)) error {
+type bufferedOld struct {
+	src      io.ReaderAt
+	size     int64
+	buf      []byte
+	winStart int64
+	winEnd   int64
+}
+
+func (b *bufferedOld) readAt(p []byte, offset int64) error {
+	if len(p) == 0 {
+		return nil
+	}
+	end := offset + int64(len(p))
+	if offset >= b.winStart && end <= b.winEnd {
+		copy(p, b.buf[offset-b.winStart:end-b.winStart])
+		return nil
+	}
+	if len(p) >= oldDirectCutover {
+		n, err := b.src.ReadAt(p, offset)
+		if n == len(p) && (err == nil || err == io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return io.ErrUnexpectedEOF
+	}
+	if b.buf == nil {
+		b.buf = make([]byte, oldWindowSize)
+	}
+	want := min(int64(len(b.buf)), b.size-offset)
+	if want < int64(len(p)) {
+		want = int64(len(p))
+	}
+	if want > int64(len(b.buf)) {
+		want = int64(len(b.buf))
+	}
+	n, err := b.src.ReadAt(b.buf[:want], offset)
+	if int64(n) < int64(len(p)) {
+		if err != nil {
+			return err
+		}
+		return io.ErrUnexpectedEOF
+	}
+	b.winStart, b.winEnd = offset, offset+int64(n)
+	copy(p, b.buf[:len(p)])
+	return nil
+}
+
+func decode(ctx context.Context, old, patch io.ReaderAt, out io.Writer, h patchHeader, buffer []byte, report func(int64, int64)) (string, error) {
 	sections := [4]*section{}
 	for i := range sections {
 		sections[i] = newSection(patch, h.offsets[i], h.sizes[i])
 	}
 	covers, literals := sections[0], sections[3]
 	delta := rle{controls: sections[1], codes: sections[2]}
+	oldSrc := bufferedOld{src: old, size: h.oldSize}
+	bufOut := bufio.NewWriterSize(out, len(buffer))
+	outHash := md5.New()
 	written := int64(0)
 	// The delta stream spans ALL output bytes; literal deltas are consumed but
 	// ignored. Old-file bytes receive unsigned byte addition modulo 256.
@@ -213,7 +277,7 @@ func decode(ctx context.Context, old, patch io.ReaderAt, out io.Writer, h patchH
 			n := min(int64(len(buffer)), count)
 			block := buffer[:n]
 			if fromOld {
-				if _, err := old.ReadAt(block, offset); err != nil {
+				if err := oldSrc.readAt(block, offset); err != nil {
 					return err
 				}
 			} else if err := literals.read(block); err != nil {
@@ -222,8 +286,20 @@ func decode(ctx context.Context, old, patch io.ReaderAt, out io.Writer, h patchH
 			if err := delta.consume(ctx, block, fromOld); err != nil {
 				return err
 			}
-			if err := writeFull(out, block); err != nil {
-				return err
+			outHash.Write(block)
+			if bufOut.Buffered() == 0 && len(block) >= len(buffer) {
+				if err := writeFull(out, block); err != nil {
+					return err
+				}
+			} else {
+				if err := writeFull(bufOut, block); err != nil {
+					return err
+				}
+				if bufOut.Buffered() >= len(buffer) {
+					if err := bufOut.Flush(); err != nil {
+						return err
+					}
+				}
 			}
 			written += n
 			offset += n
@@ -237,48 +313,54 @@ func decode(ctx context.Context, old, patch io.ReaderAt, out io.Writer, h patchH
 	oldEnd := int64(0)
 	for i := int64(0); i < h.coverCount; i++ {
 		if err := ctx.Err(); err != nil {
-			return err
+			return "", err
 		}
 		distance, sign, err := uintTag(covers, 1)
 		if err != nil {
-			return err
+			return "", err
 		}
 		position := int64(0)
 		if sign == 0 {
 			if distance > h.oldSize-oldEnd {
-				return fmt.Errorf("%w: cover=%d forward old offset", ErrCorruptPatch, i)
+				return "", fmt.Errorf("%w: cover=%d forward old offset", ErrCorruptPatch, i)
 			}
 			position = oldEnd + distance
 		} else {
 			if distance > oldEnd {
-				return fmt.Errorf("%w: cover=%d negative old offset", ErrCorruptPatch, i)
+				return "", fmt.Errorf("%w: cover=%d negative old offset", ErrCorruptPatch, i)
 			}
 			position = oldEnd - distance
 		}
 		gap, err := uintValue(covers)
 		if err != nil {
-			return err
+			return "", err
 		}
 		length, err := uintValue(covers)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if length > h.oldSize-position {
-			return fmt.Errorf("%w: cover=%d old range", ErrCorruptPatch, i)
+			return "", fmt.Errorf("%w: cover=%d old range", ErrCorruptPatch, i)
 		}
 		if err = transfer(0, gap, false); err != nil {
-			return err
+			return "", err
 		}
 		if err = transfer(position, length, true); err != nil {
-			return err
+			return "", err
 		}
 		oldEnd = position + length
 	}
 	if err := transfer(0, h.newSize-written, false); err != nil {
-		return err
+		return "", err
 	}
 	if covers.left != 0 || literals.left != 0 || delta.controls.left != 0 || delta.codes.left != 0 || delta.remaining != 0 {
-		return fmt.Errorf("%w: unconsumed sections or RLE run", ErrCorruptPatch)
+		return "", fmt.Errorf("%w: unconsumed sections or RLE run", ErrCorruptPatch)
 	}
-	return ctx.Err()
+	if err := bufOut.Flush(); err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(outHash.Sum(nil)), nil
 }

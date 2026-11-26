@@ -267,9 +267,28 @@ func testGameDownloadFirstInstall(t *testing.T, external bool) {
 		t.Fatalf("mixed update apply = kind %d, fallback %t, %s", got.Kind, got.Enabled, got.Message)
 	}
 	req.Effect.Kind = state.EffectDownloadVerify
-	if got := backend.HandleDownload(ctx, req, nil); got.Kind != state.DownloadVerified {
-		t.Fatalf("mixed update verify = %d %s", got.Kind, got.Message)
+	verifyBytes := func(want int64) {
+		t.Helper()
+		var checked int64 = -1
+		got := backend.HandleDownload(ctx, req, func(e state.Event) {
+			if e.Kind == state.DownloadProgress && e.Stage == state.StageVerify {
+				checked = e.Downloaded
+			}
+		})
+		if got.Kind != state.DownloadVerified || checked != want {
+			t.Fatalf("mixed update verification: kind=%d error=%q bytes=%d, want %d", got.Kind, got.Message, checked, want)
+		}
 	}
+	// Only the next verification in this run may reuse the completed patch
+	// verification. A separate verification always reopens every cache blob.
+	if external {
+		// A different request cannot consume the previous run's verification.
+		req.Effect.Token++
+		verifyBytes(nextObject.Size + replacementObject.Size)
+	} else {
+		verifyBytes(nextObject.Size)
+	}
+	verifyBytes(nextObject.Size + replacementObject.Size)
 	restarted := &GameDownloadBackend{DB: backend.DB, StateRoot: backend.StateRoot, Client: backend.Client, roots: backend.roots, free: backend.free, processes: backend.processes}
 	req.Effect.Kind = state.EffectRecoverScan
 	if got := restarted.HandleDownload(ctx, req, nil); got.Kind != state.DownloadRestored || got.Stage != state.StageNetwork || got.Message != "1.5.7" || got.Focused {
@@ -279,6 +298,23 @@ func testGameDownloadFirstInstall(t *testing.T, external bool) {
 		t.Fatalf("patch staging changed the installed source: %v", err)
 	}
 	req.Effect.Kind = state.EffectDownloadCommit
+	// A delayed commit must still detect any modification after verification,
+	// including same-size corruption in a previously rebuilt target.
+	blob := filepath.Join(p.engineRoot(), "cache", "blobs", replacementObject.String())
+	if err := os.WriteFile(blob, bytes.Repeat([]byte{'x'}, len(replacement)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	started := false
+	got := backend.HandleDownload(ctx, req, func(e state.Event) { started = started || e.Kind == state.DownloadCommitStart })
+	if got.Kind != state.DownloadRecoveryNeeded || started {
+		t.Fatalf("corrupt rebuilt blob passed preflight: kind=%d transaction started=%t", got.Kind, started)
+	}
+	if data, err := os.ReadFile(target); err != nil || !bytes.Equal(data, content) {
+		t.Fatalf("failed preflight changed the installed resource: %v", err)
+	}
+	if err := os.WriteFile(blob, replacement, 0600); err != nil {
+		t.Fatal(err)
+	}
 	if got := backend.HandleDownload(ctx, req, nil); got.Kind != state.DownloadCommitted || got.Message != "1.5.7" {
 		t.Fatalf("update commit = %d %s", got.Kind, got.Message)
 	}

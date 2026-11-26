@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,6 +35,13 @@ type TxnFile struct {
 	Size              int64
 	Retain            bool
 	Origin            string
+}
+
+// TxnProgress reports real backend-measured bytes and files processed while
+// Commit verifies candidate sources prior to file placement.
+type TxnProgress struct {
+	BytesDone, BytesTotal int64
+	FilesDone, FilesTotal int
 }
 
 // TxnInput requires the caller to hold the same gamedl.Acquire(WorkRoot) lease
@@ -65,7 +73,12 @@ type TxnInput struct {
 	RequiredFreeBytes int64
 	BackupRetention   time.Duration
 	Repair            bool
-	Checkpoint        func(string) error
+	// OnCommitStart runs after all baseline and candidate source verifications
+	// pass and before any source blob is moved or journal/install state mutates.
+	OnCommitStart func() error
+	// Progress reports live candidate verification progress during Commit.
+	Progress   func(TxnProgress)
+	Checkpoint func(string) error
 }
 
 // RecoveryStatus is a truthful launch gate. Published identifies positive
@@ -167,7 +180,7 @@ func (s *Store) Commit(ctx context.Context, in TxnInput) (RecoveryStatus, error)
 			return txnRequired(err)
 		}
 		if txnPublished(j, record) {
-			if _, err = s.txnFinish(ctx, roots, j, TxnInput{}); err != nil {
+			if _, err = s.txnFinish(ctx, roots, j, TxnInput{}, nil); err != nil {
 				return txnRequired(err)
 			}
 		} else if j.TxnID == in.TxnID && txnBaseMatches(j, record) && (j.Kind == "install" || j.Phase == "staged") {
@@ -179,7 +192,12 @@ func (s *Store) Commit(ctx context.Context, in TxnInput) (RecoveryStatus, error)
 					return txnRequired(err)
 				}
 			}
-			return s.txnCommit(ctx, roots, j, in)
+			if in.OnCommitStart != nil {
+				if err := in.OnCommitStart(); err != nil {
+					return RecoveryStatus{}, err
+				}
+			}
+			return s.txnCommit(ctx, roots, j, in, nil)
 		} else {
 			return txnRequired(errors.New("pending transaction requires recovery"))
 		}
@@ -235,7 +253,8 @@ func (s *Store) Commit(ctx context.Context, in TxnInput) (RecoveryStatus, error)
 			return RecoveryStatus{}, err
 		}
 	}
-	if err := txnCheckSpace(ctx, in, roots); err != nil {
+	ledger := newTxnLedger()
+	if err := txnCheckSpace(ctx, in, roots, ledger); err != nil {
 		return RecoveryStatus{}, err
 	}
 	j := &txnJournal{Schema: 2, TxnID: in.TxnID, InstallKey: in.Candidate.InstallKey, Root: in.Root, WorkRoot: in.WorkRoot, Base: base, Candidate: in.Candidate, Kind: "update", Phase: "preparing", CreatedAt: time.Now().UTC(), Retention: in.BackupRetention}
@@ -254,7 +273,7 @@ func (s *Store) Commit(ctx context.Context, in TxnInput) (RecoveryStatus, error)
 	if fresh {
 		j.Candidate.BaseVersion = ""
 	}
-	if err := s.txnPrepare(ctx, roots, j, in); err != nil {
+	if err := s.txnPrepare(ctx, roots, j, in, ledger); err != nil {
 		return RecoveryStatus{}, err
 	}
 	if fresh {
@@ -291,7 +310,7 @@ func (s *Store) Commit(ctx context.Context, in TxnInput) (RecoveryStatus, error)
 	if err := txnCheckpoint(in, "after-staged"); err != nil {
 		return RecoveryStatus{}, err
 	}
-	status, err := s.txnCommit(ctx, roots, j, in)
+	status, err := s.txnCommit(ctx, roots, j, in, ledger)
 	if err != nil {
 		var stop txnStop
 		if errors.As(err, &stop) {
@@ -372,13 +391,13 @@ func txnSameTargets(a, b []InstallTarget) bool {
 	return true
 }
 
-func (s *Store) txnPrepare(ctx context.Context, r *txnRoots, j *txnJournal, in TxnInput) error {
+func (s *Store) txnPrepare(ctx context.Context, r *txnRoots, j *txnJournal, in TxnInput, ledger *txnLedger) error {
 	for _, file := range in.RebuildCleanup {
 		target := InstallTarget{Path: file.Source, MD5: file.MD5, Size: file.Size}
 		if err := txnRebuildTargetValid(target); err != nil {
 			return err
 		}
-		if err := txnVerify(ctx, r.work, target.Path, target); err != nil {
+		if err := txnVerifyLedger(ctx, r.work, target.Path, target, ledger, nil); err != nil {
 			return err
 		}
 		j.RebuildCleanup = append(j.RebuildCleanup, target)
@@ -395,9 +414,33 @@ func (s *Store) txnPrepare(ctx context.Context, r *txnRoots, j *txnJournal, in T
 	for _, t := range j.Base.Targets {
 		old[strings.ToUpper(t.Path)] = t
 	}
-	targetSet := map[string]bool{}
+	// Seed install-side stamps from verify.json so verified reused and old files
+	// need only a fresh handle/link/mtime/FileID check instead of full rehashing.
+	if j.Kind != "install" {
+		s.txnSeedVerifyInto(r.install, j.Base, ledger)
+	}
 	all := append(append([]TxnFile{}, in.Files...), in.Bootstrap...)
-	for _, f := range all {
+	// Inspect installed paths in parallel (using ledger hits for verified files).
+	type installProbe struct {
+		actual InstallTarget
+		exists bool
+	}
+	installProbes := make([]installProbe, len(all))
+	if err := txnRunParallel(ctx, len(all), func(pctx context.Context, i int) error {
+		actual, _, err := txnIdentityLedger(pctx, r.install, all[i].Path, ledger, nil)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		installProbes[i] = installProbe{actual: actual, exists: true}
+		return nil
+	}); err != nil {
+		return err
+	}
+	targetSet := map[string]bool{}
+	for i, f := range all {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -405,11 +448,7 @@ func (s *Store) txnPrepare(ctx context.Context, r *txnRoots, j *txnJournal, in T
 		e := txnEntry{Path: f.Path, Target: &t, Origin: f.Origin, Reuse: f.Source == "", Step: "staged"}
 		key := strings.ToUpper(f.Path)
 		targetSet[key] = true
-		actual, err := txnIdentity(ctx, r.install, f.Path)
-		exists := err == nil
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
+		actual, exists := installProbes[i].actual, installProbes[i].exists
 		declared, owned := old[key]
 		if exists {
 			if owned {
@@ -438,24 +477,205 @@ func (s *Store) txnPrepare(ctx context.Context, r *txnRoots, j *txnJournal, in T
 	}
 	// Only an exact old-owned, unchanged file absent from the new set is pruned.
 	// User edits, unrelated files and tag resources are never inferred as deletable.
+	var pruneCandidates []InstallTarget
 	for _, t := range j.Base.Targets {
-		if targetSet[strings.ToUpper(t.Path)] {
-			continue
+		if !targetSet[strings.ToUpper(t.Path)] {
+			pruneCandidates = append(pruneCandidates, t)
 		}
-		actual, err := txnIdentity(ctx, r.install, t.Path)
+	}
+	pruneMatches := make([]bool, len(pruneCandidates))
+	if err := txnRunParallel(ctx, len(pruneCandidates), func(pctx context.Context, i int) error {
+		t := pruneCandidates[i]
+		actual, _, err := txnIdentityLedger(pctx, r.install, t.Path, ledger, nil)
 		if errors.Is(err, os.ErrNotExist) {
-			continue
+			return nil
 		}
 		if err != nil {
 			return err
 		}
-		if actual == t {
+		pruneMatches[i] = actual == t
+		return nil
+	}); err != nil {
+		return err
+	}
+	for i, t := range pruneCandidates {
+		if pruneMatches[i] {
 			copy := t
 			j.Files = append(j.Files, txnEntry{Path: t.Path, Old: &copy, Prune: true, Step: "none"})
 		}
 	}
+
+	// Phase A: verify every candidate source (or existing stage) in parallel
+	// BEFORE calling OnCommitStart or moving any blob out of cache/blobs/.
+	type verifyJob struct {
+		root   *os.Root
+		path   string
+		kind   string // "stage", "external", "source"
+		target InstallTarget
+		entry  int
+	}
+	type jobKey struct {
+		kind, path string
+	}
+	stageExists := make([]bool, len(j.Files))
+	var jobs []verifyJob
+	seenJob := map[jobKey]int{}
+	type checkBinding struct {
+		jobIdx int
+		entry  int
+		kind   string
+		want   InstallTarget
+	}
+	var bindings []checkBinding
 	for i, e := range j.Files {
 		if e.Prune || e.Reuse {
+			continue
+		}
+		f := all[i]
+		stage := txnStage(j, i)
+		if err := txnSafe(r.work, stage, true); err != nil {
+			return err
+		}
+		_, lerr := r.work.Lstat(stage)
+		if lerr == nil {
+			stageExists[i] = true
+			k := jobKey{"stage", stage}
+			idx, ok := seenJob[k]
+			if !ok {
+				idx = len(jobs)
+				seenJob[k] = idx
+				jobs = append(jobs, verifyJob{root: r.work, path: stage, kind: "stage", target: *e.Target, entry: i})
+			}
+			bindings = append(bindings, checkBinding{jobIdx: idx, entry: i, kind: "stage", want: *e.Target})
+			continue
+		}
+		if !errors.Is(lerr, os.ErrNotExist) {
+			return lerr
+		}
+		if in.SourceRoot != "" && i < len(in.Files) {
+			if r.source == nil {
+				return ErrUnsafeTarget
+			}
+			k := jobKey{"external", f.Source}
+			idx, ok := seenJob[k]
+			if !ok {
+				idx = len(jobs)
+				seenJob[k] = idx
+				jobs = append(jobs, verifyJob{root: r.source, path: f.Source, kind: "external", target: *e.Target, entry: i})
+			}
+			bindings = append(bindings, checkBinding{jobIdx: idx, entry: i, kind: "external", want: *e.Target})
+			continue
+		}
+		k := jobKey{"source", f.Source}
+		idx, ok := seenJob[k]
+		if !ok {
+			idx = len(jobs)
+			seenJob[k] = idx
+			jobs = append(jobs, verifyJob{root: r.work, path: f.Source, kind: "source", target: *e.Target, entry: i})
+		}
+		bindings = append(bindings, checkBinding{jobIdx: idx, entry: i, kind: "source", want: *e.Target})
+	}
+	var totalBytes int64
+	for _, job := range jobs {
+		totalBytes += job.target.Size
+	}
+	var progMu sync.Mutex
+	var bytesDone int64
+	var filesDone int
+	lastReport := time.Now()
+	emitProgress := func(force bool) {
+		if in.Progress == nil || totalBytes <= 0 {
+			return
+		}
+		now := time.Now()
+		if !force && now.Sub(lastReport) < 125*time.Millisecond {
+			return
+		}
+		lastReport = now
+		done := min(bytesDone, totalBytes)
+		in.Progress(TxnProgress{BytesDone: done, BytesTotal: totalBytes, FilesDone: filesDone, FilesTotal: len(jobs)})
+	}
+	if len(jobs) > 0 && in.Progress != nil && totalBytes > 0 {
+		emitProgress(true)
+	}
+	verified := make([]InstallTarget, len(jobs))
+	if err := txnRunParallel(ctx, len(jobs), func(pctx context.Context, idx int) error {
+		job := jobs[idx]
+		var fileRead int64
+		got, _, err := txnIdentityLedger(pctx, job.root, job.path, ledger, func(n int64) {
+			fileRead += n
+			if in.Progress == nil {
+				return
+			}
+			progMu.Lock()
+			bytesDone += n
+			emitProgress(false)
+			progMu.Unlock()
+		})
+		if err != nil {
+			if job.kind == "external" {
+				return fmt.Errorf("external source identity: %w", err)
+			}
+			return err
+		}
+		got.Path = job.target.Path
+		if got != job.target {
+			switch job.kind {
+			case "stage":
+				return fmt.Errorf("%w: staged file mismatch", ErrRecoveryRequired)
+			case "external":
+				return fmt.Errorf("external source identity: checksum mismatch: %s", job.path)
+			default:
+				return fmt.Errorf("candidate checksum mismatch: %s", job.target.Path)
+			}
+		}
+		verified[idx] = got
+		if in.Progress != nil {
+			progMu.Lock()
+			if rem := job.target.Size - fileRead; rem > 0 {
+				bytesDone += rem
+			}
+			filesDone++
+			emitProgress(false)
+			progMu.Unlock()
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, b := range bindings {
+		got := verified[b.jobIdx]
+		got.Path = b.want.Path
+		if got != b.want {
+			switch b.kind {
+			case "stage":
+				return fmt.Errorf("%w: staged file mismatch", ErrRecoveryRequired)
+			case "external":
+				return fmt.Errorf("external source identity: checksum mismatch: %s", b.want.Path)
+			default:
+				return fmt.Errorf("candidate checksum mismatch: %s", b.want.Path)
+			}
+		}
+	}
+	if len(jobs) > 0 && in.Progress != nil && totalBytes > 0 {
+		progMu.Lock()
+		bytesDone = totalBytes
+		filesDone = len(jobs)
+		emitProgress(true)
+		progMu.Unlock()
+	}
+
+	// Phase B: all baseline and candidate source checks passed with zero mutations.
+	if in.OnCommitStart != nil {
+		if err := in.OnCommitStart(); err != nil {
+			return err
+		}
+	}
+
+	// Phase C: stage verified candidates into txn/<id>/staged/*. Same-volume
+	// renames preserve NTFS FileID so post-rename verification hits the ledger.
+	for i, e := range j.Files {
+		if e.Prune || e.Reuse || stageExists[i] {
 			continue
 		}
 		f := all[i]
@@ -466,52 +686,28 @@ func (s *Store) txnPrepare(ctx context.Context, r *txnRoots, j *txnJournal, in T
 		if err := r.work.MkdirAll(filepath.Dir(stage), 0700); err != nil {
 			return err
 		}
-		actual, err := txnIdentity(ctx, r.work, stage)
-		if err == nil {
-			actual.Path = e.Path
-			if actual == *e.Target {
-				continue
-			}
-			return fmt.Errorf("%w: staged file mismatch", ErrRecoveryRequired)
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
 		if in.SourceRoot != "" && i < len(in.Files) {
-			if r.source == nil {
-				return ErrUnsafeTarget
-			}
-			if err := txnStageExternal(ctx, r, j, i, f, in); err != nil {
+			if err := txnStageExternal(ctx, r, j, i, f, in, ledger); err != nil {
 				return err
 			}
 			continue
 		}
-		got, err := txnIdentity(ctx, r.work, f.Source)
-		if err != nil {
+		if f.Retain {
+			if err := txnCopyHashed(ctx, r.work, f.Source, stage, *e.Target, ledger); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := r.work.Rename(f.Source, stage); err != nil {
 			return err
 		}
-		got.Path = e.Path
-		if got != *e.Target {
-			return fmt.Errorf("candidate checksum mismatch: %s", e.Path)
-		}
-		if f.Retain {
-			if err := txnCopy(ctx, r.work, f.Source, stage); err != nil {
-				return err
-			}
-		} else {
-			if err := r.work.Rename(f.Source, stage); err != nil {
-				return err
-			}
-		}
-		got, err = txnIdentity(ctx, r.work, stage)
-		got.Path = e.Path
-		if err != nil || got != *e.Target {
+		if err := txnVerifyLedger(ctx, r.work, stage, *e.Target, ledger, nil); err != nil {
 			return fmt.Errorf("staging checksum mismatch: %s: %w", e.Path, err)
 		}
 	}
 	return nil
 }
-func (s *Store) txnCommit(ctx context.Context, r *txnRoots, j *txnJournal, in TxnInput) (RecoveryStatus, error) {
+func (s *Store) txnCommit(ctx context.Context, r *txnRoots, j *txnJournal, in TxnInput, ledger *txnLedger) (RecoveryStatus, error) {
 	blocked := RecoveryStatus{State: "committing", TxnID: j.TxnID, LaunchBlocked: true}
 	if err := ctx.Err(); err != nil {
 		return blocked, err
@@ -526,10 +722,10 @@ func (s *Store) txnCommit(ctx context.Context, r *txnRoots, j *txnJournal, in Tx
 	if err != nil || !txnBaseMatches(j, current) {
 		return txnRequired(errors.New("baseline publication changed before commit"))
 	}
-	if err := txnCheckSpace(ctx, in, r); err != nil {
+	if err := txnCheckSpace(ctx, in, r, ledger); err != nil {
 		return blocked, err
 	}
-	if err := txnValidateBeforeCommit(ctx, r, j); err != nil {
+	if err := txnValidateBeforeCommit(ctx, r, j, ledger); err != nil {
 		return txnRequired(err)
 	}
 	j.Phase = "committing"
@@ -552,7 +748,7 @@ func (s *Store) txnCommit(ctx context.Context, r *txnRoots, j *txnJournal, in Tx
 		if !e.Prune {
 			continue
 		}
-		if err := txnMoveOld(ctx, r, j, i); err != nil {
+		if err := txnMoveOld(ctx, r, j, i, ledger); err != nil {
 			return blocked, err
 		}
 		if err := txnCheckpoint(in, "after-prune-rename"); err != nil {
@@ -570,7 +766,7 @@ func (s *Store) txnCommit(ctx context.Context, r *txnRoots, j *txnJournal, in Tx
 		if e.Prune || e.Reuse || e.Old == nil {
 			continue
 		}
-		if err := txnMoveOld(ctx, r, j, i); err != nil {
+		if err := txnMoveOld(ctx, r, j, i, ledger); err != nil {
 			return blocked, err
 		}
 		if err := txnCheckpoint(in, "after-backup-rename"); err != nil {
@@ -597,7 +793,7 @@ func (s *Store) txnCommit(ctx context.Context, r *txnRoots, j *txnJournal, in Tx
 		if err := ctx.Err(); err != nil {
 			return blocked, err
 		}
-		existing, xerr := txnIdentity(ctx, r.install, e.Path)
+		existing, _, xerr := txnIdentityLedger(ctx, r.install, e.Path, ledger, nil)
 		if xerr == nil {
 			if j.Kind == "install" && existing == *e.Target {
 				continue
@@ -608,7 +804,7 @@ func (s *Store) txnCommit(ctx context.Context, r *txnRoots, j *txnJournal, in Tx
 			return blocked, xerr
 		}
 		stage := txnStage(j, i)
-		if err := txnVerify(ctx, r.work, stage, *e.Target); err != nil {
+		if err := txnVerifyLedger(ctx, r.work, stage, *e.Target, ledger, nil); err != nil {
 			return blocked, err
 		}
 		if err := s.txnCreateParents(r, j, e.Path); err != nil {
@@ -637,7 +833,7 @@ func (s *Store) txnCommit(ctx context.Context, r *txnRoots, j *txnJournal, in Tx
 	if err := txnCheckpoint(in, "after-all-placements"); err != nil {
 		return blocked, err
 	}
-	if err := txnVerifyCandidate(ctx, r, j); err != nil {
+	if err := txnVerifyCandidate(ctx, r, j, ledger); err != nil {
 		return txnRequired(err)
 	}
 	if err := in.Guard(ctx); err != nil {
@@ -660,14 +856,14 @@ func (s *Store) txnCommit(ctx context.Context, r *txnRoots, j *txnJournal, in Tx
 	if err := txnCheckpoint(in, "after-committed"); err != nil {
 		return published, err
 	}
-	return s.txnFinish(ctx, r, j, in)
+	return s.txnFinish(ctx, r, j, in, ledger)
 }
-func txnMoveOld(ctx context.Context, r *txnRoots, j *txnJournal, i int) error {
+func txnMoveOld(ctx context.Context, r *txnRoots, j *txnJournal, i int, ledger *txnLedger) error {
 	e := j.Files[i]
 	if e.Old == nil {
 		return ErrInvalidState
 	}
-	if err := txnVerify(ctx, r.install, e.Path, *e.Old); err != nil {
+	if err := txnVerifyLedger(ctx, r.install, e.Path, *e.Old, ledger, nil); err != nil {
 		return err
 	}
 	backup := txnBackup(j, i)

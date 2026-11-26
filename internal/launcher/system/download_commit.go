@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,7 +120,7 @@ func (b *GameDownloadBackend) commitDownload(ctx context.Context, req launcher.D
 		file := gameinstall.TxnFile{Path: t.Path, MD5: t.MD5, Size: t.Size, Origin: "installed"}
 		object := gameres.Object{MD5: t.MD5, Size: t.Size}
 		if t.Action != gameres.ActionReuseInstalled {
-			path, err := engine.BlobSource(ctx, object)
+			path, err := engine.BlobPath(object)
 			if err != nil {
 				return fail(err)
 			}
@@ -141,17 +142,47 @@ func (b *GameDownloadBackend) commitDownload(ctx context.Context, req launcher.D
 			return fail(err)
 		}
 	}
-	if p.kind == state.DownloadPreload {
-		// From here on the preload record and the transaction journal own the
-		// installation, so failures require recovery rather than a retry.
-		event.Kind = state.DownloadRecoveryNeeded
-		if err := b.preloadApplying(ctx, p); err != nil {
-			return event, err
+	commitStarted := false
+	input.OnCommitStart = func() error {
+		if p.kind == state.DownloadPreload {
+			// From here on the preload record and the transaction journal own the
+			// installation, so failures require recovery rather than a retry.
+			event.Kind = state.DownloadRecoveryNeeded
+			if err := b.preloadApplying(ctx, p); err != nil {
+				return err
+			}
 		}
+		commitStarted = true
+		report(state.Event{Kind: state.DownloadCommitStart})
+		return nil
 	}
-	report(state.Event{Kind: state.DownloadCommitStart})
+	meter := newThroughputMeter()
+	var lastBytes int64
+	input.Progress = func(tp gameinstall.TxnProgress) {
+		if p.kind == state.DownloadPreload && !commitStarted {
+			return
+		}
+		if delta := tp.BytesDone - lastBytes; delta > 0 {
+			meter.Record(delta)
+			lastBytes = tp.BytesDone
+		}
+		rate, eta := meter.Snapshot(tp.BytesDone, tp.BytesTotal)
+		report(state.Event{
+			Kind:       state.DownloadProgress,
+			Stage:      state.StageCommit,
+			Downloaded: tp.BytesDone,
+			Total:      tp.BytesTotal,
+			Rate:       rate,
+			ETASecs:    eta,
+			FilesDone:  uint16(min(tp.FilesDone, math.MaxUint16)),
+			FilesTotal: uint16(min(tp.FilesTotal, math.MaxUint16)),
+		})
+	}
 	status, err := store.Commit(ctx, input)
 	if err != nil && !(status.Published && !status.LaunchBlocked && errors.Is(err, gameinstall.ErrCleanupPending)) {
+		if !commitStarted {
+			return fail(err)
+		}
 		if p.kind == state.DownloadPreload {
 			err = errors.Join(err, b.preloadApplyFailed(context.WithoutCancel(ctx), p))
 		}

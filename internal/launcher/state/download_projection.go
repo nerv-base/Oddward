@@ -87,8 +87,13 @@ func PresentDownload(m Model) DownloadPresentation {
 		}
 		p.Note = "游戏运行中，预下载限速上限为 " + strconv.Itoa(limit) + " KiB/s"
 	}
-	p.ShowProgress = d.Total > 0 && (d.Stage == StageNetwork || d.Stage == StageApply) && d.Phase != DownloadPreparing
-	if d.Stage == StageNetwork && d.Phase == DownloadRunning && !d.pausePending && !d.cancelPending {
+	p.ShowProgress = d.Total > 0 && downloadStageHasThroughput(d.Stage) && d.Phase != DownloadPreparing
+	activeThroughput := (d.Stage == StageNetwork && d.Phase == DownloadRunning) ||
+		(d.Stage == StageComponents && d.Phase == DownloadRunning) ||
+		(d.Stage == StageVerify && d.Phase == DownloadVerifying) ||
+		(d.Stage == StageApply && d.Phase == DownloadRebuilding) ||
+		(d.Stage == StageCommit && d.Phase == DownloadCommitting)
+	if activeThroughput && !d.pausePending && !d.cancelPending {
 		p.Rate, p.ETA = d.Rate, d.ETA
 		p.ShowRate = d.Rate > 0
 		p.ShowETA = d.ETA > 0

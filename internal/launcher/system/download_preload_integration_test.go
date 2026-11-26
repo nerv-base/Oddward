@@ -414,9 +414,9 @@ func TestSystemPreloadCrossBranchPromotionDeltaReconcileApply(t *testing.T) {
 
 	// 2. Formal release promotes PC_140 -> PC_150 (1.5.3) via <ResConfig>.
 	released = true
-	latest, _, _, err := b.preloadOfferSnapshot(ctx, root)
-	if err != nil || latest != "1.5.3" {
-		t.Fatalf("offer after branch promotion = %q err=%v", latest, err)
+	offer, err := b.pollDownloadOffer(ctx, root, state.Event{})
+	if err != nil || offer.Message != "1.5.3" {
+		t.Fatalf("offer after branch promotion = %+v err=%v", offer, err)
 	}
 
 	// 3. First reconcile reuses a.pak and plans only b.pak delta.

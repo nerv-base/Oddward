@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nerv-base/Oddward/internal/gamedl"
+	"github.com/nerv-base/Oddward/internal/gameinstall"
 	"github.com/nerv-base/Oddward/internal/gamepatch"
 	"github.com/nerv-base/Oddward/internal/gameres"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
@@ -169,8 +170,10 @@ func (b *GameDownloadBackend) applyDownloadPatches(ctx context.Context, p *downl
 			files++
 		}
 	}
+	meter := newThroughputMeter()
 	progress := func() {
-		patchReport(report, state.Event{Kind: state.ApplyProgress, Stage: state.StageApply, Downloaded: written, Total: total, FilesDone: done, FilesTotal: files})
+		rate, eta := meter.Snapshot(written, total)
+		patchReport(report, state.Event{Kind: state.ApplyProgress, Stage: state.StageApply, Downloaded: written, Total: total, Rate: rate, ETASecs: eta, FilesDone: done, FilesTotal: files})
 	}
 	progress()
 	fallback := false
@@ -194,6 +197,7 @@ func (b *GameDownloadBackend) applyDownloadPatches(ctx context.Context, p *downl
 		lastStep := -1
 		var lastWritten int64
 		var lastReport time.Time
+		meter.Start()
 		err = b.applyOneDownloadPatch(ctx, p, e, target, func(step int, n, _ int64) {
 			if step != lastStep {
 				lastStep = step
@@ -202,8 +206,10 @@ func (b *GameDownloadBackend) applyDownloadPatches(ctx context.Context, p *downl
 			if n <= lastWritten {
 				return
 			}
-			written += n - lastWritten
+			delta := n - lastWritten
+			written += delta
 			lastWritten = n
+			meter.Record(delta)
 			now := time.Now()
 			if now.Sub(lastReport) >= 125*time.Millisecond {
 				lastReport = now
@@ -246,15 +252,28 @@ func (b *GameDownloadBackend) applyOneDownloadPatch(ctx context.Context, p *down
 	if target.Route == nil {
 		return gameres.ErrNoViableAction
 	}
+	var store *gameinstall.Store
+	if b.DB != nil && b.StateRoot != "" {
+		store, _ = b.installStore()
+	}
 	steps := make([]gamepatch.Step, 0, len(target.Route.Steps))
 	for i, s := range target.Route.Steps {
-		blob, err := e.BlobSource(ctx, s.Blob)
+		blob, err := e.BlobPath(s.Blob)
 		if err != nil {
 			return err
 		}
-		step := gamepatch.Step{PatchPath: filepath.Join(p.engineRoot(), filepath.FromSlash(blob)), Old: s.Old, Patch: s.Blob, New: s.New}
+		step := gamepatch.Step{
+			PatchPath:     filepath.Join(p.engineRoot(), filepath.FromSlash(blob)),
+			Old:           s.Old,
+			Patch:         s.Blob,
+			New:           s.New,
+			PatchVerified: true,
+		}
 		if i == 0 {
 			step.OldPath = filepath.Join(p.root, filepath.FromSlash(target.Path))
+			if store != nil {
+				step.OldVerified = store.TargetFingerprintMatches(p.root, gameinstall.InstallTarget{Path: target.Path, MD5: s.Old.MD5, Size: s.Old.Size})
+			}
 		}
 		steps = append(steps, step)
 	}
@@ -293,7 +312,11 @@ func (b *GameDownloadBackend) applyOneDownloadPatch(ctx context.Context, p *down
 	if err != nil {
 		return err
 	}
-	return e.Publish(ctx, gameres.Object{MD5: target.MD5, Size: target.Size}, filepath.ToSlash(relative))
+	want := gameres.Object{MD5: target.MD5, Size: target.Size}
+	if len(steps) == 0 || steps[len(steps)-1].New != want {
+		return gamepatch.ErrOutputMismatch
+	}
+	return e.PublishVerified(ctx, want, filepath.ToSlash(relative))
 }
 
 // runPatchDownload gives each object/source pair a stable child task identity.

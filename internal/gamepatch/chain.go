@@ -17,8 +17,9 @@ var ErrInvalidChain = errors.New("invalid patch chain")
 // and must be empty thereafter: later input comes only from the preceding
 // verified output. PatchPath is required on every step.
 type Step struct {
-	OldPath, PatchPath string
-	Old, Patch, New    gameres.Object
+	OldPath, PatchPath         string
+	Old, Patch, New            gameres.Object
+	OldVerified, PatchVerified bool
 }
 
 // ApplyChain serially rebuilds a chain of one to four steps under workdir,
@@ -98,7 +99,12 @@ func applyChain(ctx context.Context, steps []Step, workdir string, report func(s
 		if report != nil {
 			progress = func(written, total int64) { report(i, written, total) }
 		}
-		if err = apply(ctx, Options{OldPath: oldPath, PatchPath: s.PatchPath, OutputPath: path, OldExpect: s.Old, PatchExpect: s.Patch, Expect: s.New, Progress: progress}, stats); err != nil {
+		if err = apply(ctx, Options{
+			OldPath: oldPath, PatchPath: s.PatchPath, OutputPath: path,
+			OldExpect: s.Old, PatchExpect: s.Patch, Expect: s.New,
+			OldVerified: s.OldVerified || i > 0, PatchVerified: s.PatchVerified,
+			Progress: progress,
+		}, stats); err != nil {
 			return "", fmt.Errorf("patch chain step=%d: %w", i, err)
 		}
 		if previous != "" {

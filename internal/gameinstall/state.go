@@ -71,6 +71,7 @@ type VerifyReport struct {
 	Path                  string
 	FilesDone, FilesTotal int
 	BytesDone, BytesTotal int64
+	HashedBytes           int64
 	Reused                bool
 }
 type VerifyResult struct {
