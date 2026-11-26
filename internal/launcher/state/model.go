@@ -41,6 +41,7 @@ const (
 	WishAnalysis
 	CheckIn
 	GameData
+	Gallery
 	LauncherSettings
 )
 
@@ -192,6 +193,8 @@ type Event struct {
 	CloseToTray, AccentFollow, CheckUpdates bool
 	// Accounts carries the home account row's loaded list.
 	Accounts []SavedAccount
+	// Gallery carries scalar fields for gallery events without making Model uncomparable.
+	Gallery GalleryPayload
 }
 
 type EffectKind uint16
@@ -243,6 +246,8 @@ type Effect struct {
 	// CloseToTray, AccentFollow and CheckUpdates carry the persisted launcher
 	// UI choices for PersistUIPreferences.
 	CloseToTray, AccentFollow, CheckUpdates bool
+	// Gallery carries parameters for gallery effects.
+	Gallery GalleryEffectData
 }
 
 // NewsStatus is the state of the official announcement feed. There is no
@@ -291,6 +296,7 @@ type Model struct {
 	Page                Page
 	Wish                WishState
 	CheckIn             CheckInState
+	Gallery             GalleryState
 	DemoPaused          bool
 	NewsTab             uint8
 	NewsIndex           uint8
@@ -316,6 +322,9 @@ type Model struct {
 	// closes it. AccentFollow keeps the launch tone from the current key art.
 	CloseToTray  bool
 	AccentFollow bool
+	// CustomBackground is true while a user-selected gallery photo overrides
+	// the default official launcher background.
+	CustomBackground bool
 	// CheckUpdates asks the update service once at startup.
 	CheckUpdates bool
 	Closed       bool
@@ -346,7 +355,12 @@ type Model struct {
 }
 
 func Initial() Model {
-	return Model{Flow: Checking, Media: MediaLoading, Motion: true, CloseToTray: true, AccentFollow: true, CheckUpdates: true, Token: 1, News: NewsPending}
+	return Model{
+		Flow: Checking, Media: MediaLoading, Motion: true,
+		CloseToTray: true, AccentFollow: true, CheckUpdates: true,
+		Token: 1, News: NewsPending,
+		Gallery: InitialGalleryState(),
+	}
 }
 
 // Reduce is the only authority for transitions. It never performs I/O.
@@ -376,6 +390,9 @@ func Reduce(m Model, e Event) (Model, []Effect) {
 		return next, effects
 	}
 	if next, effects, handled := ReduceCheckIn(m, e); handled {
+		return next, effects
+	}
+	if next, effects, handled := reduceGallery(m, e); handled {
 		return next, effects
 	}
 	start := func(flow Flow, reset bool) (Model, []Effect) {

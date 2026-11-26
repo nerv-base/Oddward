@@ -124,7 +124,7 @@ func TestNativeSpineCellsKeepAccessibleTargets(t *testing.T) {
 		t.Cleanup(s.Dispose)
 		tt := ui.NewTester(s.View, size[0], size[1])
 
-		for _, label := range []string{"游戏主页", "抽卡分析", "每日签到", "启动器设置"} {
+		for _, label := range []string{"游戏主页", "抽卡分析", "每日签到", "游戏数据", "相册", "启动器设置"} {
 			a, ok := tt.AccessByRole(ui.RoleButton, label)
 			if !ok || a.Bounds.X != (railWidth-tileSize)/2 || a.Bounds.W != tileSize || a.Bounds.H != tileSize || !a.Focusable {
 				t.Fatalf("rail must retain a centered tile target: %s %+v", label, a)

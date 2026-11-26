@@ -28,6 +28,7 @@ func (s *Shell) navigation(c *ui.Context) {
 		{"wish-analysis", "抽卡分析", "\uE9D9", state.WishAnalysis},
 		{"check-in", "每日签到", "\uE787", state.CheckIn},
 		{"game-data", "游戏数据", "\uE8A5", state.GameData},
+		{"gallery", "相册", "\uEB9F", state.Gallery},
 	}
 	settingsSelected := s.Model.Page == state.LauncherSettings
 	ui.Box(c.Key("rail")).Absolute().Left(0).Top(0).Bottom(0).Width(railWidth).Background(bezel).Children(func() {

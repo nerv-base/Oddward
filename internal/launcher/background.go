@@ -92,6 +92,9 @@ func (s *Shell) syncBackground() {
 			if result.final {
 				s.backgroundOut = nil
 			}
+			if s.Model.CustomBackground {
+				continue
+			}
 			if result.err != nil {
 				log.Printf("official background: %v", result.err)
 			}
@@ -108,6 +111,46 @@ func (s *Shell) syncBackground() {
 			return
 		}
 	}
+}
+
+// applyCustomStaticBackground switches the live launcher backdrop to a
+// validated gallery photo and updates the derived accent color on the UI thread.
+func (s *Shell) applyCustomStaticBackground(img image.Image) {
+	if img == nil {
+		return
+	}
+	if s.Player != nil {
+		s.Player.Close()
+		s.Player = nil
+	}
+	if s.nextPlayer != nil {
+		s.nextPlayer.Close()
+		s.nextPlayer = nil
+	}
+	s.BackgroundSource = nil
+	s.Poster = ui.NewBitmap(img)
+	if tone, ok := ArtAccent(img); ok {
+		s.Accent = tone
+	}
+	if !s.Model.MediaPreview {
+		s.Dispatch(state.Event{Kind: state.MediaFailed})
+	}
+	s.Dispatch(state.Event{Kind: state.GalleryCustomBackgroundLoaded, Enabled: true})
+}
+
+// restoreOfficialBackground clears a custom gallery background and restarts the
+// official background source live without requiring a launcher restart.
+func (s *Shell) restoreOfficialBackground() {
+	s.Dispatch(state.Event{Kind: state.GalleryCustomBackgroundLoaded, Enabled: false})
+	if s.NewBackgroundSource != nil {
+		s.BackgroundSource = s.NewBackgroundSource()
+		if !s.Model.MediaPreview {
+			s.Dispatch(state.Event{Kind: state.MediaRetry})
+		}
+		return
+	}
+	s.Poster = nil
+	s.Accent = ui.Color{}
 }
 
 func artworkAccent(poster image.Image) ui.Color {
