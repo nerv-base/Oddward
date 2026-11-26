@@ -165,7 +165,7 @@ func (b *GameDownloadBackend) planDownload(ctx context.Context, req launcher.Dow
 		}
 		branch = base.Branch
 	}
-	delivery, err := b.metadata().delivery(ctx, branch, "")
+	delivery, err := b.metadata().formalDelivery(ctx, branch)
 	if err != nil {
 		return event, err
 	}

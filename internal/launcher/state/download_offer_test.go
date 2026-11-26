@@ -40,7 +40,7 @@ func TestDownloadOfferPollResultsFenceRootTokenAndTaskGeneration(t *testing.T) {
 		{"root moved", func(m *Model) { m.Managed.Root = `E:\Other` }, false},
 		{"task started and completed", func(m *Model) { m.Download.Request++; m.Download.Phase = DownloadDone }, false},
 		{"managed generation changed", func(m *Model) { m.Managed.Request++ }, false},
-		{"preload staged", func(m *Model) { m.Download.Preload = PreloadStateWaitingRelease }, false},
+		{"preload downloading", func(m *Model) { m.Download.Preload = PreloadStateDownloading }, false},
 		{"official started", func(m *Model) { m.Download.OfficialRunning = true }, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -71,9 +71,9 @@ func TestDownloadOfferPollOnlyAdmitsIdleAdoptedRoot(t *testing.T) {
 		{"unadopted", func(m *Model) { m.Download.Located = false }},
 		{"running", func(m *Model) { m.Download.Phase = DownloadRunning }},
 		{"paused", func(m *Model) { m.Download.Phase = DownloadSuspended }},
-		{"staged", func(m *Model) { m.Download.Preload = PreloadStateWaitingRelease }},
-		{"applicable", func(m *Model) { m.Download.Preload = PreloadStateApplicable }},
-		{"stale", func(m *Model) { m.Download.Preload = PreloadStateStale }},
+		{"preload downloading", func(m *Model) { m.Download.Preload = PreloadStateDownloading }},
+		{"preload reconciling", func(m *Model) { m.Download.Preload = PreloadStateReconcile }},
+		{"preload applying", func(m *Model) { m.Download.Preload = PreloadStateApplying }},
 		{"game", func(m *Model) { m.Download.GameRunning = true }},
 		{"official", func(m *Model) { m.Download.OfficialRunning = true }},
 		{"login", func(m *Model) { m.Managed.Phase = ManagedPreparing }},
@@ -109,5 +109,42 @@ func TestDownloadOfferPollingEmitsOnlyCheckEffectForAdoptedIdleRoot(t *testing.T
 	m, fx := Reduce(m, Event{Kind: EventKind(314)})
 	if len(fx) != 1 || fx[0].Kind != EffectKind(276) || fx[0].Token == 0 || fx[0].Path != m.Managed.Root || m.Download.Request != before || m.Download.Phase != DownloadIdle || m.Download.Kind != DownloadNone {
 		t.Fatalf("poll must only check idle config: %+v %+v", m.Download, fx)
+	}
+}
+
+func TestDownloadOfferPollContinuesWhilePreloadWaitsForRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		preload PreloadState
+		phase   DownloadPhase
+	}{
+		{"waiting-release-done", PreloadStateWaitingRelease, DownloadDone},
+		{"waiting-release-restored", PreloadStateWaitingRelease, DownloadIdle},
+		{"staged", PreloadStateStaged, DownloadIdle},
+		{"applicable", PreloadStateApplicable, DownloadDone},
+		{"stale", PreloadStateStale, DownloadStale},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := pollableDownloadModel()
+			m.Download.Current = "1.4.18"
+			m.Download.Kind = DownloadPreload
+			m.Download.Phase = tc.phase
+			m.Download.Preload = tc.preload
+			m.Download.PreloadVersion = "1.5.0"
+			if !CanPollDownloadOffer(m) {
+				t.Fatalf("poll blocked in %s", tc.name)
+			}
+			m, fx := Reduce(m, Event{Kind: DownloadOfferPollRequest})
+			if len(fx) != 1 || fx[0].Kind != EffectDownloadOfferPoll {
+				t.Fatalf("expected offer poll effect, got %+v", fx)
+			}
+			m, fx = Reduce(m, Event{Kind: DownloadOfferPolled, Token: m.Download.OfferRequest, Path: m.Managed.Root, Message: "1.5.3"})
+			if len(fx) != 0 || m.Download.Preload != tc.preload || PresentDownload(m).OfferVersion != "1.5.3" {
+				t.Fatalf("formal offer lost or clobbered preload: %+v %+v", m.Download, PresentDownload(m))
+			}
+			if p := Present(m); p.Primary != "更新游戏" || !p.Enabled {
+				t.Fatalf("primary did not switch to formal update: %+v", p)
+			}
+		})
 	}
 }

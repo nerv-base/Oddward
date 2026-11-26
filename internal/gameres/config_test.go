@@ -3,6 +3,7 @@
 package gameres
 
 import (
+	"encoding/base64"
 	"reflect"
 	"strings"
 	"testing"
@@ -82,6 +83,9 @@ func TestParseConfigRejectsInvalidMetadata(t *testing.T) {
 		"conflicting size":    strings.Replace(valid, "<Extra>", "<ResSize>1</ResSize><Extra><ResSize>2</ResSize>", 1),
 		"ambiguous base tag":  strings.Replace(valid, "<Extra>", `<Extra><BaseTag><item name="baseTag"/><item name="other"/></BaseTag>`, 1),
 		"repeated base tag":   strings.Replace(valid, "<Extra>", `<Extra><BaseTag>baseTag</BaseTag><BaseTag>baseTag</BaseTag>`, 1),
+		"bad resconfig b64":   strings.Replace(valid, "<Extra>", `<ResConfig>not!base64</ResConfig><Extra>`, 1),
+		"bad resconfig json":  strings.Replace(valid, "<Extra>", `<ResConfig>`+base64.StdEncoding.EncodeToString([]byte(`{bad`))+`</ResConfig><Extra>`, 1),
+		"unsafe resconfig":    strings.Replace(valid, "<Extra>", `<ResConfig>`+base64.StdEncoding.EncodeToString([]byte(`{"appId":"1289","branchName":"../PC_150"}`))+`</ResConfig><Extra>`, 1),
 		"extra root":          valid + valid,
 		"directive":           `<!DOCTYPE config SYSTEM "example.invalid">` + valid,
 	} {
@@ -90,5 +94,18 @@ func TestParseConfigRejectsInvalidMetadata(t *testing.T) {
 				t.Fatal("accepted invalid config")
 			}
 		})
+	}
+}
+
+func TestParseConfigDecodesResConfigBranchMigration(t *testing.T) {
+	raw := `{"appId":"1289","branchName":"PC_150","updateBranchName":"publish_Updata","gameResUrl":["https://cdn.example.invalid/clientRes"]}`
+	encoded := base64.StdEncoding.EncodeToString([]byte(raw))
+	data := `<config><ResVersion>1.4.18</ResVersion><PreReleaseStatus>end</PreReleaseStatus><PreReleaseBranch>PC_150</PreReleaseBranch><PreReleaseVersion>1.5.0</PreReleaseVersion><ResConfig>` + encoded + `</ResConfig><Extra><listHash>` + configListHash + `</listHash></Extra></config>`
+	got, err := ParseConfig([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UnknownFields != 0 || got.ResConfig == nil || got.ResConfig.AppID != "1289" || got.ResConfig.Branch != "PC_150" || got.ResConfig.UpdateBranch != "publish_Updata" {
+		t.Fatalf("ParseConfig() = %#v", got)
 	}
 }

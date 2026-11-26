@@ -97,6 +97,7 @@ func (b *GameDownloadBackend) recoverDownload(ctx context.Context, req launcher.
 	if status.LaunchBlocked && !req.Effect.Enabled {
 		return event, gameinstall.ErrRecoveryRequired
 	}
+	locked := false
 	if req.Effect.Enabled && (status.LaunchBlocked || status.Published) {
 		lock, err := acquireDownloadMutation(root)
 		if err != nil {
@@ -108,6 +109,7 @@ func (b *GameDownloadBackend) recoverDownload(ctx context.Context, req launcher.
 			return event, err
 		}
 		defer lease.Close()
+		locked = true
 		guard := func(ctx context.Context) error { return b.guard(ctx, true) }
 		status, err = store.Recover(ctx, root, downloadWork(root), guard)
 		if err != nil && !(status.Published && !status.LaunchBlocked && errors.Is(err, gameinstall.ErrCleanupPending)) {
@@ -127,7 +129,6 @@ func (b *GameDownloadBackend) recoverDownload(ctx context.Context, req launcher.
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return event, err
 	}
-	event.Kind = state.DownloadRecoveryCleared
 	event.CurrentVersion = base.Version
 	event.Enabled = base.VerifyCoverage == "full"
 	if status.Published {
@@ -135,38 +136,109 @@ func (b *GameDownloadBackend) recoverDownload(ctx context.Context, req launcher.
 	}
 	if req.Effect.Enabled {
 		if status.Published {
-			if err := b.preloadRecoveredCommit(ctx, root, base); err != nil {
+			completed, cerr := b.preloadRecoveredCommit(ctx, root, base)
+			if cerr != nil {
 				event.Kind = state.DownloadRecoveryNeeded
-				return event, err
+				return event, cerr
+			}
+			if completed {
+				event.Body = "completed"
 			}
 		}
+		// A published record only proves the *last* transaction committed: an
+		// earlier applied install keeps Published true, so releasing a preload
+		// parked in applying cannot be skipped here. The precheck keeps a clean
+		// installation from taking the locks an apply would need.
+		pending, perr := b.preloadRecoveryPending(ctx, root)
+		if perr != nil {
+			event.Kind = state.DownloadRecoveryNeeded
+			return event, perr
+		}
+		if !pending {
+			event.Kind = state.DownloadRecoveryCleared
+			return event, nil
+		}
+		// The recovery block above already holds both locks; Windows mutexes and
+		// leases are not safely re-entrant from a different thread.
+		if !locked {
+			lock, lerr := acquireDownloadMutation(root)
+			if lerr != nil {
+				event.Kind = state.DownloadRecoveryNeeded
+				return event, lerr
+			}
+			defer lock.Close()
+			lease, lerr := preloadSystemRootLease(root)
+			if lerr != nil {
+				event.Kind = state.DownloadRecoveryNeeded
+				return event, lerr
+			}
+			defer lease.Close()
+		}
+		stale, rerr := b.preloadRecoveredRollback(ctx, root, base)
+		if rerr != nil {
+			event.Kind = state.DownloadRecoveryNeeded
+			return event, rerr
+		}
+		if stale && event.Body == "" {
+			event.Body = "stale"
+		}
+		event.Kind = state.DownloadRecoveryCleared
 		return event, nil
 	}
+	// A record parked in applying/recovery means the last apply was interrupted.
+	// Releasing it stays the highest priority so the next reconcile or apply
+	// starts from a usable record instead of a permanently stuck one.
 	version, note, err := b.preloadRestore(ctx, root)
 	if err != nil {
 		return event, err
+	}
+	// A paused ordinary hotfix owns the plan and work tree; returning the staged
+	// preload first would hide it until the user happened to start an update.
+	event, found, err := b.restoreDownloadTask(ctx, root, base, event)
+	if err != nil {
+		event.Kind = state.DownloadRecoveryNeeded
+		return event, err
+	}
+	if found {
+		// The resumed task keeps the plan, but the preload record read above still
+		// describes bytes on disk. Carrying it on the same event keeps the chip
+		// available once the hotfix finishes instead of hiding a staged preload
+		// until the next startup scan.
+		if version != "" && note != "" {
+			event.Body = note + ":" + version
+		}
+		return event, nil
 	}
 	if version != "" {
 		event.Kind, event.Index, event.Message, event.Body = state.DownloadRestored, uint8(state.DownloadPreload), version, note
 		return event, nil
 	}
+	event.Kind = state.DownloadRecoveryCleared
+	return event, nil
+}
+
+// restoreDownloadTask republishes the newest interrupted ordinary task so a
+// paused rename or hotfix resumes after a restart. A staged preload record is
+// deliberately left in place: it is independent of that task and stays
+// available for the next reconcile.
+func (b *GameDownloadBackend) restoreDownloadTask(ctx context.Context, root string, base gameinstall.InstallRecord, event state.Event) (state.Event, bool, error) {
 	key, err := gameinstall.InstallKey(root)
 	if err != nil {
-		return event, err
+		return event, false, err
 	}
 	if _, err = os.Lstat(b.taskRoot(key)); errors.Is(err, os.ErrNotExist) {
-		return event, nil
+		return event, false, nil
 	} else if err != nil {
-		return event, err
+		return event, false, err
 	}
 	tasks, err := gamedl.NewStore(b.DB, b.taskRoot(key))
 	if err != nil {
-		return event, err
+		return event, false, err
 	}
 	defer tasks.Close()
 	records, err := tasks.List(ctx)
 	if err != nil {
-		return event, err
+		return event, false, err
 	}
 	var latest *gamedl.Task
 	for i := range records {
@@ -179,7 +251,7 @@ func (b *GameDownloadBackend) recoverDownload(ctx context.Context, req launcher.
 		}
 	}
 	if latest == nil {
-		return event, nil
+		return event, false, nil
 	}
 	kind := state.DownloadUpdate
 	if latest.Kind == gamedl.TaskInstallFiles {
@@ -189,24 +261,30 @@ func (b *GameDownloadBackend) recoverDownload(ctx context.Context, req launcher.
 	if latest.CacheRoot != "" {
 		p.externalCache, p.workRoot, err = b.externalDownloadCache(root, latest.CacheRoot, key)
 		if err != nil {
-			event.Kind = state.DownloadRecoveryNeeded
-			return event, err
+			return event, false, err
 		}
 	}
 	b.putPlan(root, p)
 	event.Kind, event.Index, event.Stage, event.Message = state.DownloadRestored, uint8(kind), state.StageNetwork, latest.TargetVersion
 	event.Focused = latest.State == gamedl.StateRunning || latest.State == gamedl.StateVerifying
-	return event, nil
+	return event, true, nil
 }
 
 func (b *GameDownloadBackend) revalidateResumedDownload(ctx context.Context, p *downloadPlan) (*downloadPlan, error) {
 	task := p.resumeTask
-	delivery, err := b.metadata().delivery(ctx, task.Branch, task.TargetVersion)
+	// Resolve through the trusted mirror's branch migration so a resumed task
+	// cannot keep downloading a retired branch after <ResConfig> moved it.
+	delivery, err := b.metadata().formalDelivery(ctx, task.Branch)
 	if err != nil {
 		return nil, err
 	}
-	if delivery.Config.ListHash != task.ListHash {
-		return nil, gameinstall.ErrStaleState
+	if delivery.Branch != task.Branch || delivery.Config.ResVersion != task.TargetVersion || delivery.Config.ListHash != task.ListHash {
+		// Leaving the row running would pick it again on the next start (and
+		// auto-resume a dead branch), so the stale task is retired on disk and
+		// its in-memory plan is dropped.
+		staleErr := b.markResumedTaskStale(ctx, p)
+		b.putPlan(p.root, nil)
+		return nil, errors.Join(gameinstall.ErrStaleState, staleErr)
 	}
 	next, err := b.buildDownloadPlan(ctx, p.root, p.kind, delivery, p.base, task.CacheRoot)
 	if err != nil {
@@ -217,4 +295,19 @@ func (b *GameDownloadBackend) revalidateResumedDownload(ctx context.Context, p *
 	next.supersedes = p.id
 	b.putPlan(p.root, next)
 	return next, nil
+}
+
+// markResumedTaskStale retires the rejected task on disk so the next scan no
+// longer resumes a migrated branch. The caller keeps ErrStaleState first so the
+// UI still reports a stale record, with the store failure appended for logs.
+func (b *GameDownloadBackend) markResumedTaskStale(ctx context.Context, p *downloadPlan) error {
+	tasks, err := gamedl.NewStore(b.DB, b.taskRoot(p.key))
+	if err != nil {
+		return err
+	}
+	defer tasks.Close()
+	if err = tasks.UpdateTaskState(ctx, p.resumeTask.ID, gamedl.StateStale, ""); err != nil {
+		return err
+	}
+	return nil
 }

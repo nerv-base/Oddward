@@ -4,7 +4,10 @@ package system
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -59,5 +62,76 @@ func TestDownloadMetadataRejectsEncodedAndOverLimit(t *testing.T) {
 				t.Fatalf("failure = %v", err)
 			}
 		})
+	}
+}
+
+func TestDownloadMetadataVersionedDeliverySurvivesBranchAdvancement(t *testing.T) {
+	manifest := []byte(fmt.Sprintf(`<ResList version="1.5.0" tag="baseTag"><Res filename="HT/Content/Paks/a.pak" md5="%x" filesize="3"/></ResList>`, md5.Sum([]byte("new"))))
+	listHash := fmt.Sprintf("%x", md5.Sum(manifest))
+	zipData := preloadSyntheticArchive(t, manifest)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/clientRes/PC_150/Version/Windows/config.xml":
+			// Branch head has moved on to 1.5.8.
+			fmt.Fprintf(w, `<config><ResVersion>1.5.8</ResVersion><Extra><listHash>%s</listHash></Extra></config>`, listHash)
+		case "/clientRes/PC_150/Version/Windows/version/1.5.0/config.xml":
+			fmt.Fprintf(w, `<config><ResVersion>1.5.0</ResVersion><Extra><listHash>%s</listHash></Extra></config>`, listHash)
+		case "/clientRes/PC_150/Version/Windows/version/1.5.0/ResList.bin.zip":
+			_, _ = w.Write(zipData)
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	m := remoteDownloads{client: srv.Client(), roots: []string{srv.URL + "/clientRes"}}
+	got, err := m.delivery(context.Background(), "PC_150", "1.5.0")
+	if err != nil || got.Branch != "PC_150" || got.Config.ResVersion != "1.5.0" || got.ConfigResponse.URL != srv.URL+"/clientRes/PC_150/Version/Windows/version/1.5.0/config.xml" {
+		t.Fatalf("versioned delivery = %+v, err = %v", got, err)
+	}
+}
+
+func TestDownloadMetadataFormalFollowsResConfigAndRejectsLoopsOrForeignApp(t *testing.T) {
+	manifest := []byte(fmt.Sprintf(`<ResList version="1.5.3" tag="baseTag"><Res filename="HT/Content/Paks/a.pak" md5="%x" filesize="3"/></ResList>`, md5.Sum([]byte("new"))))
+	listHash := fmt.Sprintf("%x", md5.Sum(manifest))
+	zipData := preloadSyntheticArchive(t, manifest)
+	enc := func(raw string) string { return base64.StdEncoding.EncodeToString([]byte(raw)) }
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/clientRes/PC_140/Version/Windows/config.xml":
+			fmt.Fprintf(w, `<config><ResVersion>1.4.18</ResVersion><PreReleaseStatus>end</PreReleaseStatus><PreReleaseBranch>PC_150</PreReleaseBranch><PreReleaseVersion>1.5.0</PreReleaseVersion><ResConfig>%s</ResConfig><Extra><listHash>%s</listHash></Extra></config>`,
+				enc(`{"appId":"1289","branchName":"PC_150","updateBranchName":"publish_Updata","gameResUrl":["https://evil.invalid/clientRes"]}`), listHash)
+		case "/clientRes/PC_150/Version/Windows/config.xml":
+			fmt.Fprintf(w, `<config><ResVersion>1.5.3</ResVersion><Extra><listHash>%s</listHash></Extra></config>`, listHash)
+		case "/clientRes/PC_150/Version/Windows/version/1.5.3/ResList.bin.zip":
+			_, _ = w.Write(zipData)
+		case "/clientRes/LOOP_A/Version/Windows/config.xml":
+			fmt.Fprintf(w, `<config><ResVersion>1.0.0</ResVersion><ResConfig>%s</ResConfig><Extra><listHash>%s</listHash></Extra></config>`,
+				enc(`{"appId":"1289","branchName":"LOOP_B"}`), listHash)
+		case "/clientRes/LOOP_B/Version/Windows/config.xml":
+			fmt.Fprintf(w, `<config><ResVersion>1.0.0</ResVersion><ResConfig>%s</ResConfig><Extra><listHash>%s</listHash></Extra></config>`,
+				enc(`{"appId":"1289","branchName":"LOOP_A"}`), listHash)
+		case "/clientRes/FOREIGN/Version/Windows/config.xml":
+			fmt.Fprintf(w, `<config><ResVersion>1.0.0</ResVersion><ResConfig>%s</ResConfig><Extra><listHash>%s</listHash></Extra></config>`,
+				enc(`{"appId":"9999","branchName":"PC_150"}`), listHash)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	m := remoteDownloads{client: srv.Client(), roots: []string{srv.URL + "/clientRes"}}
+	cfg, res, branch, err := m.formalConfig(context.Background(), "PC_140")
+	if err != nil || branch != "PC_150" || cfg.ResVersion != "1.5.3" || res.Root != srv.URL+"/clientRes" {
+		t.Fatalf("formalConfig = %+v %+v %q err=%v", cfg, res, branch, err)
+	}
+	deliv, err := m.formalDelivery(context.Background(), "PC_140")
+	if err != nil || deliv.Branch != "PC_150" || deliv.Config.ResVersion != "1.5.3" {
+		t.Fatalf("formalDelivery = %+v err=%v", deliv, err)
+	}
+	if _, _, _, err := m.formalConfig(context.Background(), "LOOP_A"); err == nil {
+		t.Fatal("accepted redirect loop")
+	}
+	if _, _, _, err := m.formalConfig(context.Background(), "FOREIGN"); err == nil {
+		t.Fatal("accepted foreign appId redirect")
 	}
 }

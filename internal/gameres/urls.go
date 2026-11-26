@@ -12,6 +12,11 @@ func ConfigURL(base, branch string) (string, error) {
 	return resourceURL(base, branch, "Version", "Windows", "config.xml")
 }
 
+// VersionConfigURL builds the versioned remote Windows configuration URL for branch.
+func VersionConfigURL(base, branch, version string) (string, error) {
+	return resourceURL(base, branch, "Version", "Windows", "version", version, "config.xml")
+}
+
 // ManifestURL builds the versioned archive URL for the given branch.
 func ManifestURL(base, branch, version string) (string, error) {
 	return resourceURL(base, branch, "Version", "Windows", "version", version, "ResList.bin.zip")

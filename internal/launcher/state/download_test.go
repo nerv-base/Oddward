@@ -55,9 +55,28 @@ func TestPreloadReconcileSupplementalPlanStartsAfterReset(t *testing.T) {
 	}
 	m, _ = Reduce(m, downloadEvent(m, PreloadStarted))
 	m, fx = Reduce(m, downloadEvent(m, PreloadStaged))
-	if len(fx) != 0 || m.Download.Preload != PreloadStateWaitingRelease {
-		t.Fatal("supplement completed without waiting for reconcile")
+	requireDownloadEffect(t, m, fx, EffectPreloadCheck)
+	if !fx[0].Enabled || m.Download.Preload != PreloadStateReconcile {
+		t.Fatalf("supplement completion must automatically reconcile again: %+v %+v", m.Download, fx)
 	}
+	m, fx = Reduce(m, downloadEvent(m, PreloadAvailableToApply))
+	if len(fx) != 0 || m.Download.Preload != PreloadStateApplicable {
+		t.Fatalf("manual reconcile must stop at applicable after auto-recheck: %+v %+v", m.Download, fx)
+	}
+}
+
+func TestPreloadReconcileFailureDoesNotStickAndPreservesStagedPreload(t *testing.T) {
+	m := downloadModel()
+	m.Download.Kind = DownloadPreload
+	m.Download.Preload = PreloadStateWaitingRelease
+	m.Download.PreloadVersion = "1.5.0"
+	m, fx := Reduce(m, Event{Kind: PreloadReconcileRequest})
+	requireDownloadEffect(t, m, fx, EffectPreloadCheck)
+	m, fx = Reduce(m, Event{Kind: PreloadFailed, Token: m.Download.Request, Message: "网络超时，请重试"})
+	if len(fx) != 0 || m.Download.Preload != PreloadStateWaitingRelease || !PresentDownload(m).CanReconcile || m.Download.Error == "" {
+		t.Fatalf("reconcile failure lost staged preload or stuck busy: %+v %+v", m.Download, PresentDownload(m))
+	}
+	// Retrying reconcile must work immediately.
 	m, fx = Reduce(m, Event{Kind: PreloadReconcileRequest})
 	requireDownloadEffect(t, m, fx, EffectPreloadCheck)
 }
@@ -526,5 +545,198 @@ func TestDownloadNoteMappingsDoNotLeakKeys(t *testing.T) {
 	}
 	if DownloadNoteText("not-offered") == DownloadNoteText("unverified") {
 		t.Fatal("unknown preload misrepresented as unsupported")
+	}
+}
+
+func applyingPreload(t *testing.T, commit bool) Model {
+	t.Helper()
+	m := plannedDownload(t, DownloadPreload)
+	m, _ = Reduce(m, downloadEvent(m, PreloadStarted))
+	m, _ = Reduce(m, downloadEvent(m, DownloadVerified))
+	m, fx := Reduce(m, downloadEvent(m, PreloadStaged))
+	if len(fx) != 0 || m.Download.Preload != PreloadStateWaitingRelease {
+		t.Fatalf("preload staging did not wait for release: %+v %+v", m.Download, fx)
+	}
+	m, fx = Reduce(m, downloadEvent(m, PreloadAvailableToApply))
+	if len(fx) != 0 || m.Download.Preload != PreloadStateApplicable {
+		t.Fatalf("manual reconcile must stop at applicable: %+v %+v", m.Download, fx)
+	}
+	m, fx = Reduce(m, Event{Kind: PreloadApplyRequest})
+	requireDownloadEffect(t, m, fx, EffectPreloadApply)
+	if commit {
+		m, _ = Reduce(m, downloadEvent(m, DownloadCommitStart))
+	}
+	return m
+}
+
+// Rebuilding staged preload patches happens before the transaction, so its
+// progress and fallback notices must be visible exactly like an update's.
+func TestPreloadApplyShowsRebuildProgressBeforeCommit(t *testing.T) {
+	m := applyingPreload(t, false)
+	if m.Download.Preload != PreloadStateApplying || m.Download.Phase != DownloadCommitting || m.Download.Stage != StageApply {
+		t.Fatalf("preload apply claimed the commit stage early: %+v", m.Download)
+	}
+	if p := Present(m); p.Primary != "正在更新" && p.Status != "正在重建文件" {
+		t.Fatalf("preload apply must block launch while rebuilding: %+v", p)
+	}
+	m, _ = Reduce(m, Event{Kind: ApplyStarted, Token: m.Download.Request, FilesTotal: 3})
+	if m.Download.Phase != DownloadRebuilding || m.Download.Stage != StageApply || m.Download.FilesTotal != 3 || m.Download.FilesDone != 0 {
+		t.Fatalf("preload rebuild did not start: %+v", m.Download)
+	}
+	m, _ = Reduce(m, Event{Kind: ApplyProgress, Token: m.Download.Request, Stage: StageApply, Downloaded: 20, Total: 50, FilesDone: 1, FilesTotal: 3})
+	if p := PresentDownload(m); m.Download.Stage != StageApply || m.Download.Downloaded != 20 || m.Download.FilesDone != 1 || !p.ShowProgress {
+		t.Fatalf("preload rebuild progress was dropped: %+v %+v", m.Download, p)
+	}
+	m, _ = Reduce(m, Event{Kind: DownloadFallbackNotice, Token: m.Download.Request, Body: "fallback-full"})
+	if !m.Download.FallbackNote || m.Download.Note != "fallback-full" {
+		t.Fatalf("preload rebuild fallback notice was dropped: %+v", m.Download)
+	}
+	m, _ = Reduce(m, Event{Kind: DownloadCommitStart, Token: m.Download.Request})
+	if m.Download.Phase != DownloadCommitting || m.Download.Stage != StageCommit {
+		t.Fatalf("preload commit start: %+v", m.Download)
+	}
+	m, _ = Reduce(m, Event{Kind: PreloadApplied, Token: m.Download.Request, Message: "v2"})
+	if m.Download.Preload != PreloadStateCompleted || m.Download.Phase != DownloadDone || m.Download.Current != "v2" {
+		t.Fatalf("preload apply did not publish: %+v", m.Download)
+	}
+}
+
+func TestPreloadFailureBeforeTransactionStaysRetryable(t *testing.T) {
+	m := applyingPreload(t, false)
+	m, _ = Reduce(m, Event{Kind: PreloadFailed, Token: m.Download.Request, Message: "重建补丁失败，请重试"})
+	if m.Download.Phase != DownloadError || m.Download.Preload != PreloadStateWaitingRelease || m.Download.Error == "" {
+		t.Fatalf("pre-transaction preload failure demanded recovery: %+v", m.Download)
+	}
+	if !PresentDownload(m).CanReconcile {
+		t.Fatalf("a retryable preload failure cannot be rechecked: %+v", m.Download)
+	}
+
+	committed := applyingPreload(t, true)
+	committed, _ = Reduce(committed, Event{Kind: PreloadFailed, Token: committed.Download.Request, Message: "提交失败，请恢复"})
+	if committed.Download.Phase != DownloadRecoveryRequired || committed.Download.Preload != PreloadStateRecoveryRequired {
+		t.Fatalf("a started transaction must still require recovery: %+v", committed.Download)
+	}
+}
+
+func TestDownloadRecoveryClearedReleasesStuckPreload(t *testing.T) {
+	for body, want := range map[string]PreloadState{"completed": PreloadStateCompleted, "stale": PreloadStateStale, "": PreloadStateUnavailable} {
+		m := downloadModel()
+		m.Download.Kind = DownloadPreload
+		m, fx := Reduce(m, Event{Kind: DownloadRecoveryScanRequest})
+		requireDownloadEffect(t, m, fx, EffectRecoverScan)
+		m, _ = Reduce(m, Event{Kind: DownloadRecoveryNeeded, Token: m.Download.Request, Message: "上次更新未完成，请恢复"})
+		if m.Download.Phase != DownloadRecoveryRequired || m.Download.Preload != PreloadStateRecoveryRequired {
+			t.Fatalf("preload recovery state missing: %+v", m.Download)
+		}
+		m, fx = Reduce(m, Event{Kind: DownloadRecoverRequest})
+		requireDownloadEffect(t, m, fx, EffectRecoverScan)
+		m, _ = Reduce(m, Event{Kind: DownloadRecoveryCleared, Token: m.Download.Request, CurrentVersion: "v2", Enabled: true, Body: body})
+		if m.Download.Preload != want || m.Download.Phase != DownloadIdle {
+			t.Fatalf("recovery clear body %q left preload %d: %+v", body, m.Download.Preload, m.Download)
+		}
+	}
+}
+
+// A preload whose base check or patch rebuild reports a stale plan before the
+// transaction started must leave "applying" instead of waiting for a commit
+// that will never arrive.
+func TestPreloadStaleBeforeCommitReleasesApplying(t *testing.T) {
+	m := applyingPreload(t, false)
+	m, _ = Reduce(m, downloadEvent(m, PreloadStale))
+	if m.Download.Preload != PreloadStateStale || m.Download.Phase != DownloadStale || m.Download.Stage != StageIdle {
+		t.Fatalf("pre-transaction stale preload stuck applying: %+v", m.Download)
+	}
+	// Once the transaction runs the journal owns the record, so a stale report
+	// can no longer rewrite it.
+	committed := applyingPreload(t, true)
+	committed, _ = Reduce(committed, downloadEvent(committed, PreloadStale))
+	if committed.Download.Preload != PreloadStateApplying || committed.Download.Phase != DownloadCommitting || committed.Download.Stage != StageCommit {
+		t.Fatalf("started transaction lost its applying record: %+v", committed.Download)
+	}
+}
+
+// The commit-start receipt and recovery requests are backend facts; an
+// asynchronously observed game process cannot drop them.
+func TestPreloadRebuildCommitStartAndRecoveryIgnoreObservedWriteBlock(t *testing.T) {
+	m := applyingPreload(t, false)
+	m, _ = Reduce(m, Event{Kind: ApplyStarted, Token: m.Download.Request, FilesTotal: 2})
+	if m.Download.Phase != DownloadRebuilding {
+		t.Fatalf("preload rebuild did not start: %+v", m.Download)
+	}
+	m.Download.GameRunning, m.Download.OfficialRunning = true, true
+	m, _ = Reduce(m, downloadEvent(m, DownloadCommitStart))
+	if m.Download.Phase != DownloadCommitting || m.Download.Stage != StageCommit {
+		t.Fatalf("commit start dropped by an observed process: %+v", m.Download)
+	}
+
+	rebuild := applyingPreload(t, false)
+	rebuild, _ = Reduce(rebuild, Event{Kind: ApplyStarted, Token: rebuild.Download.Request, FilesTotal: 2})
+	rebuild, _ = Reduce(rebuild, downloadEvent(rebuild, DownloadRecoveryNeeded))
+	if rebuild.Download.Phase != DownloadRecoveryRequired || rebuild.Download.Preload != PreloadStateRecoveryRequired {
+		t.Fatalf("rebuild recovery request dropped: %+v", rebuild.Download)
+	}
+}
+
+// Settings can only discard a staged preload while no ordinary task still owns
+// the plan, and discarding never clears another task's progress.
+func TestPreloadDiscardWaitsForUnfinishedDownloadAndKeepsItsState(t *testing.T) {
+	m := downloadModel()
+	m.Download.Kind = DownloadUpdate
+	m.Download.Phase = DownloadSuspended
+	m.Download.Version = "v2"
+	m.Download.Preload, m.Download.PreloadVersion = PreloadStateWaitingRelease, "v2"
+	if PresentDownload(m).CanDiscard {
+		t.Fatalf("paused hotfix still offers discard: %+v", PresentDownload(m))
+	}
+	old := m.Download.Request
+	m, fx := Reduce(m, Event{Kind: PreloadDiscardRequest})
+	if len(fx) != 0 || m.Download.Request != old || m.Download.Preload != PreloadStateWaitingRelease {
+		t.Fatalf("paused hotfix discarded the staged preload: %+v %+v", m.Download, fx)
+	}
+
+	m.Download.Phase = DownloadIdle
+	if !PresentDownload(m).CanDiscard {
+		t.Fatalf("idle preload cannot be discarded: %+v", PresentDownload(m))
+	}
+	m, fx = Reduce(m, Event{Kind: PreloadDiscardRequest})
+	requireDownloadEffect(t, m, fx, EffectPreloadDiscard)
+	m, _ = Reduce(m, downloadEvent(m, PreloadDiscarded))
+	if m.Download.Preload != PreloadStateUnavailable || m.Download.PreloadVersion != "" || m.Download.Version != "v2" || m.Download.Kind != DownloadUpdate {
+		t.Fatalf("discard touched the hotfix task: %+v", m.Download)
+	}
+}
+
+// A startup scan that resumes a paused hotfix also reports the preload it found
+// beside it, so the staged bytes stay reachable once the hotfix finishes.
+func TestDownloadRestoreKeepsStagedPreloadBesideResumedHotfix(t *testing.T) {
+	m := downloadModel()
+	m, fx := Reduce(m, Event{Kind: DownloadRecoveryScanRequest})
+	requireDownloadEffect(t, m, fx, EffectRecoverScan)
+	m, fx = Reduce(m, Event{Kind: DownloadRestored, Token: m.Download.Request, Path: m.Managed.Root, Index: uint8(DownloadUpdate), Stage: StageNetwork, Message: "1.4.0", CurrentVersion: "1.3.0", Body: "waiting-release:1.5.0"})
+	if len(fx) != 0 {
+		t.Fatalf("restoration started work on its own: %+v", fx)
+	}
+	if d := m.Download; d.Kind != DownloadUpdate || d.Phase != DownloadSuspended || d.Stage != StageNetwork || d.Version != "1.4.0" || d.Current != "1.3.0" || d.Preload != PreloadStateWaitingRelease || d.PreloadVersion != "1.5.0" {
+		t.Fatalf("resumed hotfix lost its staged preload: %+v", m.Download)
+	}
+	if chip := PresentPreload(m); chip.Visible {
+		t.Fatalf("preload chip must stay hidden while the resumed hotfix owns the dock: %+v", chip)
+	}
+	m, fx = Reduce(m, Event{Kind: DownloadResume})
+	requireDownloadEffect(t, m, fx, EffectDownloadRun)
+	m, _ = Reduce(m, downloadEvent(m, DownloadStarted))
+	m, fx = Reduce(m, downloadEvent(m, DownloadVerified))
+	requireDownloadEffect(t, m, fx, EffectDownloadCommit)
+	m, _ = Reduce(m, Event{Kind: DownloadCommitted, Token: m.Download.Request, Message: "1.4.0"})
+	if d := m.Download; d.Phase != DownloadDone || d.Current != "1.4.0" || d.Preload != PreloadStateWaitingRelease || d.PreloadVersion != "1.5.0" {
+		t.Fatalf("commit forgot the staged preload: %+v", m.Download)
+	}
+	if chip := PresentPreload(m); !chip.Visible || chip.Action != PreloadReconcileRequest || !chip.Enabled {
+		t.Fatalf("staged preload chip did not return after commit: %+v", chip)
+	}
+	m, fx = Reduce(m, Event{Kind: DownloadRequest})
+	requireDownloadEffect(t, m, fx, EffectPreloadCheck)
+	if !fx[0].Enabled || m.Download.Preload != PreloadStateReconcile {
+		t.Fatalf("update did not reconcile the staged preload: %+v %+v", m.Download, fx)
 	}
 }

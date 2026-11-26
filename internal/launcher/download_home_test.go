@@ -3,6 +3,7 @@
 package launcher
 
 import (
+	"context"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -103,7 +104,7 @@ func TestDownloadSettingsExposeMaintenanceActions(t *testing.T) {
 	s.Dispatch(state.Event{Kind: state.Navigate, Page: state.LauncherSettings})
 	s.selectSettingsSection(state.SettingsNetwork)
 	tt := ui.NewTester(s.View, 1280, 720)
-	for _, label := range []string{"检查游戏更新", "检查预下载"} {
+	for _, label := range []string{"检查游戏更新", "检查预下载", "开始预下载"} {
 		if _, ok := tt.AccessByRole(ui.RoleButton, label); !ok {
 			t.Errorf("settings lost the %q action", label)
 		}
@@ -120,6 +121,80 @@ func TestDownloadSettingsExposeMaintenanceActions(t *testing.T) {
 	}
 	if _, ok := tt2.AccessByRole(ui.RoleButton, "详细信息"); ok {
 		t.Error("the retired details panel must not come back")
+	}
+}
+
+func TestHomePreloadWaitingReleaseChipAndFormalUpdateTakeover(t *testing.T) {
+	m := normalFixture(state.ManagedReady)
+	m.Download.Request = 9
+	m.Download.Located, m.Download.Verified = true, true
+	m.Download.Current = "1.4.18"
+	m.Download.Kind = state.DownloadPreload
+	m.Download.Phase = state.DownloadDone
+	m.Download.Preload = state.PreloadStateWaitingRelease
+	m.Download.PreloadVersion = "1.5.0"
+
+	s := NewShell(m)
+	defer s.Dispose()
+	wake := make(chan struct{}, 4)
+	s.RequestFrame = func() {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+	reconcileStarted := make(chan DownloadRequest, 1)
+	release := make(chan struct{})
+	s.GameDownloads = downloadBackendFunc(func(ctx context.Context, r DownloadRequest, _ func(state.Event)) state.Event {
+		switch r.Effect.Kind {
+		case state.EffectDownloadOfferPoll:
+			return state.Event{Kind: state.DownloadOfferPolled, Path: r.Root, Message: "1.5.3"}
+		case state.EffectPreloadCheck:
+			reconcileStarted <- r
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return state.Event{Kind: state.PreloadAvailableToApply, Enabled: true}
+		default:
+			return state.Event{Kind: state.DownloadRecoveryCleared, CurrentVersion: "1.4.18", Enabled: true}
+		}
+	})
+	defer close(release)
+	tt := ui.NewTester(s.View, 1280, 720)
+	if _, ok := tt.AccessByRole(ui.RoleButton, "预下载已就绪"); !ok {
+		t.Fatalf("waiting-release preload chip missing: texts=%q", tt.Texts())
+	}
+	if _, ok := tt.AccessByRole(ui.RoleButton, "启动游戏"); !ok {
+		t.Fatalf("waiting-release preload must keep launch button: texts=%q", tt.Texts())
+	}
+
+	// Simulate formal version poll arriving while waiting for release.
+	s.Dispatch(state.Event{Kind: state.DownloadOfferPollRequest})
+	receiveDownload(t, wake)
+	tt.Frame()
+	if _, ok := tt.AccessByRole(ui.RoleButton, "更新游戏"); !ok {
+		t.Fatalf("formal release did not switch primary to update: texts=%q", tt.Texts())
+	}
+	if _, ok := tt.AccessByRole(ui.RoleButton, "预下载待核对"); !ok {
+		t.Fatalf("preload chip did not surface pending reconcile: texts=%q", tt.Texts())
+	}
+	if err := tt.Click("更新游戏"); err != nil {
+		t.Fatal(err)
+	}
+	req := receiveDownload(t, reconcileStarted)
+	if req.Effect.Kind != state.EffectPreloadCheck || !req.Effect.Enabled {
+		t.Fatalf("clicking update did not run preload reconcile: %+v", req)
+	}
+	tt.Frame()
+	if s.Model.Download.Preload != state.PreloadStateReconcile {
+		t.Fatalf("clicking update did not enter preload reconcile: %+v", s.Model.Download)
+	}
+	if _, ok := tt.AccessByRole(ui.RoleButton, "正在核对预下载"); !ok {
+		t.Fatalf("primary capsule did not display preload reconcile progress: texts=%q", tt.Texts())
+	}
+	if _, ok := tt.AccessByRole(ui.RoleButton, "预下载待核对"); ok {
+		t.Fatal("preload chip should hide while primary runs preload-backed update")
 	}
 }
 
@@ -143,6 +218,16 @@ func TestRenderDownloadHomeFrames(t *testing.T) {
 	m, _ = state.Reduce(m, state.Event{Kind: state.DownloadPlanned, Token: m.Download.Request, Message: "1.1.0", Total: 8 << 20, Needed: 64 << 20, Free: 1 << 20, Enabled: true})
 	settings := progress
 	settings.Page, settings.SettingsSection = state.LauncherSettings, state.SettingsNetwork
+	preloadReady := normalFixture(state.ManagedReady)
+	preloadReady.Download.Located, preloadReady.Download.Verified = true, true
+	preloadReady.Download.Current = "1.4.18"
+	preloadReady.Download.Kind = state.DownloadPreload
+	preloadReady.Download.Phase = state.DownloadDone
+	preloadReady.Download.Preload = state.PreloadStateWaitingRelease
+	preloadReady.Download.PreloadVersion = "1.5.0"
+	preloadReleaseOffered, _ := state.Reduce(preloadReady, state.Event{Kind: state.DownloadOfferPollRequest})
+	preloadReleaseOffered, _ = state.Reduce(preloadReleaseOffered, state.Event{Kind: state.DownloadOfferPolled, Token: preloadReleaseOffered.Download.OfferRequest, Path: preloadReleaseOffered.Managed.Root, Message: "1.5.3"})
+	preloadReconciling, _ := state.Reduce(preloadReleaseOffered, state.Event{Kind: state.Primary})
 	for _, tc := range []struct {
 		name string
 		m    state.Model
@@ -153,6 +238,9 @@ func TestRenderDownloadHomeFrames(t *testing.T) {
 		{"03-preload-chip", preload, 720},
 		{"04-space-short", m, 720},
 		{"05-settings-maintenance", settings, 1200},
+		{"06-preload-ready", preloadReady, 720},
+		{"07-preload-release-offered", preloadReleaseOffered, 720},
+		{"08-preload-reconciling-primary", preloadReconciling, 720},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := NewShell(tc.m)

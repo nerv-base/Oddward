@@ -12,8 +12,9 @@ func homeDownloadPrimary(m Model) (Presentation, EventKind, bool) {
 	if p.OfferVersion != "" && p.OfferVersion != p.Current {
 		return Presentation{Primary: "更新游戏", Detail: "可用正式版本 " + p.OfferVersion, Enabled: true}, DownloadRequest, true
 	}
-	// Preloading alone must leave the ordinary launch button reachable.
-	if d.Kind != DownloadUpdate && d.Kind != DownloadInstall {
+	// Preloading alone must leave the ordinary launch button reachable, unless
+	// the user started a formal update backed by a staged preload.
+	if d.Kind != DownloadUpdate && d.Kind != DownloadInstall && !(d.Kind == DownloadPreload && d.preloadAutoApply) {
 		return Presentation{}, 0, false
 	}
 	out := Presentation{Task: true, Status: p.StageText, Detail: p.NextAction}
@@ -33,6 +34,8 @@ func homeDownloadPrimary(m Model) (Presentation, EventKind, bool) {
 		return status("正在取消")
 	case d.pausePending:
 		return status("正在暂停")
+	case d.Kind == DownloadPreload && d.Preload == PreloadStateReconcile:
+		return status("正在核对预下载")
 	case d.AwaitingConfirmation && m.Overlay != OverlayInstallPath:
 		if d.SpaceShort {
 			out.Detail = DownloadNoteText("disk-short")
