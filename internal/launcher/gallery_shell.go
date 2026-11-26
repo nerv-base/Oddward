@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
 	"path/filepath"
 	"strings"
 	"time"
@@ -22,7 +23,7 @@ const (
 	galleryRowCards
 )
 
-// galleryRow is one virtualized row in the date-grouped photo grid.
+// galleryRow is one virtualized row in the date-grouped photo/video grid.
 type galleryRow struct {
 	kind  galleryRowKind
 	date  string
@@ -30,23 +31,72 @@ type galleryRow struct {
 	items []int // indices into galleryRuntime.assets
 }
 
-// galleryViewerState keeps interactive pan/zoom state on the UI thread.
+// galleryViewerState keeps interactive pan/zoom and video playback state on the UI thread.
 type galleryViewerState struct {
-	assetID    int64
-	fit        bool
-	zoom       float32
-	panX, panY float32
-	dragging   bool
-	dragLastX  float32
-	dragLastY  float32
+	assetID      int64
+	fit          bool
+	zoom         float32
+	panX, panY   float32
+	dragging     bool
+	dragLastX    float32
+	dragLastY    float32
+	videoPlayer  *ui.VideoPlayer
+	videoAssetID int64
+	videoErr     string
+	videoMuted   bool
 }
 
 func (v *galleryViewerState) reset(assetID int64) {
+	if v.videoPlayer != nil && v.videoAssetID != assetID {
+		v.videoPlayer.Close()
+		v.videoPlayer = nil
+		v.videoAssetID = 0
+		v.videoErr = ""
+	}
 	v.assetID = assetID
 	v.fit = true
 	v.zoom = 1
 	v.panX, v.panY = 0, 0
 	v.dragging = false
+}
+
+func (s *Shell) closeGalleryVideo() {
+	v := &s.gallery.viewer
+	if v.videoPlayer != nil {
+		v.videoPlayer.Close()
+		v.videoPlayer = nil
+	}
+	v.videoAssetID = 0
+	v.videoErr = ""
+}
+
+// ensureGalleryVideo opens a native Media Foundation VideoPlayer for asset on
+// the UI thread when viewing a video, closing any previous video player first.
+func (s *Shell) ensureGalleryVideo(asset GalleryAsset) {
+	v := &s.gallery.viewer
+	if !asset.IsVideo() || !asset.Available || asset.Invalid || asset.PrimaryPath == "" {
+		s.closeGalleryVideo()
+		return
+	}
+	if v.videoAssetID == asset.ID && (v.videoPlayer != nil || v.videoErr != "") {
+		return
+	}
+	s.closeGalleryVideo()
+	v.videoAssetID = asset.ID
+	if s.OpenGalleryVideo == nil {
+		v.videoErr = "视频播放器在当前测试环境中未启用"
+		return
+	}
+	p, err := s.OpenGalleryVideo(asset.PrimaryPath)
+	if err != nil {
+		v.videoErr = state.BriefError(err)
+		return
+	}
+	p.SetLoop(false).SetMuted(v.videoMuted)
+	if s.Model.ReducedMotion || s.Model.SystemReducedMotion {
+		p.Pause()
+	}
+	v.videoPlayer = p
 }
 
 type galleryResult struct {
@@ -55,6 +105,9 @@ type galleryResult struct {
 	scan     GalleryScanSummary
 	archive  GalleryArchiveSummary
 	export   GalleryExportSummary
+	album    GalleryAlbum
+	bgImage  image.Image
+	count    int
 	dedup    bool
 	path     string
 	err      error
@@ -67,6 +120,8 @@ type galleryRuntime struct {
 	uids          []string
 	hasUnknownUID bool
 	sources       []GallerySource
+	albums        []GalleryAlbum
+	tags          []GalleryTag
 	selected      map[int64]bool
 	listState     ui.ListState
 	rows          []galleryRow
@@ -75,7 +130,16 @@ type galleryRuntime struct {
 	builtRev      uint64
 	images        galleryImageCache
 	viewer        galleryViewerState
+	canvas        galleryCanvasState
 	settingsTab   int
+
+	// UI-thread text inputs for search & centered organization modals.
+	searchInput      string
+	searchFocused    bool
+	albumNameInput   string
+	tagNameInput     string
+	renamingAlbumID  int64
+	renameAlbumInput string
 
 	out         chan galleryResult
 	watchNotify chan bool
@@ -93,9 +157,11 @@ func (s *Shell) initGallery() {
 	s.gallery.watchNotify = make(chan bool, 4)
 	s.gallery.viewer.fit = true
 	s.gallery.viewer.zoom = 1
+	s.gallery.canvas.zoom = 1
 }
 
 func (s *Shell) disposeGallery() {
+	s.closeGalleryVideo()
 	if s.gallery.scanCancel != nil {
 		s.gallery.scanCancel()
 		s.gallery.scanCancel = nil
@@ -125,6 +191,15 @@ func (s *Shell) galleryAssetIndex(id int64) int {
 	return -1
 }
 
+func (s *Shell) galleryAlbumName(id int64) string {
+	for _, al := range s.gallery.albums {
+		if al.ID == id {
+			return al.Name
+		}
+	}
+	return ""
+}
+
 func (s *Shell) gallerySelectedAssets() []GalleryAsset {
 	if len(s.gallery.selected) == 0 {
 		return nil
@@ -136,6 +211,29 @@ func (s *Shell) gallerySelectedAssets() []GalleryAsset {
 		}
 	}
 	return out
+}
+
+func (s *Shell) gallerySelectedIDs() []int64 {
+	assets := s.gallerySelectedAssets()
+	if len(assets) == 0 {
+		return nil
+	}
+	ids := make([]int64, len(assets))
+	for i, a := range assets {
+		ids[i] = a.ID
+	}
+	return ids
+}
+
+func (s *Shell) gallerySelectedArchivedStats() (count int, bytes int64, ids []int64) {
+	for _, a := range s.gallery.assets {
+		if s.gallery.selected[a.ID] && a.HasArchived {
+			count++
+			bytes += a.ByteSize
+			ids = append(ids, a.ID)
+		}
+	}
+	return count, bytes, ids
 }
 
 func (s *Shell) toggleGallerySelect(id int64) {
@@ -216,7 +314,7 @@ func formatGalleryDateGroup(t time.Time, loc *time.Location) string {
 }
 
 func (s *Shell) applyGalleryEffect(f state.Effect) bool {
-	if f.Kind < state.EffectGalleryLoad || f.Kind > state.EffectGalleryViewerStep {
+	if !state.IsGalleryEffect(f.Kind) {
 		return false
 	}
 	s.initGallery()
@@ -283,14 +381,27 @@ func (s *Shell) applyGalleryEffect(f state.Effect) bool {
 		s.gallery.scanCancel = cancel
 	}
 
-	// Snapshot asset or batch arguments on UI thread before spawning goroutine.
+	// Snapshot asset, IDs or batch arguments on UI thread before spawning goroutine.
 	var targetAsset GalleryAsset
 	var batchAssets []GalleryAsset
+	var targetIDs []int64
 	if f.Gallery.AssetID > 0 {
 		targetAsset, _ = s.galleryAssetByID(f.Gallery.AssetID)
+		targetIDs = []int64{f.Gallery.AssetID}
 	}
-	if f.Kind == state.EffectGalleryExportBatch {
+	switch f.Kind {
+	case state.EffectGalleryExportBatch, state.EffectGalleryArchiveBatch:
 		batchAssets = s.gallerySelectedAssets()
+	case state.EffectGalleryDeleteArchiveBatch:
+		_, _, targetIDs = s.gallerySelectedArchivedStats()
+	case state.EffectGallerySetFavorites, state.EffectGalleryAddToAlbum, state.EffectGalleryRemoveFromAlbum, state.EffectGalleryAddTag:
+		if len(targetIDs) == 0 {
+			targetIDs = s.gallerySelectedIDs()
+		}
+	case state.EffectGalleryCreateAlbum:
+		if len(targetIDs) == 0 && s.Model.Gallery.SelectMode && len(s.gallery.selected) > 0 {
+			targetIDs = s.gallerySelectedIDs()
+		}
 	}
 
 	pickDir := s.PickGalleryDirectory
@@ -319,7 +430,11 @@ func (s *Shell) applyGalleryEffect(f state.Effect) bool {
 			if pickExport != nil {
 				suggested := targetAsset.FileName
 				if suggested == "" {
-					suggested = "hethereau-photo.png"
+					if targetAsset.IsVideo() {
+						suggested = "hethereau-video.mp4"
+					} else {
+						suggested = "hethereau-photo.png"
+					}
 				}
 				res.path, res.err = pickExport(ctx, suggested)
 			}
@@ -330,7 +445,14 @@ func (s *Shell) applyGalleryEffect(f state.Effect) bool {
 			}
 			switch f.Kind {
 			case state.EffectGalleryLoad:
-				res.snapshot, res.err = backend.LoadSnapshot(ctx, f.Gallery.Scope, f.Gallery.UID, f.Gallery.Sort)
+				res.snapshot, res.err = backend.LoadSnapshot(ctx, GalleryQuery{
+					Scope:   f.Gallery.Scope,
+					UID:     f.Gallery.UID,
+					AlbumID: f.Gallery.AlbumID,
+					Tag:     f.Gallery.Tag,
+					Search:  f.Gallery.Search,
+					Sort:    f.Gallery.Sort,
+				})
 			case state.EffectGalleryScan:
 				res.scan, res.err = backend.SyncAndScan(ctx, f.Gallery.GameRoot)
 			case state.EffectGalleryRebuildIndex:
@@ -350,11 +472,21 @@ func (s *Shell) applyGalleryEffect(f state.Effect) bool {
 				res.archive, res.err = backend.ArchiveExisting(ctx)
 			case state.EffectGalleryArchiveAsset:
 				res.dedup, res.err = backend.ArchiveAsset(ctx, targetAsset)
+			case state.EffectGalleryArchiveBatch:
+				res.archive, res.err = backend.ArchiveBatch(ctx, batchAssets)
 			case state.EffectGalleryDeleteArchive:
 				res.err = backend.DeleteArchiveCopy(ctx, f.Gallery.AssetID)
+			case state.EffectGalleryDeleteArchiveBatch:
+				res.count, res.err = backend.DeleteArchiveCopies(ctx, targetIDs)
+			case state.EffectGalleryPruneMissing:
+				res.count, res.err = backend.PruneMissingUnarchived(ctx)
 			case state.EffectGalleryClearThumbCache:
 				res.err = backend.ClearThumbCache(ctx)
 			case state.EffectGalleryCopyImage:
+				if targetAsset.IsVideo() {
+					res.err = errors.New("视频文件不支持复制到剪贴板，请使用导出功能")
+					break
+				}
 				if writeClip == nil {
 					res.err = errors.New("系统剪贴板不可用")
 					break
@@ -369,6 +501,35 @@ func (s *Shell) applyGalleryEffect(f state.Effect) bool {
 				res.err = backend.ExportSingle(ctx, targetAsset, f.Path)
 			case state.EffectGalleryExportBatch:
 				res.export, res.err = backend.ExportBatch(ctx, batchAssets, f.Path)
+			case state.EffectGallerySetFavorites:
+				res.err = backend.SetFavorites(ctx, targetIDs, f.Enabled)
+				res.count = len(targetIDs)
+			case state.EffectGalleryCreateAlbum:
+				al, err := backend.CreateAlbum(ctx, f.Gallery.Name)
+				res.album, res.err = al, err
+				if err == nil && len(targetIDs) > 0 {
+					res.err = backend.AddAssetsToAlbum(ctx, al.ID, targetIDs)
+					res.count = len(targetIDs)
+				}
+			case state.EffectGalleryRenameAlbum:
+				res.err = backend.RenameAlbum(ctx, f.Gallery.AlbumID, f.Gallery.Name)
+			case state.EffectGalleryDeleteAlbum:
+				res.err = backend.DeleteAlbum(ctx, f.Gallery.AlbumID)
+			case state.EffectGalleryAddToAlbum:
+				res.err = backend.AddAssetsToAlbum(ctx, f.Gallery.AlbumID, targetIDs)
+				res.count = len(targetIDs)
+			case state.EffectGalleryRemoveFromAlbum:
+				res.err = backend.RemoveAssetsFromAlbum(ctx, f.Gallery.AlbumID, targetIDs)
+				res.count = len(targetIDs)
+			case state.EffectGalleryAddTag:
+				res.err = backend.AddTagToAssets(ctx, f.Gallery.Name, targetIDs)
+				res.count = len(targetIDs)
+			case state.EffectGalleryRemoveTag:
+				res.err = backend.RemoveTagFromAsset(ctx, f.Gallery.AssetID, f.Gallery.Name)
+			case state.EffectGallerySetCustomBackground:
+				res.bgImage, res.err = backend.SetCustomBackground(ctx, targetAsset)
+			case state.EffectGalleryClearCustomBackground:
+				res.err = backend.ClearCustomBackground(ctx)
 			}
 		}
 
@@ -454,6 +615,14 @@ syncImages:
 	if !s.Model.Gallery.SelectMode && len(s.gallery.selected) > 0 {
 		clear(s.gallery.selected)
 	}
+	if !s.Model.Gallery.ViewerOpen || s.Model.Page != state.Gallery || s.Model.Overlay != state.NoOverlay {
+		if s.gallery.viewer.videoPlayer != nil || s.gallery.viewer.videoAssetID != 0 {
+			s.closeGalleryVideo()
+		}
+	}
+	if s.gallery.searchInput != s.Model.Gallery.Search && s.Model.Gallery.Search == "" {
+		s.gallery.searchInput = ""
+	}
 	s.syncGalleryImages()
 }
 
@@ -476,6 +645,8 @@ func (s *Shell) handleGalleryResult(r galleryResult) {
 		s.gallery.uids = r.snapshot.UIDs
 		s.gallery.hasUnknownUID = r.snapshot.HasUnknownUID
 		s.gallery.sources = r.snapshot.Sources
+		s.gallery.albums = r.snapshot.Albums
+		s.gallery.tags = r.snapshot.Tags
 		s.gallery.rowsRev++
 		// Drop selections for assets no longer in the filtered slice.
 		if len(s.gallery.selected) > 0 {
@@ -493,21 +664,29 @@ func (s *Shell) handleGalleryResult(r galleryResult) {
 			Kind:  state.GallerySnapshotLoaded,
 			Token: f.Token,
 			Gallery: state.GalleryPayload{
-				AutoArchive:      r.snapshot.Settings.AutoArchive,
-				AutoDiscoverGame: r.snapshot.Settings.AutoDiscoverGame,
-				ArchiveDir:       r.snapshot.Settings.ArchiveDir,
-				EffectiveArchive: r.snapshot.ArchiveDir,
-				ThumbCacheMB:     r.snapshot.Settings.ThumbCacheMB,
-				TotalCount:       r.snapshot.Stats.TotalAssets,
-				FilteredCount:    len(r.snapshot.Assets),
-				CachedCount:      r.snapshot.Stats.CachedCount,
-				ExportedCount:    r.snapshot.Stats.ExportedCount,
-				ArchivedCount:    r.snapshot.Stats.ArchivedCount,
-				MissingCount:     r.snapshot.Stats.MissingCount,
-				InvalidCount:     r.snapshot.Stats.InvalidCount,
-				ArchiveBytes:     r.snapshot.Stats.ArchiveBytes,
-				ThumbCacheBytes:  r.snapshot.Stats.ThumbCacheBytes,
-				Watching:         s.gallery.watching,
+				AutoArchive:       r.snapshot.Settings.AutoArchive,
+				AutoDiscoverGame:  r.snapshot.Settings.AutoDiscoverGame,
+				ArchiveDir:        r.snapshot.Settings.ArchiveDir,
+				EffectiveArchive:  r.snapshot.ArchiveDir,
+				ThumbCacheMB:      r.snapshot.Settings.ThumbCacheMB,
+				TotalCount:        r.snapshot.Stats.TotalAssets,
+				PhotoCount:        r.snapshot.Stats.PhotoCount,
+				VideoCount:        r.snapshot.Stats.VideoCount,
+				FavoriteCount:     r.snapshot.Stats.FavoriteCount,
+				FilteredCount:     len(r.snapshot.Assets),
+				CachedCount:       r.snapshot.Stats.CachedCount,
+				ExportedCount:     r.snapshot.Stats.ExportedCount,
+				ArchivedCount:     r.snapshot.Stats.ArchivedCount,
+				MissingCount:      r.snapshot.Stats.MissingCount,
+				InvalidCount:      r.snapshot.Stats.InvalidCount,
+				ArchiveBytes:      r.snapshot.Stats.ArchiveBytes,
+				ArchivePhotoCount: r.snapshot.Stats.ArchivePhotoCount,
+				ArchivePhotoBytes: r.snapshot.Stats.ArchivePhotoBytes,
+				ArchiveVideoCount: r.snapshot.Stats.ArchiveVideoCount,
+				ArchiveVideoBytes: r.snapshot.Stats.ArchiveVideoBytes,
+				ArchiveFreeBytes:  r.snapshot.Stats.ArchiveFreeBytes,
+				ThumbCacheBytes:   r.snapshot.Stats.ThumbCacheBytes,
+				Watching:          s.gallery.watching,
 			},
 		})
 		// Ensure watcher is active if user opened Gallery or auto-archive is enabled.
@@ -518,7 +697,7 @@ func (s *Shell) handleGalleryResult(r galleryResult) {
 	case state.EffectGalleryScan:
 		msg := ""
 		if r.scan.Archived > 0 {
-			msg = fmt.Sprintf("扫描完成 · 自动归档 %d 张照片", r.scan.Archived)
+			msg = fmt.Sprintf("扫描完成 · 自动归档 %d 项媒体", r.scan.Archived)
 		}
 		s.Dispatch(state.Event{
 			Kind:    state.GalleryScanCompleted,
@@ -532,7 +711,7 @@ func (s *Shell) handleGalleryResult(r galleryResult) {
 		s.Dispatch(state.Event{
 			Kind:    state.GalleryScanCompleted,
 			Token:   s.Model.Gallery.ScanToken,
-			Message: fmt.Sprintf("索引已重建 · 共发现 %d 项媒体", r.scan.FilesSeen),
+			Message: fmt.Sprintf("索引已重建 · 共发现 %d 项媒体（收藏与相册已保留）", r.scan.FilesSeen),
 			Gallery: state.GalleryPayload{DiskFull: r.scan.DiskFull},
 		})
 
@@ -575,11 +754,11 @@ func (s *Shell) handleGalleryResult(r galleryResult) {
 		})
 
 	case state.EffectGalleryArchiveExisting:
-		msg := fmt.Sprintf("已归档 %d 张游戏照片", r.archive.Archived)
+		msg := fmt.Sprintf("已归档 %d 项游戏媒体", r.archive.Archived)
 		if r.archive.Archived == 0 && r.archive.Dedups == 0 {
-			msg = "所有可用游戏照片均已归档"
+			msg = "所有可用游戏媒体均已归档"
 		} else if r.archive.Dedups > 0 {
-			msg += fmt.Sprintf("（去重跳过 %d 张）", r.archive.Dedups)
+			msg += fmt.Sprintf("（去重跳过 %d 项）", r.archive.Dedups)
 		}
 		if r.archive.DiskFull {
 			msg = "磁盘空间不足，归档已提前停止；源文件保持完好"
@@ -592,15 +771,47 @@ func (s *Shell) handleGalleryResult(r galleryResult) {
 			Gallery: state.GalleryPayload{DiskFull: r.archive.DiskFull, Warn: r.archive.DiskFull || r.archive.Failed > 0},
 		})
 
+	case state.EffectGalleryArchiveBatch:
+		msg := fmt.Sprintf("已归档 %d 项所选媒体", r.archive.Archived)
+		if r.archive.Archived == 0 && r.archive.Dedups == 0 {
+			msg = "所选媒体均已有归档副本或不可归档"
+		} else if r.archive.Dedups > 0 {
+			msg += fmt.Sprintf("（去重跳过 %d 项）", r.archive.Dedups)
+		}
+		if r.archive.DiskFull {
+			msg = "磁盘空间不足，批量归档已停止；源文件保持完好"
+		}
+		s.Dispatch(state.Event{
+			Kind:    state.GalleryActionCompleted,
+			Token:   f.Token,
+			Message: msg,
+			Enabled: true,
+			Gallery: state.GalleryPayload{DiskFull: r.archive.DiskFull, Warn: r.archive.DiskFull || r.archive.Failed > 0},
+		})
+
 	case state.EffectGalleryArchiveAsset:
 		msg := "已归档到 Oddward 相册目录"
 		if r.dedup {
-			msg = "该照片已有相同内容的归档副本"
+			msg = "该媒体已有相同内容的归档副本"
 		}
 		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: msg, Enabled: true})
 
 	case state.EffectGalleryDeleteArchive:
-		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: "已删除 Oddward 归档副本", Enabled: true})
+		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: "已删除 Oddward 归档副本（源文件未改动）", Enabled: true})
+
+	case state.EffectGalleryDeleteArchiveBatch:
+		msg := fmt.Sprintf("已删除 %d 项 Oddward 归档副本（源文件未改动）", r.count)
+		if r.count == 0 {
+			msg = "所选项目中没有可删除的 Oddward 归档副本"
+		}
+		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: msg, Enabled: true})
+
+	case state.EffectGalleryPruneMissing:
+		msg := fmt.Sprintf("已清理 %d 条已失效索引记录（未删除任何本地文件）", r.count)
+		if r.count == 0 {
+			msg = "没有可清理的已失效索引记录"
+		}
+		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: msg, Enabled: true})
 
 	case state.EffectGalleryClearThumbCache:
 		s.gallery.images.generation++
@@ -611,12 +822,12 @@ func (s *Shell) handleGalleryResult(r galleryResult) {
 		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: "图片已复制到剪贴板"})
 
 	case state.EffectGalleryExportSingle:
-		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: "图片已导出"})
+		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: "媒体文件已导出"})
 
 	case state.EffectGalleryExportBatch:
-		msg := fmt.Sprintf("已导出 %d 张照片", r.export.Exported)
+		msg := fmt.Sprintf("已导出 %d 项媒体", r.export.Exported)
 		if r.export.Failed > 0 {
-			msg += fmt.Sprintf("，%d 张失败", r.export.Failed)
+			msg += fmt.Sprintf("，%d 项失败", r.export.Failed)
 		}
 		s.Dispatch(state.Event{
 			Kind:    state.GalleryActionCompleted,
@@ -624,5 +835,66 @@ func (s *Shell) handleGalleryResult(r galleryResult) {
 			Message: msg,
 			Gallery: state.GalleryPayload{Warn: r.export.Failed > 0},
 		})
+
+	case state.EffectGallerySetFavorites:
+		msg := "已加入收藏"
+		if !f.Enabled {
+			msg = "已取消收藏"
+		}
+		if r.count > 1 {
+			if f.Enabled {
+				msg = fmt.Sprintf("已收藏 %d 项媒体", r.count)
+			} else {
+				msg = fmt.Sprintf("已取消 %d 项收藏", r.count)
+			}
+		}
+		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: msg, Enabled: true})
+
+	case state.EffectGalleryCreateAlbum:
+		s.gallery.albumNameInput = ""
+		msg := fmt.Sprintf("已创建相册「%s」", r.album.Name)
+		if r.count > 0 {
+			msg = fmt.Sprintf("已创建相册「%s」并加入 %d 项媒体", r.album.Name, r.count)
+		}
+		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: msg, Enabled: true})
+
+	case state.EffectGalleryRenameAlbum:
+		s.gallery.renamingAlbumID = 0
+		s.gallery.renameAlbumInput = ""
+		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: "相册名称已更新", Enabled: true})
+
+	case state.EffectGalleryDeleteAlbum:
+		if s.gallery.renamingAlbumID == f.Gallery.AlbumID {
+			s.gallery.renamingAlbumID = 0
+			s.gallery.renameAlbumInput = ""
+		}
+		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: "已删除自定义相册（照片和视频文件均已保留）", Enabled: true})
+
+	case state.EffectGalleryAddToAlbum:
+		msg := fmt.Sprintf("已加入相册（%d 项）", r.count)
+		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: msg, Enabled: true})
+
+	case state.EffectGalleryRemoveFromAlbum:
+		msg := "已从相册移出（本地文件未删除）"
+		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: msg, Enabled: true})
+
+	case state.EffectGalleryAddTag:
+		s.gallery.tagNameInput = ""
+		msg := fmt.Sprintf("已添加标签 #%s", f.Gallery.Name)
+		if r.count > 1 {
+			msg = fmt.Sprintf("已为 %d 项媒体添加标签 #%s", r.count, f.Gallery.Name)
+		}
+		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: msg, Enabled: true})
+
+	case state.EffectGalleryRemoveTag:
+		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: fmt.Sprintf("已移除标签 #%s", f.Gallery.Name), Enabled: true})
+
+	case state.EffectGallerySetCustomBackground:
+		s.applyCustomStaticBackground(r.bgImage)
+		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: "已设为 Oddward 自定义静态背景（可在启动器设置 → 外观中恢复官方背景）"})
+
+	case state.EffectGalleryClearCustomBackground:
+		s.restoreOfficialBackground()
+		s.Dispatch(state.Event{Kind: state.GalleryActionCompleted, Token: f.Token, Message: "已恢复 Oddward 官方背景"})
 	}
 }

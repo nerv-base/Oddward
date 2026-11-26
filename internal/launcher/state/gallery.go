@@ -12,7 +12,7 @@ const (
 	GalleryFailed
 )
 
-// GalleryScope filters indexed media by provenance.
+// GalleryScope filters indexed media by provenance, favorites or media type.
 type GalleryScope uint8
 
 const (
@@ -20,6 +20,8 @@ const (
 	GalleryScopeCached
 	GalleryScopeExported
 	GalleryScopeArchived
+	GalleryScopeFavorites
+	GalleryScopeVideos
 )
 
 // GallerySort controls gallery ordering.
@@ -29,6 +31,15 @@ const (
 	GallerySortNewest GallerySort = iota
 	GallerySortOldest
 	GallerySortLargest
+)
+
+// GalleryViewMode switches between the free-panning Bravais infinite gallery
+// wall (default) and the date-grouped timeline list.
+type GalleryViewMode uint8
+
+const (
+	GalleryViewCanvas GalleryViewMode = iota
+	GalleryViewTimeline
 )
 
 // GalleryUIDUnknown filters assets whose UID cannot be confirmed (for example
@@ -85,6 +96,33 @@ const (
 	GalleryWatchChanged
 	GalleryActionCompleted
 	GalleryActionFailed
+	// P1 organization, search, batch management and custom static background.
+	GallerySetAlbum
+	GallerySetTag
+	GallerySetSearch
+	GalleryToggleFavorite
+	GalleryBatchFavorite
+	GalleryOpenAlbumModal
+	GalleryCloseAlbumModal
+	GalleryCreateAlbum
+	GalleryRenameAlbum
+	GalleryDeleteAlbum
+	GalleryAddToAlbum
+	GalleryRemoveFromAlbum
+	GalleryOpenTagModal
+	GalleryCloseTagModal
+	GalleryAddTag
+	GalleryRemoveTag
+	GalleryArchiveSelected
+	GalleryRequestBatchDeleteArchive
+	GalleryConfirmBatchDeleteArchive
+	GalleryCancelBatchDeleteArchive
+	GalleryPruneMissing
+	GallerySetAsBackground
+	GalleryClearCustomBackground
+	GalleryCustomBackgroundLoaded
+	GallerySetViewMode
+	galleryEventLast
 )
 
 const (
@@ -110,7 +148,27 @@ const (
 	EffectGalleryRevealAsset
 	EffectGallerySelectAll
 	EffectGalleryViewerStep
+	// P1 organization, batch management and custom static background effects.
+	EffectGallerySetFavorites
+	EffectGalleryCreateAlbum
+	EffectGalleryRenameAlbum
+	EffectGalleryDeleteAlbum
+	EffectGalleryAddToAlbum
+	EffectGalleryRemoveFromAlbum
+	EffectGalleryAddTag
+	EffectGalleryRemoveTag
+	EffectGalleryArchiveBatch
+	EffectGalleryDeleteArchiveBatch
+	EffectGalleryPruneMissing
+	EffectGallerySetCustomBackground
+	EffectGalleryClearCustomBackground
+	effectGalleryLast
 )
+
+// IsGalleryEffect reports whether k belongs to the gallery effect range.
+func IsGalleryEffect(k EffectKind) bool {
+	return k >= EffectGalleryLoad && k < effectGalleryLast
+}
 
 // GalleryState stores comparable scalar gallery state inside Model. Asset lists
 // and bitmap caches stay on the UI thread inside Shell.
@@ -123,7 +181,11 @@ type GalleryState struct {
 	GameRoot     string
 	Scope        GalleryScope
 	UID          string
+	AlbumID      int64
+	Tag          string
+	Search       string
 	Sort         GallerySort
+	ViewMode     GalleryViewMode
 	SelectMode   bool
 	SelectedCnt  int
 	FocusedID    int64
@@ -133,6 +195,13 @@ type GalleryState struct {
 	// ConfirmDeleteID names an asset whose Oddward-managed archive copy awaits
 	// explicit user confirmation before removal.
 	ConfirmDeleteID int64
+	// ConfirmBatchDelete guards batch deletion of Oddward-managed archive copies.
+	ConfirmBatchDelete bool
+	// AlbumModalOpen and TagModalOpen control centered P1 organization dialogs.
+	AlbumModalOpen    bool
+	AlbumModalAssetID int64
+	TagModalOpen      bool
+	TagModalAssetID   int64
 
 	// Persisted settings projection.
 	AutoArchive      bool
@@ -142,15 +211,23 @@ type GalleryState struct {
 	ThumbCacheMB     int
 
 	// Real metrics reported by the local SQLite store and thumbnail cache.
-	TotalCount      int
-	FilteredCount   int
-	CachedCount     int
-	ExportedCount   int
-	ArchivedCount   int
-	MissingCount    int
-	InvalidCount    int
-	ArchiveBytes    int64
-	ThumbCacheBytes int64
+	TotalCount        int
+	PhotoCount        int
+	VideoCount        int
+	FavoriteCount     int
+	FilteredCount     int
+	CachedCount       int
+	ExportedCount     int
+	ArchivedCount     int
+	MissingCount      int
+	InvalidCount      int
+	ArchiveBytes      int64
+	ArchivePhotoCount int
+	ArchivePhotoBytes int64
+	ArchiveVideoCount int
+	ArchiveVideoBytes int64
+	ArchiveFreeBytes  int64
+	ThumbCacheBytes   int64
 
 	Watching   bool
 	Notice     string
@@ -169,31 +246,43 @@ func InitialGalleryState() GalleryState {
 
 // GalleryPayload carries scalar values for gallery events.
 type GalleryPayload struct {
-	Scope            GalleryScope
-	Sort             GallerySort
-	UID              string
-	AssetID          int64
-	SourceID         int64
-	Step             int
-	SelectedCount    int
-	FocusedID        int64
-	AutoArchive      bool
-	AutoDiscoverGame bool
-	ArchiveDir       string
-	EffectiveArchive string
-	ThumbCacheMB     int
-	TotalCount       int
-	FilteredCount    int
-	CachedCount      int
-	ExportedCount    int
-	ArchivedCount    int
-	MissingCount     int
-	InvalidCount     int
-	ArchiveBytes     int64
-	ThumbCacheBytes  int64
-	DiskFull         bool
-	Warn             bool
-	Watching         bool
+	Scope             GalleryScope
+	Sort              GallerySort
+	ViewMode          GalleryViewMode
+	UID               string
+	AlbumID           int64
+	Tag               string
+	Search            string
+	AssetID           int64
+	SourceID          int64
+	Step              int
+	SelectedCount     int
+	FocusedID         int64
+	AutoArchive       bool
+	AutoDiscoverGame  bool
+	ArchiveDir        string
+	EffectiveArchive  string
+	ThumbCacheMB      int
+	TotalCount        int
+	PhotoCount        int
+	VideoCount        int
+	FavoriteCount     int
+	FilteredCount     int
+	CachedCount       int
+	ExportedCount     int
+	ArchivedCount     int
+	MissingCount      int
+	InvalidCount      int
+	ArchiveBytes      int64
+	ArchivePhotoCount int
+	ArchivePhotoBytes int64
+	ArchiveVideoCount int
+	ArchiveVideoBytes int64
+	ArchiveFreeBytes  int64
+	ThumbCacheBytes   int64
+	DiskFull          bool
+	Warn              bool
+	Watching          bool
 }
 
 // GalleryEffectData carries parameters for gallery effects.
@@ -201,6 +290,10 @@ type GalleryEffectData struct {
 	Scope            GalleryScope
 	Sort             GallerySort
 	UID              string
+	AlbumID          int64
+	Tag              string
+	Search           string
+	Name             string
 	GameRoot         string
 	AssetID          int64
 	SourceID         int64
@@ -211,10 +304,10 @@ type GalleryEffectData struct {
 	ThumbCacheMB     int
 }
 
-// GalleryModalOpen reports whether a gallery modal (viewer, settings or delete
-// confirmation) is currently active on top of the gallery page.
+// ModalOpen reports whether a gallery modal (viewer, settings, organization or
+// archive delete confirmation) is currently active on top of the gallery page.
 func (g GalleryState) ModalOpen() bool {
-	return g.ViewerOpen || g.SettingsOpen || g.ConfirmDeleteID != 0
+	return g.ViewerOpen || g.SettingsOpen || g.ConfirmDeleteID != 0 || g.ConfirmBatchDelete || g.AlbumModalOpen || g.TagModalOpen
 }
 
 func reduceGallery(m Model, e Event) (Model, []Effect, bool) {
@@ -228,6 +321,18 @@ func reduceGallery(m Model, e Event) (Model, []Effect, bool) {
 	if e.Kind == Dismiss && m.Overlay == NoOverlay && m.Page == Gallery {
 		if g.ConfirmDeleteID != 0 {
 			g.ConfirmDeleteID = 0
+			return m, nil, true
+		}
+		if g.ConfirmBatchDelete {
+			g.ConfirmBatchDelete = false
+			return m, nil, true
+		}
+		if g.AlbumModalOpen {
+			g.AlbumModalOpen, g.AlbumModalAssetID = false, 0
+			return m, nil, true
+		}
+		if g.TagModalOpen {
+			g.TagModalOpen, g.TagModalAssetID = false, 0
 			return m, nil, true
 		}
 		if g.SettingsOpen {
@@ -257,6 +362,9 @@ func reduceGallery(m Model, e Event) (Model, []Effect, bool) {
 			g.ViewerID = 0
 			g.SettingsOpen = false
 			g.ConfirmDeleteID = 0
+			g.ConfirmBatchDelete = false
+			g.AlbumModalOpen, g.AlbumModalAssetID = false, 0
+			g.TagModalOpen, g.TagModalAssetID = false, 0
 		}
 		if e.Page == Gallery {
 			m.Page = Gallery
@@ -288,7 +396,7 @@ func reduceGallery(m Model, e Event) (Model, []Effect, bool) {
 		return m, nil, false
 	}
 
-	if e.Kind < GalleryEnter || e.Kind > GalleryActionFailed {
+	if e.Kind < GalleryEnter || e.Kind >= galleryEventLast {
 		return m, nil, false
 	}
 
@@ -338,13 +446,49 @@ func reduceGallery(m Model, e Event) (Model, []Effect, bool) {
 		return m, []Effect{scanGalleryEffect(*g)}, true
 
 	case GallerySetScope:
-		if m.Page != Gallery || m.Overlay != NoOverlay || e.Gallery.Scope > GalleryScopeArchived {
+		if m.Page != Gallery || m.Overlay != NoOverlay || e.Gallery.Scope > GalleryScopeVideos {
 			return m, nil, true
 		}
 		if g.Scope == e.Gallery.Scope {
 			return m, nil, true
 		}
 		g.Scope = e.Gallery.Scope
+		g.SelectMode, g.SelectedCnt = false, 0
+		g.Token++
+		return m, []Effect{loadGalleryEffect(*g, g.Token)}, true
+
+	case GallerySetAlbum:
+		if m.Page != Gallery || m.Overlay != NoOverlay {
+			return m, nil, true
+		}
+		if g.AlbumID == e.Gallery.AlbumID {
+			return m, nil, true
+		}
+		g.AlbumID = e.Gallery.AlbumID
+		g.SelectMode, g.SelectedCnt = false, 0
+		g.Token++
+		return m, []Effect{loadGalleryEffect(*g, g.Token)}, true
+
+	case GallerySetTag:
+		if m.Page != Gallery || m.Overlay != NoOverlay {
+			return m, nil, true
+		}
+		if g.Tag == e.Gallery.Tag {
+			return m, nil, true
+		}
+		g.Tag = e.Gallery.Tag
+		g.SelectMode, g.SelectedCnt = false, 0
+		g.Token++
+		return m, []Effect{loadGalleryEffect(*g, g.Token)}, true
+
+	case GallerySetSearch:
+		if m.Page != Gallery || m.Overlay != NoOverlay {
+			return m, nil, true
+		}
+		if g.Search == e.Gallery.Search {
+			return m, nil, true
+		}
+		g.Search = e.Gallery.Search
 		g.SelectMode, g.SelectedCnt = false, 0
 		g.Token++
 		return m, []Effect{loadGalleryEffect(*g, g.Token)}, true
@@ -684,6 +828,9 @@ func reduceGallery(m Model, e Event) (Model, []Effect, bool) {
 			g.ThumbCacheMB = e.Gallery.ThumbCacheMB
 		}
 		g.TotalCount = e.Gallery.TotalCount
+		g.PhotoCount = e.Gallery.PhotoCount
+		g.VideoCount = e.Gallery.VideoCount
+		g.FavoriteCount = e.Gallery.FavoriteCount
 		g.FilteredCount = e.Gallery.FilteredCount
 		g.CachedCount = e.Gallery.CachedCount
 		g.ExportedCount = e.Gallery.ExportedCount
@@ -691,6 +838,11 @@ func reduceGallery(m Model, e Event) (Model, []Effect, bool) {
 		g.MissingCount = e.Gallery.MissingCount
 		g.InvalidCount = e.Gallery.InvalidCount
 		g.ArchiveBytes = e.Gallery.ArchiveBytes
+		g.ArchivePhotoCount = e.Gallery.ArchivePhotoCount
+		g.ArchivePhotoBytes = e.Gallery.ArchivePhotoBytes
+		g.ArchiveVideoCount = e.Gallery.ArchiveVideoCount
+		g.ArchiveVideoBytes = e.Gallery.ArchiveVideoBytes
+		g.ArchiveFreeBytes = e.Gallery.ArchiveFreeBytes
 		g.ThumbCacheBytes = e.Gallery.ThumbCacheBytes
 		g.Watching = e.Gallery.Watching
 		if g.SelectedCnt > g.FilteredCount {
@@ -757,6 +909,222 @@ func reduceGallery(m Model, e Event) (Model, []Effect, bool) {
 		g.Notice = e.Message
 		g.NoticeWarn = true
 		return m, nil, true
+
+	case GalleryToggleFavorite:
+		if m.Page != Gallery || m.Overlay != NoOverlay || g.Busy || e.Gallery.AssetID <= 0 {
+			return m, nil, true
+		}
+		g.Busy = true
+		g.Token++
+		return m, []Effect{{
+			Kind:    EffectGallerySetFavorites,
+			Token:   g.Token,
+			Enabled: e.Enabled,
+			Gallery: GalleryEffectData{AssetID: e.Gallery.AssetID},
+		}}, true
+
+	case GalleryBatchFavorite:
+		if m.Page != Gallery || m.Overlay != NoOverlay || g.Busy || g.SelectedCnt == 0 {
+			return m, nil, true
+		}
+		g.Busy = true
+		g.Token++
+		return m, []Effect{{
+			Kind:    EffectGallerySetFavorites,
+			Token:   g.Token,
+			Enabled: e.Enabled,
+		}}, true
+
+	case GalleryOpenAlbumModal:
+		if m.Page != Gallery || m.Overlay != NoOverlay || g.SettingsOpen || g.ConfirmDeleteID != 0 || g.ConfirmBatchDelete {
+			return m, nil, true
+		}
+		g.TagModalOpen, g.TagModalAssetID = false, 0
+		g.AlbumModalOpen = true
+		g.AlbumModalAssetID = e.Gallery.AssetID
+		return m, nil, true
+
+	case GalleryCloseAlbumModal:
+		g.AlbumModalOpen, g.AlbumModalAssetID = false, 0
+		return m, nil, true
+
+	case GalleryCreateAlbum:
+		if m.Page != Gallery || m.Overlay != NoOverlay || g.Busy || e.Message == "" {
+			return m, nil, true
+		}
+		g.Busy = true
+		g.Token++
+		return m, []Effect{{
+			Kind:    EffectGalleryCreateAlbum,
+			Token:   g.Token,
+			Gallery: GalleryEffectData{Name: e.Message, AssetID: e.Gallery.AssetID},
+		}}, true
+
+	case GalleryRenameAlbum:
+		if m.Page != Gallery || m.Overlay != NoOverlay || g.Busy || e.Gallery.AlbumID <= 0 || e.Message == "" {
+			return m, nil, true
+		}
+		g.Busy = true
+		g.Token++
+		return m, []Effect{{
+			Kind:    EffectGalleryRenameAlbum,
+			Token:   g.Token,
+			Gallery: GalleryEffectData{AlbumID: e.Gallery.AlbumID, Name: e.Message},
+		}}, true
+
+	case GalleryDeleteAlbum:
+		if m.Page != Gallery || m.Overlay != NoOverlay || g.Busy || e.Gallery.AlbumID <= 0 {
+			return m, nil, true
+		}
+		if g.AlbumID == e.Gallery.AlbumID {
+			g.AlbumID = 0
+		}
+		g.Busy = true
+		g.Token++
+		return m, []Effect{{
+			Kind:    EffectGalleryDeleteAlbum,
+			Token:   g.Token,
+			Gallery: GalleryEffectData{AlbumID: e.Gallery.AlbumID},
+		}}, true
+
+	case GalleryAddToAlbum:
+		if m.Page != Gallery || m.Overlay != NoOverlay || g.Busy || e.Gallery.AlbumID <= 0 {
+			return m, nil, true
+		}
+		if e.Gallery.AssetID <= 0 && g.SelectedCnt == 0 {
+			return m, nil, true
+		}
+		g.Busy = true
+		g.Token++
+		return m, []Effect{{
+			Kind:    EffectGalleryAddToAlbum,
+			Token:   g.Token,
+			Gallery: GalleryEffectData{AlbumID: e.Gallery.AlbumID, AssetID: e.Gallery.AssetID},
+		}}, true
+
+	case GalleryRemoveFromAlbum:
+		if m.Page != Gallery || m.Overlay != NoOverlay || g.Busy || e.Gallery.AlbumID <= 0 {
+			return m, nil, true
+		}
+		if e.Gallery.AssetID <= 0 && g.SelectedCnt == 0 {
+			return m, nil, true
+		}
+		g.Busy = true
+		g.Token++
+		return m, []Effect{{
+			Kind:    EffectGalleryRemoveFromAlbum,
+			Token:   g.Token,
+			Gallery: GalleryEffectData{AlbumID: e.Gallery.AlbumID, AssetID: e.Gallery.AssetID},
+		}}, true
+
+	case GalleryOpenTagModal:
+		if m.Page != Gallery || m.Overlay != NoOverlay || g.SettingsOpen || g.ConfirmDeleteID != 0 || g.ConfirmBatchDelete {
+			return m, nil, true
+		}
+		g.AlbumModalOpen, g.AlbumModalAssetID = false, 0
+		g.TagModalOpen = true
+		g.TagModalAssetID = e.Gallery.AssetID
+		return m, nil, true
+
+	case GalleryCloseTagModal:
+		g.TagModalOpen, g.TagModalAssetID = false, 0
+		return m, nil, true
+
+	case GalleryAddTag:
+		if m.Page != Gallery || m.Overlay != NoOverlay || g.Busy || e.Message == "" {
+			return m, nil, true
+		}
+		if e.Gallery.AssetID <= 0 && g.SelectedCnt == 0 {
+			return m, nil, true
+		}
+		g.Busy = true
+		g.Token++
+		return m, []Effect{{
+			Kind:    EffectGalleryAddTag,
+			Token:   g.Token,
+			Gallery: GalleryEffectData{Name: e.Message, AssetID: e.Gallery.AssetID},
+		}}, true
+
+	case GalleryRemoveTag:
+		if m.Page != Gallery || m.Overlay != NoOverlay || g.Busy || e.Gallery.AssetID <= 0 || e.Message == "" {
+			return m, nil, true
+		}
+		g.Busy = true
+		g.Token++
+		return m, []Effect{{
+			Kind:    EffectGalleryRemoveTag,
+			Token:   g.Token,
+			Gallery: GalleryEffectData{Name: e.Message, AssetID: e.Gallery.AssetID},
+		}}, true
+
+	case GalleryArchiveSelected:
+		if m.Page != Gallery || m.Overlay != NoOverlay || g.Busy || g.SelectedCnt == 0 {
+			return m, nil, true
+		}
+		g.Busy = true
+		g.Token++
+		g.Notice, g.NoticeWarn = "正在归档所选媒体…", false
+		return m, []Effect{{Kind: EffectGalleryArchiveBatch, Token: g.Token}}, true
+
+	case GalleryRequestBatchDeleteArchive:
+		if m.Page != Gallery || m.Overlay != NoOverlay || g.Busy || g.SelectedCnt == 0 {
+			return m, nil, true
+		}
+		g.ConfirmBatchDelete = true
+		return m, nil, true
+
+	case GalleryCancelBatchDeleteArchive:
+		g.ConfirmBatchDelete = false
+		return m, nil, true
+
+	case GalleryConfirmBatchDeleteArchive:
+		if !g.ConfirmBatchDelete || g.Busy || g.SelectedCnt == 0 {
+			g.ConfirmBatchDelete = false
+			return m, nil, true
+		}
+		g.ConfirmBatchDelete = false
+		g.Busy = true
+		g.Token++
+		return m, []Effect{{Kind: EffectGalleryDeleteArchiveBatch, Token: g.Token}}, true
+
+	case GalleryPruneMissing:
+		if m.Page != Gallery || m.Overlay != NoOverlay || g.Busy {
+			return m, nil, true
+		}
+		g.Busy = true
+		g.Token++
+		return m, []Effect{{Kind: EffectGalleryPruneMissing, Token: g.Token}}, true
+
+	case GallerySetAsBackground:
+		if m.Page != Gallery || m.Overlay != NoOverlay || g.Busy || e.Gallery.AssetID <= 0 {
+			return m, nil, true
+		}
+		g.Busy = true
+		g.Token++
+		return m, []Effect{{
+			Kind:    EffectGallerySetCustomBackground,
+			Token:   g.Token,
+			Gallery: GalleryEffectData{AssetID: e.Gallery.AssetID},
+		}}, true
+
+	case GalleryClearCustomBackground:
+		if (m.Page != Gallery && m.Page != LauncherSettings) || m.Overlay != NoOverlay || g.Busy || !m.CustomBackground {
+			return m, nil, true
+		}
+		g.Busy = true
+		g.Token++
+		return m, []Effect{{Kind: EffectGalleryClearCustomBackground, Token: g.Token}}, true
+
+	case GalleryCustomBackgroundLoaded:
+		m.CustomBackground = e.Enabled
+		return m, nil, true
+
+	case GallerySetViewMode:
+		if m.Page != Gallery || m.Overlay != NoOverlay || e.Gallery.ViewMode > GalleryViewTimeline {
+			return m, nil, true
+		}
+		g.ViewMode = e.Gallery.ViewMode
+		return m, nil, true
 	}
 
 	return m, nil, true
@@ -767,9 +1135,12 @@ func loadGalleryEffect(g GalleryState, token uint64) Effect {
 		Kind:  EffectGalleryLoad,
 		Token: token,
 		Gallery: GalleryEffectData{
-			Scope: g.Scope,
-			Sort:  g.Sort,
-			UID:   g.UID,
+			Scope:   g.Scope,
+			Sort:    g.Sort,
+			UID:     g.UID,
+			AlbumID: g.AlbumID,
+			Tag:     g.Tag,
+			Search:  g.Search,
 		},
 	}
 }

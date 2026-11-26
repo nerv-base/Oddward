@@ -159,7 +159,11 @@ func ReconcileArchive(ctx context.Context, store *Store, archiveDir string) (Rec
 		}
 		if rec.Status != ArchiveStatusReady {
 			// Verify full digest before restoring a previously missing/corrupt row.
-			if sum, _, herr := HashFile(ctx, full, MaxImageBytes); herr == nil && strings.EqualFold(sum, rec.SHA256) {
+			limit := MaxImageBytes
+			if IsVideoExtension(filepath.Ext(full)) {
+				limit = MaxVideoBytes
+			}
+			if sum, _, herr := HashFile(ctx, full, limit); herr == nil && strings.EqualFold(sum, rec.SHA256) {
 				if uerr := store.UpdateArchiveStatus(ctx, rec.AssetID, ArchiveStatusReady); uerr != nil {
 					return report, uerr
 				}

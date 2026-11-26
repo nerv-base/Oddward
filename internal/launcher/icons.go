@@ -41,6 +41,19 @@ var launcherIcons = map[string]*ui.SVG{
 	"\uE8C8": lineIcon(`<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>`),
 	"\uE8F1": lineIcon(`<rect x="3" y="4" width="18" height="4.5" rx="1.2"/><path d="M5 8.5v9.5A2 2 0 0 0 7 20h10a2 2 0 0 0 2-2V8.5M10 13h4"/>`),
 	"\uEDA2": lineIcon(`<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/>`),
+	"\uEB51": lineIcon(`<path d="M12 20.5s-7.5-4.8-7.5-10.2A4.3 4.3 0 0 1 12 7.2a4.3 4.3 0 0 1 7.5 3.1c0 5.4-7.5 10.2-7.5 10.2Z"/>`),
+	"\uEB52": lineIcon(`<path fill="currentColor" d="M12 20.5s-7.5-4.8-7.5-10.2A4.3 4.3 0 0 1 12 7.2a4.3 4.3 0 0 1 7.5 3.1c0 5.4-7.5 10.2-7.5 10.2Z"/>`),
+	"\uE8EC": lineIcon(`<path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3 13V4h9l8.6 8.6a2 2 0 0 1 0 2.8Z"/><circle cx="8" cy="8.5" r="1.2"/>`),
+	"\uE721": lineIcon(`<circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/>`),
+	"\uE714": lineIcon(`<rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3Z"/>`),
+	"\uE767": lineIcon(`<path d="M11 5 6 9H3v6h3l5 4Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>`),
+	"\uE74F": lineIcon(`<path d="M11 5 6 9H3v6h3l5 4Z"/><path d="m16 9 5 6m0-6-5 6"/>`),
+	"\uE91B": lineIcon(`<rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8M12 18v3"/><path d="m6 15 4-4 3 3 3-3 2 2"/>`),
+	"\uE710": lineIcon(`<path d="M12 5v14M5 12h14"/>`),
+	"\uE70F": lineIcon(`<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/>`),
+	"\uE80A": lineIcon(`<rect x="3" y="4" width="8" height="6.5" rx="1.5"/><rect x="13" y="4" width="8" height="6.5" rx="1.5"/><rect x="6" y="13.5" width="8" height="6.5" rx="1.5"/><rect x="16" y="13.5" width="5" height="6.5" rx="1.5"/>`),
+	"\uE8FD": lineIcon(`<path d="M4 6h16M4 12h16M4 18h10"/>`),
+	"\uE72A": lineIcon(`<circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/>`),
 }
 
 func glyph(c *ui.Context, key string, size float32) {

@@ -16,9 +16,11 @@ import (
 
 // ServiceOptions configures Service creation.
 type ServiceOptions struct {
+	DataRoot            string
 	ThumbCacheDir       string
 	ContentRootOverride string
 	PicturesDirOverride string
+	VideosDirOverride   string
 	ArchiveDirOverride  string
 	WatcherOptions      WatcherOptions
 }
@@ -29,6 +31,8 @@ type Snapshot struct {
 	UIDs          []string
 	HasUnknownUID bool
 	Sources       []Source
+	Albums        []Album
+	Tags          []Tag
 	Stats         Stats
 	Settings      Settings
 	ArchiveDir    string
@@ -116,14 +120,29 @@ func (s *Service) LoadSnapshot(ctx context.Context, filter Filter) (Snapshot, er
 	if err != nil {
 		return Snapshot{}, err
 	}
+	albums, err := s.store.ListAlbums(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	tags, err := s.store.ListTags(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
 	if s.thumbs != nil {
 		stats.ThumbCacheBytes = s.thumbs.UsageBytes()
+	}
+	if archiveDir != "" {
+		if free, ferr := freeSpaceFn(archiveDir); ferr == nil && free > 0 {
+			stats.ArchiveFreeBytes = free
+		}
 	}
 	return Snapshot{
 		Assets:        assets,
 		UIDs:          uids,
 		HasUnknownUID: hasUnknown,
 		Sources:       sources,
+		Albums:        albums,
+		Tags:          tags,
 		Stats:         stats,
 		Settings:      cfg,
 		ArchiveDir:    archiveDir,
@@ -199,6 +218,7 @@ func (s *Service) syncSourcesLocked(ctx context.Context, gameRoot string, cfg Se
 		AutoDiscoverGame:    cfg.AutoDiscoverGame,
 		ContentRootOverride: s.opts.ContentRootOverride,
 		PicturesDirOverride: s.opts.PicturesDirOverride,
+		VideosDirOverride:   s.opts.VideosDirOverride,
 	})
 	if err != nil {
 		return nil, err
@@ -359,9 +379,269 @@ func (s *Service) DecodeThumbnail(ctx context.Context, sha256Hex, sourcePath str
 	return img, false, err
 }
 
+// DecodeAssetThumbnail returns the thumbnail for either an image asset or a
+// video asset (via its paired keyframe or archived poster backup). For videos
+// without a poster image, it returns (nil, false, nil) so callers render a clean
+// placeholder without fabricating frames.
+func (s *Service) DecodeAssetThumbnail(ctx context.Context, asset Asset, edge int) (*image.RGBA, bool, error) {
+	if asset.MediaType == MediaVideo {
+		if asset.PosterPath == "" {
+			return nil, false, nil
+		}
+		return s.DecodeThumbnail(ctx, asset.SHA256, asset.PosterPath, edge)
+	}
+	if asset.PrimaryPath == "" {
+		return nil, false, ErrNotFound
+	}
+	return s.DecodeThumbnail(ctx, asset.SHA256, asset.PrimaryPath, edge)
+}
+
 // DecodeOriginal decodes the full-resolution image for viewer inspection.
 func (s *Service) DecodeOriginal(ctx context.Context, sourcePath string) (*image.RGBA, error) {
 	return DecodeScaled(ctx, sourcePath, 0)
+}
+
+// SetFavorites toggles favorite status for assetIDs.
+func (s *Service) SetFavorites(ctx context.Context, assetIDs []int64, on bool) error {
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.store.SetFavorites(ctx, assetIDs, on)
+}
+
+// CreateAlbum creates a user-defined custom album.
+func (s *Service) CreateAlbum(ctx context.Context, name string) (Album, error) {
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return Album{}, err
+	}
+	defer release()
+	return s.store.CreateAlbum(ctx, name)
+}
+
+// RenameAlbum renames an existing custom album.
+func (s *Service) RenameAlbum(ctx context.Context, albumID int64, name string) error {
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.store.RenameAlbum(ctx, albumID, name)
+}
+
+// DeleteAlbum removes an album grouping without touching any underlying files.
+func (s *Service) DeleteAlbum(ctx context.Context, albumID int64) error {
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.store.DeleteAlbum(ctx, albumID)
+}
+
+// AddAssetsToAlbum attaches assetIDs to albumID.
+func (s *Service) AddAssetsToAlbum(ctx context.Context, albumID int64, assetIDs []int64) error {
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.store.AddAssetsToAlbum(ctx, albumID, assetIDs)
+}
+
+// RemoveAssetsFromAlbum detaches assetIDs from albumID.
+func (s *Service) RemoveAssetsFromAlbum(ctx context.Context, albumID int64, assetIDs []int64) error {
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.store.RemoveAssetsFromAlbum(ctx, albumID, assetIDs)
+}
+
+// AddTagToAssets attaches tag to assetIDs.
+func (s *Service) AddTagToAssets(ctx context.Context, tag string, assetIDs []int64) error {
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.store.AddTagToAssets(ctx, tag, assetIDs)
+}
+
+// RemoveTagFromAsset removes tag from assetID.
+func (s *Service) RemoveTagFromAsset(ctx context.Context, assetID int64, tag string) error {
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.store.RemoveTagFromAsset(ctx, assetID, tag)
+}
+
+// PruneMissingUnarchived clears stale index entries whose source files are gone
+// and have no Oddward archive copy. It never touches files on disk.
+func (s *Service) PruneMissingUnarchived(ctx context.Context) (int, error) {
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	return s.store.PruneMissingUnarchived(ctx)
+}
+
+// DeleteArchiveCopies deletes ONLY Oddward-managed archive copies for assetIDs.
+// Original game/user files are never modified or removed.
+func (s *Service) DeleteArchiveCopies(ctx context.Context, assetIDs []int64) (int, error) {
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+
+	cfg, err := s.store.LoadSettings(ctx)
+	if err != nil {
+		return 0, err
+	}
+	archiveDir, err := s.EffectiveArchiveDir(cfg)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrArchiveUnavailable, err)
+	}
+	deleted := 0
+	var firstErr error
+	for _, id := range assetIDs {
+		if err := ctx.Err(); err != nil {
+			return deleted, err
+		}
+		if id <= 0 {
+			continue
+		}
+		if err := DeleteArchiveCopy(ctx, s.store, archiveDir, id); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		deleted++
+	}
+	return deleted, firstErr
+}
+
+// ArchiveBatch manually archives the specified assets into Oddward's archive.
+func (s *Service) ArchiveBatch(ctx context.Context, assets []Asset) (ArchiveReport, error) {
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return ArchiveReport{}, err
+	}
+	defer release()
+
+	cfg, err := s.store.LoadSettings(ctx)
+	if err != nil {
+		return ArchiveReport{}, err
+	}
+	archiveDir, err := s.EffectiveArchiveDir(cfg)
+	if err != nil {
+		return ArchiveReport{}, fmt.Errorf("%w: %v", ErrArchiveUnavailable, err)
+	}
+	var report ArchiveReport
+	for _, a := range assets {
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
+		if a.Invalid || !a.Available || a.HasArchived {
+			report.Skipped++
+			continue
+		}
+		src := a.SourcePath
+		if src == "" {
+			src = a.PrimaryPath
+		}
+		if src == "" {
+			report.Skipped++
+			continue
+		}
+		res, aerr := ArchiveFile(ctx, s.store, archiveDir, a.ID, src, a.SHA256, a.MIMEType)
+		if aerr != nil {
+			if errors.Is(aerr, ErrDiskFull) {
+				report.DiskFull = true
+				report.Failed++
+				return report, aerr
+			}
+			report.Failed++
+			continue
+		}
+		if res.Deduplicated {
+			report.Dedups++
+		} else {
+			report.Archived++
+		}
+	}
+	return report, nil
+}
+
+// SetCustomBackground validates asset via imagecheck, persists an independent
+// copy inside <DataRoot>\background\, and returns the decoded image for live UI
+// activation. Videos and corrupt/unavailable assets are rejected.
+func (s *Service) SetCustomBackground(ctx context.Context, asset Asset) (image.Image, error) {
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	if asset.Invalid || !asset.Available || asset.PrimaryPath == "" || asset.MediaType != MediaImage {
+		return nil, ErrInvalidMedia
+	}
+	dest, img, err := saveCustomBackgroundFile(ctx, s.opts.DataRoot, asset.PrimaryPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.store.SaveCustomBackground(ctx, dest); err != nil {
+		return nil, err
+	}
+	return img, nil
+}
+
+// LoadCustomBackground reloads and revalidates the persisted custom static
+// background for launcher startup, returning (nil, "", nil) if none is set or
+// the managed file no longer exists.
+func (s *Service) LoadCustomBackground(ctx context.Context) (image.Image, string, error) {
+	cfg, err := s.store.LoadSettings(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	if cfg.CustomBackground == "" {
+		return nil, "", nil
+	}
+	img, err := loadCustomBackgroundFile(ctx, cfg.CustomBackground)
+	if err != nil {
+		return nil, "", err
+	}
+	if img == nil {
+		return nil, "", nil
+	}
+	return img, cfg.CustomBackground, nil
+}
+
+// ClearCustomBackground clears the active custom background preference and
+// removes Oddward's managed copy without affecting user gallery photos.
+func (s *Service) ClearCustomBackground(ctx context.Context) error {
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	if err := s.store.SaveCustomBackground(ctx, ""); err != nil {
+		return err
+	}
+	clearCustomBackgroundFiles(ctx, s.opts.DataRoot)
+	return nil
 }
 
 // StartWatching begins real-time ReadDirectoryChangesW watching for all active

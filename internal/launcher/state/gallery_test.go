@@ -138,3 +138,100 @@ func TestGalleryDeleteArchiveRequiresConfirmation(t *testing.T) {
 		t.Fatalf("confirm delete failed: state=%+v fx=%+v", m.Gallery, fx)
 	}
 }
+
+func TestGalleryP1SearchFavoritesAlbumsTagsBatchDeleteAndCustomBackground(t *testing.T) {
+	m := Initial()
+	m, _ = Reduce(m, Event{Kind: Navigate, Page: Gallery})
+	m, _ = Reduce(m, Event{Kind: GalleryScanCompleted, Token: m.Gallery.ScanToken})
+	m, _ = Reduce(m, Event{Kind: GallerySnapshotLoaded, Token: m.Gallery.Token, Gallery: GalleryPayload{
+		TotalCount: 8, PhotoCount: 6, VideoCount: 2, FavoriteCount: 3, FilteredCount: 8,
+		ArchivePhotoCount: 2, ArchivePhotoBytes: 4 << 20, ArchiveVideoCount: 1, ArchiveVideoBytes: 20 << 20,
+		ArchiveFreeBytes: 50 << 30,
+	}})
+	if m.Gallery.VideoCount != 2 || m.Gallery.FavoriteCount != 3 || m.Gallery.ArchiveVideoBytes != 20<<20 {
+		t.Fatalf("P1 metrics missing from snapshot: %+v", m.Gallery)
+	}
+
+	// Favorites & videos scopes + album, tag, search filters emit EffectGalleryLoad.
+	m, fx := Reduce(m, Event{Kind: GallerySetScope, Gallery: GalleryPayload{Scope: GalleryScopeVideos}})
+	if m.Gallery.Scope != GalleryScopeVideos || len(fx) != 1 || fx[0].Kind != EffectGalleryLoad || fx[0].Gallery.Scope != GalleryScopeVideos {
+		t.Fatalf("GalleryScopeVideos failed: %+v %+v", m.Gallery, fx)
+	}
+	m, fx = Reduce(m, Event{Kind: GallerySetAlbum, Gallery: GalleryPayload{AlbumID: 7}})
+	if m.Gallery.AlbumID != 7 || len(fx) != 1 || fx[0].Gallery.AlbumID != 7 {
+		t.Fatalf("GallerySetAlbum failed: %+v", fx)
+	}
+	m, fx = Reduce(m, Event{Kind: GallerySetTag, Gallery: GalleryPayload{Tag: "霓虹"}})
+	if m.Gallery.Tag != "霓虹" || len(fx) != 1 || fx[0].Gallery.Tag != "霓虹" {
+		t.Fatalf("GallerySetTag failed: %+v", fx)
+	}
+	m, fx = Reduce(m, Event{Kind: GallerySetSearch, Gallery: GalleryPayload{Search: "海特洛"}})
+	if m.Gallery.Search != "海特洛" || len(fx) != 1 || fx[0].Gallery.Search != "海特洛" {
+		t.Fatalf("GallerySetSearch failed: %+v", fx)
+	}
+
+	// Deleting active album clears AlbumID filter cleanly.
+	m, fx = Reduce(m, Event{Kind: GalleryDeleteAlbum, Gallery: GalleryPayload{AlbumID: 7}})
+	if m.Gallery.AlbumID != 0 || len(fx) != 1 || fx[0].Kind != EffectGalleryDeleteAlbum {
+		t.Fatalf("GalleryDeleteAlbum should clear active album filter: %+v %+v", m.Gallery, fx)
+	}
+	m, _ = Reduce(m, Event{Kind: GalleryActionCompleted, Token: m.Gallery.Token, Message: "已删除"})
+
+	// Centered organization modals can open over viewer, and Dismiss closes modal BEFORE viewer.
+	m, _ = Reduce(m, Event{Kind: GalleryOpenViewer, Gallery: GalleryPayload{AssetID: 5}})
+	m, _ = Reduce(m, Event{Kind: GalleryOpenTagModal, Gallery: GalleryPayload{AssetID: 5}})
+	if !m.Gallery.ViewerOpen || !m.Gallery.TagModalOpen || !m.Gallery.ModalOpen() {
+		t.Fatalf("tag modal over viewer failed: %+v", m.Gallery)
+	}
+	m, _ = Reduce(m, Event{Kind: Dismiss})
+	if m.Gallery.TagModalOpen || !m.Gallery.ViewerOpen {
+		t.Fatalf("Dismiss must close tag modal first and keep viewer open: %+v", m.Gallery)
+	}
+	m, _ = Reduce(m, Event{Kind: Dismiss})
+	if m.Gallery.ViewerOpen {
+		t.Fatal("second Dismiss must close viewer")
+	}
+
+	// Batch archive delete requires explicit confirmation.
+	m, _ = Reduce(m, Event{Kind: GallerySelectAll})
+	m, fx = Reduce(m, Event{Kind: GalleryRequestBatchDeleteArchive})
+	if !m.Gallery.ConfirmBatchDelete || len(fx) != 0 {
+		t.Fatalf("batch delete must arm confirmation first: %+v %+v", m.Gallery, fx)
+	}
+	m, fx = Reduce(m, Event{Kind: GalleryConfirmBatchDeleteArchive})
+	if m.Gallery.ConfirmBatchDelete || !m.Gallery.Busy || len(fx) != 1 || fx[0].Kind != EffectGalleryDeleteArchiveBatch {
+		t.Fatalf("confirm batch delete failed: %+v %+v", m.Gallery, fx)
+	}
+	m, _ = Reduce(m, Event{Kind: GalleryActionCompleted, Token: m.Gallery.Token, Message: "ok"})
+
+	// Custom static background: set from Gallery, clear from LauncherSettings.
+	m, fx = Reduce(m, Event{Kind: GallerySetAsBackground, Gallery: GalleryPayload{AssetID: 5}})
+	if len(fx) != 1 || fx[0].Kind != EffectGallerySetCustomBackground || fx[0].Gallery.AssetID != 5 {
+		t.Fatalf("SetAsBackground failed: %+v", fx)
+	}
+	m, _ = Reduce(m, Event{Kind: GalleryCustomBackgroundLoaded, Enabled: true})
+	m, _ = Reduce(m, Event{Kind: GalleryActionCompleted, Token: m.Gallery.Token, Message: "已设为背景"})
+	if !m.CustomBackground {
+		t.Fatal("CustomBackground should be active")
+	}
+	m, _ = Reduce(m, Event{Kind: Navigate, Page: LauncherSettings})
+	m, fx = Reduce(m, Event{Kind: GalleryClearCustomBackground})
+	if len(fx) != 1 || fx[0].Kind != EffectGalleryClearCustomBackground {
+		t.Fatalf("ClearCustomBackground from LauncherSettings failed: %+v", fx)
+	}
+
+	// ViewMode defaults to Bravais infinite canvas and toggles cleanly to timeline and back.
+	m2 := Initial()
+	if m2.Gallery.ViewMode != GalleryViewCanvas {
+		t.Fatalf("default ViewMode = %v, want GalleryViewCanvas", m2.Gallery.ViewMode)
+	}
+	m2, _ = Reduce(m2, Event{Kind: Navigate, Page: Gallery})
+	m2, fx = Reduce(m2, Event{Kind: GallerySetViewMode, Gallery: GalleryPayload{ViewMode: GalleryViewTimeline}})
+	if m2.Gallery.ViewMode != GalleryViewTimeline || len(fx) != 0 {
+		t.Fatalf("switch to timeline failed: mode=%v fx=%+v", m2.Gallery.ViewMode, fx)
+	}
+	m2, _ = Reduce(m2, Event{Kind: GallerySetViewMode, Gallery: GalleryPayload{ViewMode: GalleryViewCanvas}})
+	if m2.Gallery.ViewMode != GalleryViewCanvas {
+		t.Fatal("switch back to infinite canvas failed")
+	}
+}

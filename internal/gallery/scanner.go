@@ -11,7 +11,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -169,9 +168,6 @@ func (sc *Scanner) ScanSource(ctx context.Context, src Source, opts ScanOptions)
 		if d.IsDir() {
 			reparse, rerr := isDirReparse(path)
 			if rerr != nil || reparse {
-				return filepath.SkipDir
-			}
-			if src.SourceType == SourceGameCache && strings.EqualFold(d.Name(), "FFMpeg") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -371,11 +367,15 @@ func (sc *Scanner) inspectForIndex(ctx context.Context, sourceID int64, normRel,
 			digest = hex.EncodeToString(sum[:])
 		}
 		reason := classifyInvalidReason(err)
+		mt := info.MediaType
+		if mt == "" {
+			mt = MediaImage
+		}
 		return LocationUpsert{
 			SourceID:      sourceID,
 			RelativePath:  normRel,
 			SHA256:        digest,
-			Info:          MediaInfo{MediaType: MediaImage, MIMEType: "application/octet-stream", ByteSize: st.Size},
+			Info:          MediaInfo{MediaType: mt, MIMEType: "application/octet-stream", ByteSize: st.Size},
 			FileSize:      st.Size,
 			ModifiedAt:    st.ModifiedAt,
 			FileIdentity:  st.Identity,
@@ -399,11 +399,11 @@ func (sc *Scanner) inspectForIndex(ctx context.Context, sourceID int64, normRel,
 func classifyInvalidReason(err error) string {
 	switch {
 	case errors.Is(err, ErrTooLarge):
-		return "图片尺寸或体积超出安全上限"
+		return "文件尺寸或体积超出安全上限"
 	case errors.Is(err, ErrInvalidMedia):
-		return "图片已损坏或格式不受支持"
+		return "媒体文件已损坏或格式不受支持"
 	default:
-		return "无法读取图片文件"
+		return "无法读取媒体文件"
 	}
 }
 

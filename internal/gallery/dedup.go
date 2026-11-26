@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 )
 
@@ -25,6 +26,16 @@ func ArchiveRelativePath(sha256Hex, mimeType string) (string, error) {
 	}
 	lower := strings.ToLower(sha256Hex)
 	return path.Join("originals", lower[:2], lower+ext), nil
+}
+
+// ArchivePosterRelativePath returns the content-addressed video poster backup
+// path under the archive root: posters/<sha256[:2]>/<sha256>.jpg.
+func ArchivePosterRelativePath(sha256Hex string) (string, error) {
+	if !ValidSHA256Hex(sha256Hex) {
+		return "", fmt.Errorf("%w: invalid sha256 digest", ErrInvalidMedia)
+	}
+	lower := strings.ToLower(sha256Hex)
+	return path.Join("posters", lower[:2], lower+".jpg"), nil
 }
 
 // ValidSHA256Hex checks that s is a 64-character lowercase hexadecimal digest.
@@ -64,42 +75,77 @@ func HashAndInspectFile(ctx context.Context, path string) (info MediaInfo, diges
 	if before.Size <= 0 {
 		return MediaInfo{}, "", before, fmt.Errorf("%w: empty file", ErrInvalidMedia)
 	}
-	if before.Size > MaxImageBytes {
+	isVideo := IsVideoExtension(filepath.Ext(path))
+	limit := MaxImageBytes
+	if isVideo {
+		limit = MaxVideoBytes
+	}
+	if before.Size > limit {
 		return MediaInfo{}, "", before, fmt.Errorf("%w: %d bytes exceeds limit", ErrTooLarge, before.Size)
 	}
 
 	h := sha256.New()
-	headerLimit := min(before.Size, int64(headerProbeBytes))
-	headerBuf := make([]byte, headerLimit)
-	n, readErr := io.ReadFull(f, headerBuf)
-	if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
-		return MediaInfo{}, "", before, readErr
-	}
-	headerBuf = headerBuf[:n]
-	_, _ = h.Write(headerBuf)
+	var inspectErr error
+	var copied int64
 
-	// Validate header before reading the remainder of large files.
-	info, inspectErr := InspectReader(bytesReader(headerBuf), before.Size)
-
-	var copied int64 = int64(n)
-	buf := make([]byte, 32<<10)
-	for {
-		if err := ctx.Err(); err != nil {
+	if isVideo {
+		info, inspectErr = InspectMP4Reader(f, before.Size)
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return MediaInfo{}, "", before, err
 		}
-		nr, rerr := f.Read(buf)
-		if nr > 0 {
-			copied += int64(nr)
-			if copied > MaxImageBytes {
-				return MediaInfo{}, "", before, fmt.Errorf("%w: file grew past byte limit", ErrTooLarge)
+		buf := make([]byte, 64<<10)
+		for {
+			if err := ctx.Err(); err != nil {
+				return MediaInfo{}, "", before, err
 			}
-			_, _ = h.Write(buf[:nr])
+			nr, rerr := f.Read(buf)
+			if nr > 0 {
+				copied += int64(nr)
+				if copied > limit {
+					return MediaInfo{}, "", before, fmt.Errorf("%w: file grew past byte limit", ErrTooLarge)
+				}
+				_, _ = h.Write(buf[:nr])
+			}
+			if rerr == io.EOF {
+				break
+			}
+			if rerr != nil {
+				return MediaInfo{}, "", before, rerr
+			}
 		}
-		if rerr == io.EOF {
-			break
+	} else {
+		headerLimit := min(before.Size, int64(headerProbeBytes))
+		headerBuf := make([]byte, headerLimit)
+		n, readErr := io.ReadFull(f, headerBuf)
+		if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
+			return MediaInfo{}, "", before, readErr
 		}
-		if rerr != nil {
-			return MediaInfo{}, "", before, rerr
+		headerBuf = headerBuf[:n]
+		_, _ = h.Write(headerBuf)
+
+		// Validate header before reading the remainder of large files.
+		info, inspectErr = InspectReader(bytesReader(headerBuf), before.Size)
+
+		copied = int64(n)
+		buf := make([]byte, 32<<10)
+		for {
+			if err := ctx.Err(); err != nil {
+				return MediaInfo{}, "", before, err
+			}
+			nr, rerr := f.Read(buf)
+			if nr > 0 {
+				copied += int64(nr)
+				if copied > limit {
+					return MediaInfo{}, "", before, fmt.Errorf("%w: file grew past byte limit", ErrTooLarge)
+				}
+				_, _ = h.Write(buf[:nr])
+			}
+			if rerr == io.EOF {
+				break
+			}
+			if rerr != nil {
+				return MediaInfo{}, "", before, rerr
+			}
 		}
 	}
 
@@ -112,7 +158,14 @@ func HashAndInspectFile(ctx context.Context, path string) (info MediaInfo, diges
 	}
 	digest = hex.EncodeToString(h.Sum(nil))
 	if inspectErr != nil {
-		return MediaInfo{MediaType: MediaImage, MIMEType: "application/octet-stream", ByteSize: before.Size}, digest, after, inspectErr
+		mt := MediaImage
+		if isVideo {
+			mt = MediaVideo
+		}
+		return MediaInfo{MediaType: mt, MIMEType: "application/octet-stream", ByteSize: before.Size}, digest, after, inspectErr
+	}
+	if isVideo {
+		info.PosterPath = FindVideoKeyFrame(path, after.ModifiedAt, info.DurationMS)
 	}
 	return info, digest, after, nil
 }

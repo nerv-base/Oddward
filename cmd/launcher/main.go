@@ -142,6 +142,7 @@ func main() {
 		if galleryBackend != nil {
 			s.GalleryBackend = galleryBackend
 		}
+		s.OpenGalleryVideo = video.Open
 		s.GameDownloads = downloads
 		prefs := saved.Downloads
 		if prefs == (launchsettings.Downloads{}) {
@@ -243,7 +244,30 @@ func main() {
 			}
 		}
 		if !*demo && *background == "" && *poster == "" {
-			s.BackgroundSource = system.NewLauncherBackground(filepath.Join(filepath.Dir(cachePath), "cache", "launcher-media"), network)
+			mediaCacheDir := filepath.Join(filepath.Dir(cachePath), "cache", "launcher-media")
+			makeBgSource := func() launcher.BackgroundSource {
+				return system.NewLauncherBackground(mediaCacheDir, network)
+			}
+			s.NewBackgroundSource = makeBgSource
+			usedCustomBG := false
+			if galleryBackend != nil {
+				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				img, bgErr := galleryBackend.LoadCustomBackground(bgCtx)
+				bgCancel()
+				if bgErr != nil {
+					log.Printf("custom static background unavailable: %v", bgErr)
+				} else if img != nil {
+					s.Poster = ui.NewBitmap(img)
+					if tone, ok := launcher.ArtAccent(img); ok {
+						s.Accent = tone
+					}
+					s.Model.CustomBackground = true
+					usedCustomBG = true
+				}
+			}
+			if !usedCustomBG {
+				s.BackgroundSource = makeBgSource()
+			}
 		}
 		options := launcherWindowOptions()
 		options.Content = ui.View(s.View)
@@ -364,11 +388,17 @@ func main() {
 			if ext == "" {
 				ext = "png"
 			}
+			title := "导出摄影作品"
+			filters := []mygo.FileFilter{{Name: strings.ToUpper(ext), Extensions: []string{ext}}, {Name: "图片", Extensions: []string{"png", "jpg", "jpeg", "webp", "bmp"}}}
+			if ext == "mp4" || ext == "mov" {
+				title = "导出游戏录像"
+				filters = []mygo.FileFilter{{Name: strings.ToUpper(ext), Extensions: []string{ext}}, {Name: "视频", Extensions: []string{"mp4", "mov"}}}
+			}
 			path, err := mygo.Dialog.Save(mygo.SaveDialogOptions{
 				Parent:      w,
-				Title:       "导出摄影作品",
+				Title:       title,
 				DefaultPath: suggested,
-				Filters:     []mygo.FileFilter{{Name: strings.ToUpper(ext), Extensions: []string{ext}}, {Name: "图片", Extensions: []string{"png", "jpg", "jpeg", "webp", "bmp"}}},
+				Filters:     filters,
 			})
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return "", ctxErr
