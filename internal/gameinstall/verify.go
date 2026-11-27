@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,37 +33,60 @@ type verifyDocument struct {
 }
 
 func (s *Store) verifyRead(record InstallRecord) (verifyDocument, error) {
+	doc, _, err := s.verifyReadEntries(record, true)
+	return doc, err
+}
+
+func (s *Store) verifyReadEntries(record InstallRecord, requireManifestMatch bool) (verifyDocument, bool, error) {
 	empty := verifyDocument{Schema: 1, InstallKey: record.InstallKey, ManifestDigest: record.ManifestDigest}
 	r, err := os.OpenRoot(s.stateRoot)
 	if err != nil {
-		return empty, err
+		return empty, false, err
 	}
 	defer r.Close()
 	b, err := stateReadBounded(r, record.InstallKey+"/verify.json")
 	if errors.Is(err, os.ErrNotExist) {
-		return empty, nil
+		return empty, false, nil
 	}
 	if err != nil {
-		return empty, err
+		return empty, false, err
 	}
 	var doc verifyDocument
 	if err := stateDecodeJSON(b, &doc); err != nil {
-		return empty, fmt.Errorf("%w: verification record", ErrInvalidState)
+		return empty, false, fmt.Errorf("%w: verification record", ErrInvalidState)
 	}
 	if doc.Schema != 1 || doc.InstallKey != record.InstallKey || len(doc.Entries) > 65536 {
-		return empty, ErrInvalidState
+		return empty, false, ErrInvalidState
 	}
-	if doc.ManifestDigest != record.ManifestDigest {
-		return empty, nil
+	exact := doc.ManifestDigest == record.ManifestDigest
+	if !exact && requireManifestMatch {
+		return empty, false, nil
 	}
 	seen := map[string]bool{}
 	for _, e := range doc.Entries {
 		if !stateValidMD5(e.MD5) || e.Size <= 0 || e.VerifiedAt.IsZero() || e.Mtime.IsZero() || e.FileID == "" || e.Source != "verify" || seen[e.Path] {
-			return empty, ErrInvalidState
+			return empty, false, ErrInvalidState
 		}
 		seen[e.Path] = true
 	}
-	return doc, nil
+	if exact {
+		return doc, true, nil
+	}
+	// When verify.json is from an earlier manifest (for example, an install
+	// updated by an older launcher release), keep only entries whose (Path, MD5,
+	// Size) still match the current baseline; verifyMatches still checks live
+	// Size, Mtime and NTFS FileID on disk before trusting any entry.
+	targets := make(map[string]InstallTarget, len(record.Targets))
+	for _, t := range record.Targets {
+		targets[t.Path] = t
+	}
+	reusable := empty
+	for _, e := range doc.Entries {
+		if t, ok := targets[e.Path]; ok && e.MD5 == t.MD5 && e.Size == t.Size {
+			reusable.Entries = append(reusable.Entries, e)
+		}
+	}
+	return reusable, false, nil
 }
 func verifyFingerprint(f *os.File) (int64, time.Time, string, error) {
 	st, err := f.Stat()
@@ -125,7 +149,7 @@ func (s *Store) TrustedTargets(ctx context.Context, root string) ([]InstallTarge
 	if err := verifyCheckOfficial(r, record); err != nil {
 		return nil, err
 	}
-	doc, err := s.verifyRead(record)
+	doc, _, err := s.verifyReadEntries(record, false)
 	if err != nil {
 		return nil, err
 	}
@@ -173,6 +197,84 @@ func (s *Store) TrustedTargets(ctx context.Context, root string) ([]InstallTarge
 	return out, nil
 }
 
+// PlanTargets returns installed targets eligible for fast update planning.
+// Targets with a valid verify.json fingerprint are accepted immediately; if a
+// previously verified file changed on disk, only that file is rehashed. Targets
+// without a verify.json entry (such as right after metadata adoption or when
+// verify.json is absent) are matched by safe handle stat(size) so normal updates
+// do not block on hashing unchanged files. This method never writes state.
+func (s *Store) PlanTargets(ctx context.Context, root string) ([]InstallTarget, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	record, err := s.ReadInstall(root)
+	if err != nil {
+		return nil, err
+	}
+	if record.BaselineMismatch || len(record.Targets) == 0 || (record.VerifyCoverage != "full" && record.VerifyCoverage != "metadata") {
+		return nil, ErrStaleState
+	}
+	r, err := os.OpenRoot(record.Root)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	if err := verifyCheckOfficial(r, record); err != nil {
+		return nil, err
+	}
+	doc, _, err := s.verifyReadEntries(record, false)
+	if err != nil {
+		return nil, err
+	}
+	entries := map[string]verifyEntry{}
+	for _, e := range doc.Entries {
+		entries[e.Path] = e
+	}
+	usable := make([]bool, len(record.Targets))
+	var rehashChanged []int
+	for i, t := range record.Targets {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		entry, exists := entries[t.Path]
+		if exists {
+			if verifyMatches(r, t, entry) {
+				usable[i] = true
+				continue
+			}
+			if st, serr := txnStatStamp(r, t.Path); serr == nil && st.Size == t.Size {
+				rehashChanged = append(rehashChanged, i)
+			}
+			continue
+		}
+		if st, serr := txnStatStamp(r, t.Path); serr == nil && st.Size == t.Size {
+			usable[i] = true
+		}
+	}
+	if len(rehashChanged) > 0 {
+		if err := txnRunParallel(ctx, len(rehashChanged), func(pctx context.Context, k int) error {
+			idx := rehashChanged[k]
+			_, mismatch, herr := verifyHashFile(pctx, r, record.Targets[idx], nil)
+			if herr != nil {
+				return herr
+			}
+			if mismatch == "" {
+				usable[idx] = true
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+	out := make([]InstallTarget, 0, len(record.Targets))
+	for i, t := range record.Targets {
+		if usable[i] {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
 // VerifyInstallation persists each completed file before reporting progress.
 // Cancelation resumes at file boundaries; a partial file never enters the cache.
 func (s *Store) VerifyInstallation(ctx context.Context, selected string, report func(VerifyReport)) (VerifyResult, error) {
@@ -211,7 +313,7 @@ func (s *Store) VerifyInstallation(ctx context.Context, selected string, report 
 	if err := verifyCheckOfficial(r, record); err != nil {
 		return result, err
 	}
-	doc, err := s.verifyRead(record)
+	doc, exactDigest, err := s.verifyReadEntries(record, false)
 	if err != nil {
 		return result, err
 	}
@@ -431,6 +533,10 @@ func (s *Store) VerifyInstallation(ctx context.Context, selected string, report 
 				result.Mismatches = append(result.Mismatches, Mismatch{record.Targets[i].Path, reason})
 			}
 		}
+	} else if !exactDigest && len(previous) > 0 {
+		if err := persistVerify(); err != nil {
+			return result, err
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return result, err
@@ -568,7 +674,7 @@ func (s *Store) txnSeedVerifyInto(install *os.Root, record InstallRecord, ledger
 	if ledger == nil || record.InstallKey == "" || record.ManifestDigest == "" {
 		return
 	}
-	doc, err := s.verifyRead(record)
+	doc, _, err := s.verifyReadEntries(record, false)
 	if err != nil || doc.ManifestDigest != record.ManifestDigest || len(doc.Entries) == 0 {
 		return
 	}
@@ -586,7 +692,7 @@ func (s *Store) txnSeedVerifyInto(install *os.Root, record InstallRecord, ledger
 	}
 }
 
-func (s *Store) txnWriteVerify(install *os.Root, record InstallRecord) error {
+func (s *Store) txnWriteVerify(install *os.Root, record InstallRecord, verified map[string]bool) error {
 	if record.InstallKey == "" || record.ManifestDigest == "" || len(record.Targets) == 0 || len(record.Targets) > 65536 {
 		return nil
 	}
@@ -598,6 +704,9 @@ func (s *Store) txnWriteVerify(install *os.Root, record InstallRecord) error {
 		Entries:        make([]verifyEntry, 0, len(record.Targets)),
 	}
 	for _, t := range record.Targets {
+		if verified != nil && !verified[strings.ToUpper(t.Path)] {
+			continue
+		}
 		f, err := install.Open(t.Path)
 		if err != nil {
 			return err

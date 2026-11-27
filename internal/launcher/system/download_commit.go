@@ -97,7 +97,8 @@ func (b *GameDownloadBackend) commitDownload(ctx context.Context, req launcher.D
 	}
 	input := gameinstall.TxnInput{Root: p.root, WorkRoot: downloadWork(p.root), TxnID: p.id, Guard: guard, BackupRetention: 24 * time.Hour,
 		FreeBytes: func(context.Context) (int64, error) { return b.space(p.root) }, RequiredFreeBytes: p.margin,
-		Repair: p.base.Root != "" && p.base.Version == candidate.Version && p.base.ListHash == candidate.ListHash,
+		Repair:                p.base.Root != "" && p.base.Version == candidate.Version && p.base.ListHash == candidate.ListHash,
+		AllowMetadataBaseline: p.kind != state.DownloadInstall,
 	}
 	// Reused installation files and all staged sources are verified again by
 	// Commit before any replacement. Move a shared blob only on its last use.

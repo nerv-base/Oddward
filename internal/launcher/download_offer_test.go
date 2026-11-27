@@ -66,7 +66,7 @@ func TestColdStartChecksInspectedGameAfterRecoveryScan(t *testing.T) {
 	if err := tt.Click("更新游戏"); err != nil {
 		t.Fatal(err)
 	}
-	for _, kind := range []state.EffectKind{state.EffectInstallAdopt, state.EffectInstallVerify, state.EffectDownloadPlan} {
+	for _, kind := range []state.EffectKind{state.EffectInstallAdopt, state.EffectDownloadPlan} {
 		r := receiveDownload(t, calls)
 		if r.Effect.Kind != kind || r.Kind != state.DownloadUpdate || r.Root != m.Managed.Root {
 			t.Fatalf("expected update step %v for selected game, got %+v", kind, r)

@@ -83,7 +83,7 @@ func TestOfferedUpdatePreparesBaselineOnlyAfterClick(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		adopt, verify bool
-	}{{"official install", true, false}, {"adopted metadata", false, true}, {"fully verified", false, false}} {
+	}{{"official install", true, false}, {"explicit verify required", false, true}, {"metadata or verified baseline", false, false}} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := downloadModel()
 			m, _ = Reduce(m, Event{Kind: DownloadOfferPollRequest})
@@ -99,7 +99,7 @@ func TestOfferedUpdatePreparesBaselineOnlyAfterClick(t *testing.T) {
 				}
 				m, fx = Reduce(m, Event{Kind: InstallAdopted, Token: m.Download.Request, Message: "1.5.6"})
 			}
-			if tc.adopt || tc.verify {
+			if tc.verify {
 				requireDownloadEffect(t, m, fx, EffectInstallVerify)
 				if m.Download.Phase != DownloadVerifying || Present(m).Primary != "检查游戏文件" {
 					t.Fatalf("verification hidden: %+v", Present(m))
@@ -115,31 +115,37 @@ func TestOfferedUpdatePreparesBaselineOnlyAfterClick(t *testing.T) {
 }
 
 func TestFailedOfferedUpdateRetriesOnlyItsFailedBaselineStep(t *testing.T) {
-	m := downloadModel()
-	m, _ = Reduce(m, Event{Kind: DownloadOfferPollRequest})
-	m, _ = Reduce(m, Event{Kind: DownloadOfferPolled, Token: m.Download.OfferRequest, Path: m.Managed.Root, Message: "1.5.8", CurrentVersion: "1.5.6", NeedsAdoption: true})
-	m, _ = Reduce(m, Event{Kind: Primary})
 	for _, step := range []struct {
+		name             string
+		adopt, verify    bool
 		failure, success EventKind
 		retry            EffectKind
 	}{
-		{InstallAdoptFailed, InstallAdopted, EffectInstallAdopt}, {InstallVerifyFailed, InstallVerified, EffectInstallVerify},
+		{"adopt", true, false, InstallAdoptFailed, InstallAdopted, EffectInstallAdopt},
+		{"verify", false, true, InstallVerifyFailed, InstallVerified, EffectInstallVerify},
 	} {
-		token := m.Download.Request
-		failed, fx := Reduce(m, Event{Kind: step.failure, Token: token, Message: "无法验证"})
-		if len(fx) != 0 || Present(failed).Primary != "重试更新" || failed.Download.Error != "无法验证" {
-			t.Fatalf("failed preparation: %+v, %+v", Present(failed), fx)
-		}
-		stale, fx := Reduce(failed, Event{Kind: step.success, Token: token, Message: "1.5.6"})
-		if stale != failed || len(fx) != 0 {
-			t.Fatal("late success advanced a failed update")
-		}
-		m, fx = Reduce(failed, Event{Kind: Primary})
-		requireDownloadEffect(t, m, fx, step.retry)
-		m, _ = Reduce(m, Event{Kind: step.success, Token: m.Download.Request, Message: "1.5.6"})
-	}
-	if m.Download.Kind != DownloadUpdate || m.Download.Stage != StagePlanning {
-		t.Fatal("retry did not resume formal update")
+		t.Run(step.name, func(t *testing.T) {
+			m := downloadModel()
+			m, _ = Reduce(m, Event{Kind: DownloadOfferPollRequest})
+			m, _ = Reduce(m, Event{Kind: DownloadOfferPolled, Token: m.Download.OfferRequest, Path: m.Managed.Root, Message: "1.5.8", CurrentVersion: "1.5.6", NeedsAdoption: step.adopt, NeedsVerification: step.verify})
+			m, _ = Reduce(m, Event{Kind: Primary})
+			token := m.Download.Request
+			failed, fx := Reduce(m, Event{Kind: step.failure, Token: token, Message: "无法验证"})
+			if len(fx) != 0 || Present(failed).Primary != "重试更新" || failed.Download.Error != "无法验证" {
+				t.Fatalf("failed preparation: %+v, %+v", Present(failed), fx)
+			}
+			stale, fx := Reduce(failed, Event{Kind: step.success, Token: token, Message: "1.5.6"})
+			if stale != failed || len(fx) != 0 {
+				t.Fatal("late success advanced a failed update")
+			}
+			m, fx = Reduce(failed, Event{Kind: Primary})
+			requireDownloadEffect(t, m, fx, step.retry)
+			m, fx = Reduce(m, Event{Kind: step.success, Token: m.Download.Request, Message: "1.5.6"})
+			requireDownloadEffect(t, m, fx, EffectDownloadPlan)
+			if m.Download.Kind != DownloadUpdate || m.Download.Stage != StagePlanning {
+				t.Fatal("retry did not resume formal update")
+			}
+		})
 	}
 }
 

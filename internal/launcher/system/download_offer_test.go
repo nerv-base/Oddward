@@ -47,13 +47,23 @@ func TestHomeUpdateCommitsPreviouslyUnmanagedInstallation(t *testing.T) {
 	m, _ = state.Reduce(m, state.Event{Kind: state.ManagedLoaded, Token: m.Managed.Request, Path: root})
 	m, _ = state.Reduce(m, state.Event{Kind: state.ManagedLocated, Token: m.Managed.Request, Path: root})
 	var effects []state.Effect
+	var sawNetworkProgress bool
+	var maxNetworkDownloaded int64
 	run := func(kind state.EffectKind) {
 		t.Helper()
 		if len(effects) != 1 || effects[0].Kind != kind {
 			t.Fatalf("want effect %v, got %+v, phase=%v error=%q", kind, effects, m.Download.Phase, m.Download.Error)
 		}
 		req := launcher.DownloadRequest{Root: root, Kind: m.Download.Kind, Effect: effects[0]}
-		e := b.HandleDownload(ctx, req, func(progress state.Event) { m, _ = state.Reduce(m, progress) })
+		e := b.HandleDownload(ctx, req, func(progress state.Event) {
+			m, _ = state.Reduce(m, progress)
+			if m.Download.Stage == state.StageNetwork && m.Download.Downloaded > 0 {
+				sawNetworkProgress = true
+				if m.Download.Downloaded > maxNetworkDownloaded {
+					maxNetworkDownloaded = m.Download.Downloaded
+				}
+			}
+		})
 		m, effects = state.Reduce(m, e)
 	}
 	m, effects = state.Reduce(m, state.Event{Kind: state.DownloadOfferPollRequest})
@@ -62,8 +72,11 @@ func TestHomeUpdateCommitsPreviouslyUnmanagedInstallation(t *testing.T) {
 		t.Fatal(state.Present(m))
 	}
 	m, effects = state.Reduce(m, state.Event{Kind: state.Primary})
-	for _, kind := range []state.EffectKind{state.EffectInstallAdopt, state.EffectInstallVerify, state.EffectDownloadPlan, state.EffectDownloadRun, state.EffectDownloadCommit} {
+	for _, kind := range []state.EffectKind{state.EffectInstallAdopt, state.EffectDownloadPlan, state.EffectDownloadRun, state.EffectDownloadCommit} {
 		run(kind)
+	}
+	if !sawNetworkProgress || maxNetworkDownloaded != int64(len(data)) {
+		t.Fatalf("StageNetwork progress did not advance through state.Reduce: saw=%v max=%d want=%d", sawNetworkProgress, maxNetworkDownloaded, len(data))
 	}
 	if m.Download.Phase != state.DownloadDone {
 		t.Fatalf("update did not finish: %+v", m.Download)

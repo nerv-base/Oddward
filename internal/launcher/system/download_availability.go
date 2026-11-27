@@ -141,8 +141,8 @@ func downloadProbeCandidates(manifest gameres.ResList, graph *gameres.PatchGraph
 		}
 	}
 	if patch && graph != nil {
-		for _, entry := range graph.Edges {
-			if entry.Section == "" && !local.Cached(entry.Blob) {
+		for _, entry := range relevantPatchEdges(manifest, graph, local, needed) {
+			if !local.Cached(entry.Blob) {
 				objects = append(objects, entry.Blob)
 			}
 		}
@@ -162,4 +162,84 @@ func downloadProbeCandidates(manifest gameres.ResList, graph *gameres.PatchGraph
 		}
 	}
 	return objects
+}
+
+// relevantPatchEdges returns only baseTag patch edges that lie on at least one
+// directed path from an installed object for a needed target to a needed
+// manifest target. Historical edges from unrelated versions are skipped so
+// bounded HEAD probing checks only the active update's candidate blobs.
+func relevantPatchEdges(manifest gameres.ResList, graph *gameres.PatchGraph, local downloadLocal, needed func(string, gameres.Object) bool) []gameres.PatchEntry {
+	if graph == nil || len(graph.Edges) == 0 {
+		return nil
+	}
+	starts := make(map[gameres.Object]bool)
+	wants := make(map[gameres.Object]bool)
+	collect := func(path string, target gameres.Object) {
+		if !needed(path, target) {
+			return
+		}
+		wants[target] = true
+		if old, ok := local.Identity(path); ok {
+			starts[old] = true
+		}
+	}
+	for _, pack := range manifest.Packages {
+		for _, entry := range pack.Entries {
+			collect(entry.Path, gameres.Object{MD5: entry.MD5, Size: entry.Size})
+		}
+	}
+	for _, file := range manifest.Files {
+		collect(file.Path, gameres.Object{MD5: file.MD5, Size: file.Size})
+	}
+	if len(starts) == 0 || len(wants) == 0 {
+		return nil
+	}
+	byOld := make(map[gameres.Object][]int)
+	byNew := make(map[gameres.Object][]int)
+	for i, edge := range graph.Edges {
+		if edge.Section != "" {
+			continue
+		}
+		byOld[edge.Old] = append(byOld[edge.Old], i)
+		byNew[edge.New] = append(byNew[edge.New], i)
+	}
+	forward := make(map[gameres.Object]bool, len(starts))
+	queue := make([]gameres.Object, 0, len(starts))
+	for obj := range starts {
+		forward[obj] = true
+		queue = append(queue, obj)
+	}
+	for head := 0; head < len(queue); head++ {
+		for _, idx := range byOld[queue[head]] {
+			next := graph.Edges[idx].New
+			if !forward[next] {
+				forward[next] = true
+				queue = append(queue, next)
+			}
+		}
+	}
+	backward := make(map[gameres.Object]bool, len(wants))
+	queue = queue[:0]
+	for obj := range wants {
+		if forward[obj] {
+			backward[obj] = true
+			queue = append(queue, obj)
+		}
+	}
+	for head := 0; head < len(queue); head++ {
+		for _, idx := range byNew[queue[head]] {
+			prev := graph.Edges[idx].Old
+			if forward[prev] && !backward[prev] {
+				backward[prev] = true
+				queue = append(queue, prev)
+			}
+		}
+	}
+	var out []gameres.PatchEntry
+	for _, edge := range graph.Edges {
+		if edge.Section == "" && forward[edge.Old] && backward[edge.New] {
+			out = append(out, edge)
+		}
+	}
+	return out
 }

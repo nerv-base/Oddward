@@ -298,11 +298,19 @@ func TestApplyDownloadPatchesFallbackReasons(t *testing.T) {
 	for _, sourceMismatch := range []bool{false, true} {
 		t.Run(fmt.Sprint(sourceMismatch), func(t *testing.T) {
 			h := newPatchAdapterHarness(t)
-			old, newData := []byte("old"), []byte("new target")
-			target := h.patchTarget(t, "Client/target", old, newData)
+			old, newData := []byte("old"), []byte("old!")
+			blob := h.seed(t, adapterAppendBytePatch(len(old), '!'))
+			target := adapterTarget("Client/target", adapterObject(old), blob, adapterObject(newData))
+			targetPath := filepath.Join(h.p.root, "Client", "target")
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(targetPath, old, 0600); err != nil {
+				t.Fatal(err)
+			}
 			h.serve(newData)
 			if sourceMismatch {
-				if err := os.WriteFile(filepath.Join(h.p.root, "Client", "target"), []byte("bad"), 0600); err != nil {
+				if err := os.WriteFile(targetPath, []byte("bad"), 0600); err != nil {
 					t.Fatal(err)
 				}
 			} else {
