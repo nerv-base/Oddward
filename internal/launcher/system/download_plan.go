@@ -170,7 +170,7 @@ func (b *GameDownloadBackend) planDownload(ctx context.Context, req launcher.Dow
 	if err != nil {
 		return event, err
 	}
-	if base.Root != "" && (base.Version != delivery.Config.ResVersion || base.ListHash != delivery.Config.ListHash) && base.VerifyCoverage != "full" {
+	if base.Root != "" && (base.Version != delivery.Config.ResVersion || base.ListHash != delivery.Config.ListHash) && base.VerifyCoverage != "full" && base.VerifyCoverage != "metadata" {
 		return event, errors.New("更新前请完成现有安装的全量校验")
 	}
 	cache := ""
@@ -233,7 +233,7 @@ func (b *GameDownloadBackend) buildDownloadPlan(ctx context.Context, root string
 		if err != nil {
 			return nil, err
 		}
-		trusted, err := store.TrustedTargets(ctx, root)
+		trusted, err := store.PlanTargets(ctx, root)
 		if err != nil {
 			return nil, err
 		}

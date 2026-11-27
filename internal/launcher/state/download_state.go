@@ -137,6 +137,7 @@ type DownloadState struct {
 	Needed, Free, Suggested                 int64
 	operation                               downloadOperation
 	pausePending, cancelPending             bool
+	stageReported                           bool
 	locateInstall                           bool
 	verifyTask                              bool
 	preloadAutoApply, preloadFallbackUpdate bool
@@ -471,6 +472,7 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		d.CrossVolume, d.CacheBudget = false, false
 		d.Downloaded, d.Total, d.PatchBytes, d.Reused, d.Rate, d.ETA = 0, 0, 0, 0, 0, 0
 		d.FilesDone, d.FilesTotal = 0, 0
+		d.stageReported = false
 		d.AwaitingConfirmation, d.SpaceShort = false, false
 		d.Needed, d.Free, d.Suggested = 0, 0, 0
 		d.operation = downloadOperationPlan
@@ -499,6 +501,7 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		d.Phase, d.Stage = DownloadVerifying, StageVerify
 		d.Downloaded, d.Total, d.Rate, d.ETA = 0, 0, 0, 0
 		d.FilesDone, d.FilesTotal = 0, 0
+		d.stageReported = false
 		return effect(EffectInstallVerify)
 	}
 	clearPreloadFlow := func() {
@@ -517,6 +520,7 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		d.preloadReconcileAfterStage = false
 		d.Downloaded, d.Total, d.PatchBytes, d.Reused, d.Rate, d.ETA = 0, 0, 0, 0, 0, 0
 		d.FilesDone, d.FilesTotal = 0, 0
+		d.stageReported = false
 		d.Route = RouteUnknown
 		d.FallbackNote = false
 		d.CrossVolume, d.CacheBudget = false, false
@@ -535,6 +539,7 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		d.Phase, d.Stage = DownloadCommitting, StageCommit
 		d.Downloaded, d.Total, d.Rate, d.ETA = 0, 0, 0, 0
 		d.FilesDone, d.FilesTotal = 0, 0
+		d.stageReported = false
 		return effect(EffectDownloadCommit)
 	}
 	switch e.Kind {
@@ -681,6 +686,8 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		d.AwaitingConfirmation = false
 		d.operation = downloadOperationRun
 		d.Stage = StageNetwork
+		d.FilesDone, d.FilesTotal = 0, 0
+		d.stageReported = false
 		k := EffectDownloadRun
 		if d.Kind == DownloadPreload {
 			k = EffectPreloadRun
@@ -697,6 +704,8 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		}
 		d.Phase, d.Stage = DownloadRunning, StageNetwork
 		d.operation = downloadOperationNone
+		d.FilesDone, d.FilesTotal = 0, 0
+		d.stageReported = false
 	case DownloadProgress, PreloadProgress, InstallVerifyProgress, ApplyProgress:
 		if !current || d.pausePending || d.cancelPending {
 			break
@@ -740,6 +749,7 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		}
 		d.Request++
 		d.operation = downloadOperationRun
+		d.stageReported = false
 		d.Error, d.Note = "", ""
 		if d.verifyTask {
 			d.operation = downloadOperationVerify
@@ -788,6 +798,7 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		d.Phase, d.Stage = DownloadRebuilding, StageApply
 		d.Downloaded, d.Total, d.Rate, d.ETA = 0, 0, 0, 0
 		d.FilesDone, d.FilesTotal = 0, e.FilesTotal
+		d.stageReported = false
 	case ApplyFinished:
 		if !current || d.Phase != DownloadRebuilding {
 			break
@@ -796,6 +807,7 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		d.FilesDone = e.FilesDone
 		d.Phase, d.Stage = DownloadVerifying, StageVerify
 		d.Downloaded, d.Total, d.Rate, d.ETA = 0, 0, 0, 0
+		d.stageReported = false
 		return effect(EffectDownloadVerify)
 	case DownloadFallbackNotice:
 		if !current || d.Phase != DownloadRunning && d.Phase != DownloadRebuilding && d.Phase != DownloadVerifying {
@@ -827,6 +839,7 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 			break
 		}
 		d.Phase, d.Stage = DownloadCommitting, StageCommit
+		d.stageReported = false
 	case DownloadCommitted, PreloadApplied:
 		if !current || d.Phase != DownloadCommitting || e.Message == "" {
 			break
@@ -883,6 +896,7 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		d.Phase = DownloadIdle
 		d.Error, d.Note = "", ""
 		d.Rate, d.ETA = 0, 0
+		d.stageReported = false
 		if e.Stage == StageNetwork {
 			d.Phase = DownloadSuspended
 		}
@@ -998,7 +1012,12 @@ func reduceDownload(m Model, e Event) (Model, []Effect, bool) {
 		d.Phase, d.Stage = DownloadIdle, StageIdle
 		d.Rate, d.ETA = 0, 0
 		if SameManagedRoot(d.offerResultRoot, m.Managed.Root) {
-			d.offerNeedsAdoption, d.offerNeedsVerification = false, !d.Verified
+			d.offerNeedsAdoption = false
+			if e.Kind == InstallVerified || d.preparingUpdateBaseline {
+				d.offerNeedsVerification = false
+			} else {
+				d.offerNeedsVerification = !d.Verified
+			}
 		}
 		if d.preparingUpdateBaseline {
 			d.preparingUpdateBaseline = false
@@ -1188,10 +1207,11 @@ func downloadAcceptProgress(d *DownloadState, e Event) bool {
 	if e.Stage < d.Stage {
 		return false
 	}
-	if e.Stage == d.Stage && (e.Downloaded < d.Downloaded || e.Total < d.Total || e.FilesDone < d.FilesDone || e.FilesTotal < d.FilesTotal) {
+	if e.Stage == d.Stage && d.stageReported && (e.Downloaded < d.Downloaded || e.Total < d.Total || e.FilesDone < d.FilesDone || e.FilesTotal < d.FilesTotal) {
 		return false
 	}
 	d.Stage = e.Stage
+	d.stageReported = true
 	d.Downloaded, d.Total, d.FilesDone, d.FilesTotal = e.Downloaded, e.Total, e.FilesDone, e.FilesTotal
 	d.Reused = e.Reused
 	d.Rate, d.ETA = 0, 0

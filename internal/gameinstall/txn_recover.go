@@ -214,7 +214,9 @@ func txnValidateJournal(j *txnJournal, root, work string) error {
 	if err := stateValidateRecord(j.Candidate); err != nil {
 		return err
 	}
-	if j.Base.InstallKey != key || j.Candidate.InstallKey != key || j.Candidate.TxnID != j.TxnID || j.Candidate.State != "ready" || j.Candidate.VerifyCoverage != "full" || j.Candidate.VerifiedTargets != len(j.Candidate.Targets) || len(j.Files) == 0 || len(j.Files) > 131074 {
+	validCoverage := (j.Candidate.VerifyCoverage == "full" && j.Candidate.VerifiedTargets == len(j.Candidate.Targets)) ||
+		(j.Candidate.VerifyCoverage == "metadata" && j.Candidate.VerifiedTargets >= 0 && j.Candidate.VerifiedTargets < len(j.Candidate.Targets))
+	if j.Base.InstallKey != key || j.Candidate.InstallKey != key || j.Candidate.TxnID != j.TxnID || j.Candidate.State != "ready" || !validCoverage || len(j.Files) == 0 || len(j.Files) > 131074 {
 		return ErrInvalidState
 	}
 	targetMap := map[string]InstallTarget{}
@@ -364,7 +366,15 @@ func (s *Store) txnRecoverOne(ctx context.Context, r *txnRoots, j *txnJournal, g
 		backup := txnBackup(j, i)
 		oldPresent := false
 		if e.Old != nil {
-			oldPresent = txnVerify(ctx, r.install, e.Path, *e.Old) == nil
+			if e.OldMetaOnly {
+				if _, berr := r.work.Lstat(backup); errors.Is(berr, os.ErrNotExist) {
+					if st, serr := txnStatStamp(r.install, e.Path); serr == nil && st.Size == e.Old.Size {
+						oldPresent = true
+					}
+				}
+			} else {
+				oldPresent = txnVerify(ctx, r.install, e.Path, *e.Old) == nil
+			}
 		}
 		if oldPresent {
 			continue
@@ -430,6 +440,59 @@ func txnValidateFreshResume(ctx context.Context, r *txnRoots, j *txnJournal) err
 }
 func txnValidateRollback(ctx context.Context, r *txnRoots, j *txnJournal) error {
 	for i, e := range j.Files {
+		if e.Reuse && e.MetaOnly {
+			st, err := txnStatStamp(r.install, e.Path)
+			if err != nil || st.Size != e.Target.Size {
+				return errors.New("reused file changed")
+			}
+			continue
+		}
+		if e.Old != nil && e.OldMetaOnly {
+			backupSt, berr := txnStatStamp(r.work, txnBackup(j, i))
+			backupPresent := berr == nil
+			if berr != nil && !errors.Is(berr, os.ErrNotExist) {
+				return berr
+			}
+			if backupPresent && backupSt.Size != e.Old.Size {
+				return errors.New("backup size changed")
+			}
+			stage, serr := txnIdentity(ctx, r.work, txnStage(j, i))
+			stagePresent := serr == nil
+			if serr != nil && !errors.Is(serr, os.ErrNotExist) {
+				return serr
+			}
+			if stagePresent {
+				stage.Path = e.Path
+				if e.Target == nil || stage != *e.Target {
+					return errors.New("candidate staging changed")
+				}
+			}
+			if !backupPresent {
+				st, err := txnStatStamp(r.install, e.Path)
+				if err != nil || st.Size != e.Old.Size {
+					return fmt.Errorf("backup missing: %s", e.Path)
+				}
+				if e.Target != nil && !stagePresent {
+					return errors.New("candidate stage missing before placement")
+				}
+				continue
+			}
+			actual, err := txnIdentity(ctx, r.install, e.Path)
+			present := err == nil
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			if present && (e.Target == nil || actual != *e.Target) {
+				return errors.New("placed candidate changed")
+			}
+			if present && stagePresent {
+				return errors.New("both candidate and staging exist")
+			}
+			if e.Target != nil && !present && !stagePresent {
+				return errors.New("candidate and staging both missing")
+			}
+			continue
+		}
 		actual, err := txnIdentity(ctx, r.install, e.Path)
 		present := err == nil
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -515,7 +578,16 @@ func (s *Store) txnFinish(ctx context.Context, r *txnRoots, j *txnJournal, in Tx
 	if err := s.txnSave(j); err != nil {
 		return txnRequired(err)
 	}
-	if err := s.txnWriteVerify(r.install, j.Candidate); err != nil {
+	var verifiedPaths map[string]bool
+	if j.Candidate.VerifyCoverage != "full" {
+		verifiedPaths = make(map[string]bool, len(j.Files))
+		for _, e := range j.Files {
+			if e.Target != nil && !e.MetaOnly {
+				verifiedPaths[strings.ToUpper(e.Path)] = true
+			}
+		}
+	}
+	if err := s.txnWriteVerify(r.install, j.Candidate, verifiedPaths); err != nil {
 		return txnRequired(err)
 	}
 	if j.Retention > 0 && time.Now().Before(j.RetainUntil) {
@@ -559,13 +631,14 @@ func (s *Store) txnCleanupPending(j *txnJournal, err error) (RecoveryStatus, err
 }
 func txnCleanupEvidence(ctx context.Context, r *txnRoots, j *txnJournal, ledger *txnLedger) error {
 	type check struct {
-		path string
-		want InstallTarget
+		path     string
+		want     InstallTarget
+		metaOnly bool
 	}
 	var checks []check
 	for i, e := range j.Files {
 		if e.Old != nil && !e.Reuse {
-			checks = append(checks, check{path: txnBackup(j, i), want: *e.Old})
+			checks = append(checks, check{path: txnBackup(j, i), want: *e.Old, metaOnly: e.OldMetaOnly})
 		}
 		if e.Target != nil {
 			checks = append(checks, check{path: txnStage(j, i), want: *e.Target})
@@ -576,6 +649,16 @@ func txnCleanupEvidence(ctx context.Context, r *txnRoots, j *txnJournal, ledger 
 	}
 	return txnRunParallel(ctx, len(checks), func(pctx context.Context, idx int) error {
 		c := checks[idx]
+		if c.metaOnly && ledger == nil {
+			st, err := txnStatStamp(r.work, c.path)
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			if err != nil || st.Size != c.want.Size {
+				return fmt.Errorf("backup mismatch: %s", c.path)
+			}
+			return nil
+		}
 		if err := txnVerifyLedger(pctx, r.work, c.path, c.want, ledger, nil); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -598,7 +681,16 @@ func (s *Store) txnClear(ctx context.Context, r *txnRoots, j *txnJournal, in Txn
 		}
 		if published && e.Old != nil && !e.Reuse {
 			name := txnBackup(j, i)
-			err := txnVerifyLedger(ctx, r.work, name, *e.Old, ledger, nil)
+			var err error
+			if e.OldMetaOnly {
+				var st txnStamp
+				st, err = txnStatStamp(r.work, name)
+				if err == nil && st.Size != e.Old.Size {
+					err = fmt.Errorf("backup mismatch: %s", name)
+				}
+			} else {
+				err = txnVerifyLedger(ctx, r.work, name, *e.Old, ledger, nil)
+			}
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}

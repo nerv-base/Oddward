@@ -372,6 +372,44 @@ func TestDownloadProgressValidatesTokensStagesAndMonotonicCounters(t *testing.T)
 		t.Fatal("late network stage resurrected")
 	}
 }
+func TestDownloadNetworkProgressAcceptedWhenPlanReportedManifestFilesTotal(t *testing.T) {
+	m := downloadModel()
+	m, _ = Reduce(m, Event{Kind: DownloadRequest})
+	m, _ = Reduce(m, Event{Kind: DownloadRoutePlanned, Token: m.Download.Request, Index: uint8(RouteMixed), Total: 604 << 20, PatchBytes: 200 << 20, Reused: 70 << 30})
+	// Production DownloadPlanned carries the total manifest target count (e.g. 334),
+	// whereas StageNetwork progress events report byte progress with FilesTotal=0.
+	m, fx := Reduce(m, Event{Kind: DownloadPlanned, Token: m.Download.Request, Message: "1.5.13", Total: 604 << 20, FilesTotal: 334, Reused: 70 << 30})
+	requireDownloadEffect(t, m, fx, EffectDownloadRun)
+	m, _ = Reduce(m, downloadEvent(m, DownloadStarted))
+	m, _ = Reduce(m, Event{Kind: DownloadProgress, Token: m.Download.Request, Stage: StageNetwork, Downloaded: 8 << 20, Total: 604 << 20, Rate: 15 << 20, ETASecs: 40, Reused: 70 << 30})
+	if m.Download.Downloaded != 8<<20 || m.Download.Total != 604<<20 || m.Download.Rate != 15<<20 || m.Download.ETA != 40 {
+		t.Fatalf("StageNetwork progress dropped after manifest FilesTotal plan: %+v", m.Download)
+	}
+	// Once StageNetwork progress is established, regressions must still be rejected.
+	if n, _ := Reduce(m, Event{Kind: DownloadProgress, Token: m.Download.Request, Stage: StageNetwork, Downloaded: 4 << 20, Total: 604 << 20}); n != m {
+		t.Fatalf("regressing StageNetwork progress accepted: %+v", n.Download)
+	}
+}
+func TestDownloadResumeAcceptsUpdatedNetworkBaseline(t *testing.T) {
+	m := runningDownload(t)
+	m, _ = Reduce(m, Event{Kind: DownloadProgress, Token: m.Download.Request, Stage: StageNetwork, Downloaded: 320 << 20, Total: 604 << 20, Rate: 15 << 20, ETASecs: 19})
+	m, _ = Reduce(m, Event{Kind: DownloadPause})
+	m, _ = Reduce(m, downloadEvent(m, DownloadPaused))
+	if m.Download.Downloaded != 320<<20 || m.Download.Total != 604<<20 {
+		t.Fatalf("paused download lost progress: %+v", m.Download)
+	}
+	m, fx := Reduce(m, Event{Kind: DownloadResume})
+	requireDownloadEffect(t, m, fx, EffectDownloadRun)
+	m, _ = Reduce(m, downloadEvent(m, DownloadStarted))
+	// A resumed run may replan with a smaller remaining transfer total.
+	m, _ = Reduce(m, Event{Kind: DownloadProgress, Token: m.Download.Request, Stage: StageNetwork, Downloaded: 16 << 20, Total: 284 << 20, Rate: 12 << 20, ETASecs: 22})
+	if m.Download.Downloaded != 16<<20 || m.Download.Total != 284<<20 || m.Download.Rate != 12<<20 || m.Download.ETA != 22 {
+		t.Fatalf("resumed StageNetwork progress dropped: %+v", m.Download)
+	}
+	if n, _ := Reduce(m, Event{Kind: DownloadProgress, Token: m.Download.Request, Stage: StageNetwork, Downloaded: 8 << 20, Total: 284 << 20}); n != m {
+		t.Fatalf("regressing resumed progress accepted: %+v", n.Download)
+	}
+}
 func TestDownloadApplyVerifyCommitPublishOrder(t *testing.T) {
 	m := runningDownload(t)
 	m, _ = Reduce(m, downloadEvent(m, ApplyStarted))

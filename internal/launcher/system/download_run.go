@@ -187,7 +187,9 @@ func (b *GameDownloadBackend) runDownload(ctx context.Context, req launcher.Down
 		if pr.ETAKnown && pr.ETA > 0 {
 			eta = int32(min(pr.ETA/time.Second, math.MaxInt32))
 		}
-		report(state.Event{Kind: progress, Stage: state.StageNetwork, Downloaded: pr.Downloaded, Total: pr.Total, Rate: rate, ETASecs: eta, Reused: p.plan.ReusedBytes})
+		downloaded := pr.Downloaded + pr.CachedBytes
+		total := pr.Total + pr.CachedBytes
+		report(state.Event{Kind: progress, Stage: state.StageNetwork, Downloaded: downloaded, Total: total, Rate: rate, ETASecs: eta, Reused: p.plan.ReusedBytes})
 	}); err != nil {
 		if runCtx.Err() != nil {
 			return event, err

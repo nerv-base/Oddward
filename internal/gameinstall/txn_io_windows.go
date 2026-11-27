@@ -572,6 +572,13 @@ func txnVerifyCandidate(ctx context.Context, r *txnRoots, j *txnJournal, ledger 
 	}
 	return txnRunParallel(ctx, len(indices), func(pctx context.Context, k int) error {
 		e := j.Files[indices[k]]
+		if e.Reuse && e.MetaOnly && ledger == nil {
+			st, err := txnStatStamp(r.install, e.Path)
+			if err != nil || st.Size != e.Target.Size {
+				return fmt.Errorf("metadata target mismatch: %s", e.Path)
+			}
+			return nil
+		}
 		return txnVerifyLedger(pctx, r.install, e.Path, *e.Target, ledger, nil)
 	})
 }
@@ -579,6 +586,23 @@ func txnVerifyCandidate(ctx context.Context, r *txnRoots, j *txnJournal, ledger 
 func txnValidateBeforeCommit(ctx context.Context, r *txnRoots, j *txnJournal, ledger *txnLedger) error {
 	return txnRunParallel(ctx, len(j.Files), func(pctx context.Context, i int) error {
 		e := j.Files[i]
+		if e.Reuse && e.MetaOnly && ledger == nil {
+			st, err := txnStatStamp(r.install, e.Path)
+			if err != nil || st.Size != e.Target.Size {
+				return errors.New("reused file changed before commit")
+			}
+			return nil
+		}
+		if e.Old != nil && e.OldMetaOnly && ledger == nil {
+			st, err := txnStatStamp(r.install, e.Path)
+			if err != nil || st.Size != e.Old.Size {
+				return errors.New("old file changed before commit")
+			}
+			if e.Target != nil {
+				return txnVerifyLedger(pctx, r.work, txnStage(j, i), *e.Target, ledger, nil)
+			}
+			return nil
+		}
 		actual, _, err := txnIdentityLedger(pctx, r.install, e.Path, ledger, nil)
 		if e.Reuse {
 			if err != nil || actual != *e.Target {

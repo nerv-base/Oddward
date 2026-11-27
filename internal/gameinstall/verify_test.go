@@ -239,3 +239,117 @@ func TestTrustedTargetsParallelFallbackPreservesOrderWithoutWritingState(t *test
 		t.Fatalf("TrustedTargets wrote verify.json: %v", err)
 	}
 }
+
+func TestSyncTrustedTargetsReusesPriorManifestFingerprintsAndPersists(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "legacy sync")
+	s := adoptStore(t)
+	key, err := InstallKey(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unchangedA := []byte("unchanged-file-alpha")
+	unchangedB := []byte("unchanged-file-beta")
+	oldC := []byte("old-version-gamma")
+	newC := []byte("new-version-gamma-updated")
+	pathA := "Client/WindowsNoEditor/HT/Content/Paks/a.pak"
+	pathB := "Client/WindowsNoEditor/HT/Content/Paks/b.pak"
+	pathC := "Client/WindowsNoEditor/HT/Content/Paks/c.pak"
+	adoptPut(t, root, pathA, unchangedA)
+	adoptPut(t, root, pathB, unchangedB)
+	adoptPut(t, root, pathC, oldC)
+	now := time.Now().UTC()
+	v1 := InstallRecord{
+		Schema: 2, InstallKey: key, Root: root, Mode: "oddward", State: "ready",
+		Branch: "PC_150", Version: "1.5.6",
+		ListHash: adoptDigest([]byte("v1-list")), ManifestDigest: adoptDigest([]byte("v1-manifest")),
+		TxnID: "txn-v1", VerifyCoverage: "full", VerifiedTargets: 3,
+		CreatedAt: now, PublishedAt: now,
+		Targets: []InstallTarget{
+			{Path: pathA, MD5: adoptDigest(unchangedA), Size: int64(len(unchangedA))},
+			{Path: pathB, MD5: adoptDigest(unchangedB), Size: int64(len(unchangedB))},
+			{Path: pathC, MD5: adoptDigest(oldC), Size: int64(len(oldC))},
+		},
+	}
+	if err := s.writeInstall(context.Background(), v1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.VerifyInstallation(context.Background(), root, nil); err != nil {
+		t.Fatal(err)
+	}
+	oldDoc, err := s.verifyRead(v1)
+	if err != nil || len(oldDoc.Entries) != 3 {
+		t.Fatalf("v1 verifyRead = %+v %v", oldDoc, err)
+	}
+	// Simulate a legacy v0.3.0 update to 1.5.8: c.pak updated and install.json
+	// moved to v2's ManifestDigest, while verify.json still has v1's digest.
+	adoptPut(t, root, pathC, newC)
+	v2 := v1
+	v2.Version = "1.5.8"
+	v2.ListHash = adoptDigest([]byte("v2-list"))
+	v2.ManifestDigest = adoptDigest([]byte("v2-manifest"))
+	v2.TxnID = "txn-v2"
+	v2.Targets = []InstallTarget{
+		{Path: pathA, MD5: adoptDigest(unchangedA), Size: int64(len(unchangedA))},
+		{Path: pathB, MD5: adoptDigest(unchangedB), Size: int64(len(unchangedB))},
+		{Path: pathC, MD5: adoptDigest(newC), Size: int64(len(newC))},
+	}
+	if err := s.writeInstall(context.Background(), v2); err != nil {
+		t.Fatal(err)
+	}
+
+	// VerifyInstallation must reuse the 2 unchanged files across ManifestDigest
+	// instead of rehashing all 3.
+	vRes, err := s.VerifyInstallation(context.Background(), root, nil)
+	if err != nil || vRes.Verified != 3 || vRes.Reused != 2 {
+		t.Fatalf("VerifyInstallation across manifest digest: %+v %v", vRes, err)
+	}
+
+	// Rewind verify.json back to v1 so we can test PlanTargets directly.
+	if err := s.stateWrite(key+"/verify.json", oldDoc, nil); err != nil {
+		t.Fatal(err)
+	}
+	planned, err := s.PlanTargets(context.Background(), root)
+	if err != nil || len(planned) != 3 {
+		t.Fatalf("PlanTargets = %d err=%v", len(planned), err)
+	}
+	// PlanTargets must not fabricate or rewrite verify.json.
+	stillOld, err := s.verifyRead(v2)
+	if err != nil || len(stillOld.Entries) != 0 {
+		t.Fatalf("PlanTargets wrote verify.json: %+v %v", stillOld, err)
+	}
+	// Corrupting a file that has a verified fingerprint in verify.json (same
+	// size) must still be detected and excluded from PlanTargets.
+	corruptA := make([]byte, len(unchangedA))
+	copy(corruptA, unchangedA)
+	corruptA[0] ^= 0xff
+	adoptPut(t, root, pathA, corruptA)
+	planned2, err := s.PlanTargets(context.Background(), root)
+	if err != nil || len(planned2) != 2 {
+		t.Fatalf("PlanTargets trusted corrupted verified file: %+v %v", planned2, err)
+	}
+	// Missing or wrong-size unverified files must be excluded from PlanTargets.
+	adoptPut(t, root, pathC, []byte("short"))
+	planned3, err := s.PlanTargets(context.Background(), root)
+	if err != nil || len(planned3) != 1 || planned3[0].Path != pathB {
+		t.Fatalf("PlanTargets trusted wrong-size file: %+v %v", planned3, err)
+	}
+}
+
+func TestPlanTargetsMetadataAdoptedWithoutVerifyJSONSkipsHashing(t *testing.T) {
+	root, _ := adoptFixture(t)
+	s := adoptStore(t)
+	if _, err := s.AdoptQuick(context.Background(), root, nil); err != nil {
+		t.Fatal(err)
+	}
+	// AdoptQuick has VerifyCoverage="metadata" and no verify.json; PlanTargets
+	// must accept matching regular files by stat(size) without hashing.
+	planned, err := s.PlanTargets(context.Background(), root)
+	if err != nil || len(planned) != 2 {
+		t.Fatalf("PlanTargets on adopted baseline = %+v %v", planned, err)
+	}
+	// Strict TrustedTargets must still refuse unverified metadata baselines.
+	trusted, err := s.TrustedTargets(context.Background(), root)
+	if err != nil || len(trusted) != 0 {
+		t.Fatalf("TrustedTargets trusted metadata baseline: %+v %v", trusted, err)
+	}
+}

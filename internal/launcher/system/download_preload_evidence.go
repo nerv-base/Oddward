@@ -107,7 +107,7 @@ func (b *GameDownloadBackend) preloadBase(ctx context.Context, root string) (str
 	if err != nil {
 		return "", gameinstall.InstallRecord{}, downloadLocal{}, err
 	}
-	trusted, err := store.TrustedTargets(ctx, root)
+	trusted, err := store.PlanTargets(ctx, root)
 	if err != nil {
 		return "", gameinstall.InstallRecord{}, downloadLocal{}, err
 	}

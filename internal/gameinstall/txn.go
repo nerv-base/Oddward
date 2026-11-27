@@ -73,6 +73,12 @@ type TxnInput struct {
 	RequiredFreeBytes int64
 	BackupRetention   time.Duration
 	Repair            bool
+	// AllowMetadataBaseline lets a normal update proceed from an Adopted or
+	// ready metadata baseline without hashing unchanged reused files or replaced
+	// old files whose verify.json fingerprints are absent. New/replaced
+	// candidates and pruned files still undergo full MD5 verification, and
+	// verify.json records only genuinely MD5-verified targets.
+	AllowMetadataBaseline bool
 	// OnCommitStart runs after all baseline and candidate source verifications
 	// pass and before any source blob is moved or journal/install state mutates.
 	OnCommitStart func() error
@@ -89,13 +95,15 @@ type RecoveryStatus struct {
 }
 
 type txnEntry struct {
-	Path   string         `json:"path"`
-	Target *InstallTarget `json:"target,omitempty"`
-	Old    *InstallTarget `json:"old,omitempty"`
-	Origin string         `json:"origin,omitempty"`
-	Step   string         `json:"step"`
-	Reuse  bool           `json:"reuse,omitempty"`
-	Prune  bool           `json:"prune,omitempty"`
+	Path        string         `json:"path"`
+	Target      *InstallTarget `json:"target,omitempty"`
+	Old         *InstallTarget `json:"old,omitempty"`
+	Origin      string         `json:"origin,omitempty"`
+	Step        string         `json:"step"`
+	Reuse       bool           `json:"reuse,omitempty"`
+	Prune       bool           `json:"prune,omitempty"`
+	MetaOnly    bool           `json:"metaOnly,omitempty"`
+	OldMetaOnly bool           `json:"oldMetaOnly,omitempty"`
 }
 type txnJournal struct {
 	Schema         int             `json:"schema"`
@@ -131,7 +139,7 @@ func txnRequired(err error) (RecoveryStatus, error) {
 	return RecoveryStatus{State: "recovery_required", LaunchBlocked: true}, fmt.Errorf("%w: %w", ErrRecoveryRequired, err)
 }
 func txnPublished(j *txnJournal, r InstallRecord) bool {
-	return !r.BaselineMismatch && r.State == "ready" && r.TxnID == j.TxnID && r.Version == j.Candidate.Version && r.InstallKey == j.InstallKey && r.ListHash == j.Candidate.ListHash && r.ManifestDigest == j.Candidate.ManifestDigest && r.Branch == j.Candidate.Branch && r.Mode == j.Candidate.Mode && r.RootFileID == j.Candidate.RootFileID && txnSameTargets(r.Targets, j.Candidate.Targets) && r.VerifyCoverage == "full" && r.VerifiedTargets == len(j.Candidate.Targets)
+	return !r.BaselineMismatch && r.State == "ready" && r.TxnID == j.TxnID && r.Version == j.Candidate.Version && r.InstallKey == j.InstallKey && r.ListHash == j.Candidate.ListHash && r.ManifestDigest == j.Candidate.ManifestDigest && r.Branch == j.Candidate.Branch && r.Mode == j.Candidate.Mode && r.RootFileID == j.Candidate.RootFileID && txnSameTargets(r.Targets, j.Candidate.Targets) && r.VerifyCoverage == j.Candidate.VerifyCoverage && r.VerifiedTargets == j.Candidate.VerifiedTargets
 }
 func txnBaseMatches(j *txnJournal, r InstallRecord) bool {
 	return r.BaselineMismatch == j.Base.BaselineMismatch && r.InstallKey == j.Base.InstallKey && r.RootFileID == j.Base.RootFileID && r.Version == j.Base.Version && r.TxnID == j.Base.TxnID && r.ListHash == j.Base.ListHash && r.ManifestDigest == j.Base.ManifestDigest && r.Branch == j.Base.Branch && r.Mode == j.Base.Mode && txnSameTargets(r.Targets, j.Base.Targets) && (r.State == j.Base.State || j.Kind == "install" && (r.State == "installing" || r.State == "incomplete"))
@@ -231,13 +239,14 @@ func (s *Store) Commit(ctx context.Context, in TxnInput) (RecoveryStatus, error)
 	if !fresh && (base.BaselineMismatch || in.Candidate.BaselineMismatch) {
 		return txnRequired(ErrStaleState)
 	}
-	if !fresh && base.State != "ready" && base.State != "verified" {
+	metadataBaseline := in.AllowMetadataBaseline && (base.State == Adopted || base.State == "ready") && base.VerifyCoverage == "metadata" && len(base.Targets) > 0
+	if !fresh && base.State != "ready" && base.State != "verified" && !metadataBaseline {
 		exactRepair := in.Repair && (base.State == Detected || base.State == Adopted) && base.Version == in.Candidate.Version && base.Branch == in.Candidate.Branch && base.ListHash != "" && base.ListHash == in.Candidate.ListHash && base.ManifestDigest != "" && base.ManifestDigest == in.Candidate.ManifestDigest && txnSameTargets(base.Targets, in.Candidate.Targets)
 		if !exactRepair {
 			return txnRequired(errors.New("baseline is not ready or verified, or exact repair candidate"))
 		}
 	}
-	if !fresh && !in.Repair && (base.VerifyCoverage != "full" || base.VerifiedTargets != len(base.Targets)) {
+	if !fresh && !in.Repair && !metadataBaseline && (base.VerifyCoverage != "full" || base.VerifiedTargets != len(base.Targets)) {
 		return RecoveryStatus{}, errors.New("baseline requires full verification")
 	}
 	if fresh {
@@ -420,21 +429,49 @@ func (s *Store) txnPrepare(ctx context.Context, r *txnRoots, j *txnJournal, in T
 		s.txnSeedVerifyInto(r.install, j.Base, ledger)
 	}
 	all := append(append([]TxnFile{}, in.Files...), in.Bootstrap...)
-	// Inspect installed paths in parallel (using ledger hits for verified files).
+	// Inspect installed paths in parallel (using ledger hits for verified files,
+	// and safe handle stat(size) for unverified owned files when AllowMetadataBaseline is set).
 	type installProbe struct {
-		actual InstallTarget
-		exists bool
+		actual      InstallTarget
+		exists      bool
+		metaOnly    bool
+		oldMetaOnly bool
+		stamp       txnStamp
 	}
 	installProbes := make([]installProbe, len(all))
 	if err := txnRunParallel(ctx, len(all), func(pctx context.Context, i int) error {
-		actual, _, err := txnIdentityLedger(pctx, r.install, all[i].Path, ledger, nil)
+		f := all[i]
+		key := strings.ToUpper(f.Path)
+		declared, owned := old[key]
+		if in.AllowMetadataBaseline && owned && !txnBootstrapPath(f.Path) {
+			st, serr := txnStatStamp(r.install, f.Path)
+			if errors.Is(serr, os.ErrNotExist) {
+				return nil
+			}
+			if serr != nil {
+				return serr
+			}
+			if md5Hex, ok := ledger.get(st); ok {
+				installProbes[i] = installProbe{actual: InstallTarget{Path: f.Path, MD5: md5Hex, Size: st.Size}, exists: true, stamp: st}
+				return nil
+			}
+			if f.Source == "" && st.Size == declared.Size && declared.MD5 == f.MD5 && declared.Size == f.Size {
+				installProbes[i] = installProbe{actual: declared, exists: true, metaOnly: true, stamp: st}
+				return nil
+			}
+			if f.Source != "" && st.Size == declared.Size {
+				installProbes[i] = installProbe{actual: declared, exists: true, oldMetaOnly: true, stamp: st}
+				return nil
+			}
+		}
+		actual, st, err := txnIdentityLedger(pctx, r.install, f.Path, ledger, nil)
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		installProbes[i] = installProbe{actual: actual, exists: true}
+		installProbes[i] = installProbe{actual: actual, exists: true, stamp: st}
 		return nil
 	}); err != nil {
 		return err
@@ -448,14 +485,16 @@ func (s *Store) txnPrepare(ctx context.Context, r *txnRoots, j *txnJournal, in T
 		e := txnEntry{Path: f.Path, Target: &t, Origin: f.Origin, Reuse: f.Source == "", Step: "staged"}
 		key := strings.ToUpper(f.Path)
 		targetSet[key] = true
-		actual, exists := installProbes[i].actual, installProbes[i].exists
+		probe := installProbes[i]
+		actual, exists := probe.actual, probe.exists
 		declared, owned := old[key]
 		if exists {
 			if owned {
-				if actual != declared && !in.Repair {
+				if actual != declared && !in.Repair && !(in.AllowMetadataBaseline && f.Source != "") {
 					return fmt.Errorf("baseline changed: %s", f.Path)
 				}
 				e.Old = &actual
+				e.OldMetaOnly = probe.oldMetaOnly
 			} else if actual == t {
 				e.Reuse = true
 			} else if txnBootstrapPath(f.Path) && j.Kind == "update" && j.Candidate.Branch != j.Base.Branch {
@@ -463,17 +502,30 @@ func (s *Store) txnPrepare(ctx context.Context, r *txnRoots, j *txnJournal, in T
 			} else {
 				return fmt.Errorf("%w: %s", ErrTargetExists, f.Path)
 			}
-		} else if owned && !in.Repair {
+		} else if owned && !in.Repair && !(in.AllowMetadataBaseline && f.Source != "") {
 			return fmt.Errorf("baseline missing: %s", f.Path)
 		}
 		if e.Reuse {
 			if !exists || actual != t {
 				return fmt.Errorf("reused target mismatch: %s", f.Path)
 			}
+			e.MetaOnly = probe.metaOnly
 		} else if f.Source == "" {
 			return ErrInvalidState
 		}
 		j.Files = append(j.Files, e)
+	}
+	verifiedTargets := 0
+	for i := 0; i < len(in.Files); i++ {
+		if !j.Files[i].MetaOnly {
+			verifiedTargets++
+		}
+	}
+	j.Candidate.VerifiedTargets = verifiedTargets
+	if verifiedTargets == len(in.Candidate.Targets) {
+		j.Candidate.VerifyCoverage = "full"
+	} else {
+		j.Candidate.VerifyCoverage = "metadata"
 	}
 	// Only an exact old-owned, unchanged file absent from the new set is pruned.
 	// User edits, unrelated files and tag resources are never inferred as deletable.
@@ -502,6 +554,14 @@ func (s *Store) txnPrepare(ctx context.Context, r *txnRoots, j *txnJournal, in T
 		if pruneMatches[i] {
 			copy := t
 			j.Files = append(j.Files, txnEntry{Path: t.Path, Old: &copy, Prune: true, Step: "none"})
+		}
+	}
+	// Record metadata-matched handle stamps in the per-commit ledger after prune
+	// checks so intra-commit move/validation verifies handle stability without
+	// rehashing untouched or replaced old files.
+	for _, probe := range installProbes {
+		if probe.metaOnly || probe.oldMetaOnly {
+			ledger.put(probe.stamp, probe.actual.MD5)
 		}
 	}
 

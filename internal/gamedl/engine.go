@@ -397,6 +397,7 @@ type progressState struct {
 	total, downloaded, network, written, cached, reused int64
 	samples                                             [50]speedSample
 	start                                               time.Time
+	lastEmit                                            time.Time
 	networkRequests                                     int
 	networkStarted                                      time.Time
 	networkDuration                                     time.Duration
@@ -428,12 +429,16 @@ func (p *progressState) addIO(n int, write bool) {
 		p.written += int64(n)
 	} else {
 		p.network += int64(n)
-		tick := int64(time.Since(p.start) / (100 * time.Millisecond))
+		now := time.Now()
+		tick := int64(now.Sub(p.start) / (100 * time.Millisecond))
 		sample := &p.samples[tick%int64(len(p.samples))]
 		if sample.tick != tick {
 			*sample = speedSample{tick: tick}
 		}
 		sample.bytes += int64(n)
+		if n > 0 && now.Sub(p.lastEmit) >= 250*time.Millisecond {
+			p.emitLocked("downloading")
+		}
 	}
 	p.mu.Unlock()
 }
@@ -449,6 +454,7 @@ func (p *progressState) emitLocked(stage string) {
 		return
 	}
 	now := time.Now()
+	p.lastEmit = now
 	var bytes int64
 	tick := int64(now.Sub(p.start) / (100 * time.Millisecond))
 	for _, s := range p.samples {

@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/nerv-base/Oddward/internal/gamedl"
-	"github.com/nerv-base/Oddward/internal/gameinstall"
 	"github.com/nerv-base/Oddward/internal/gamepatch"
 	"github.com/nerv-base/Oddward/internal/gameres"
 	"github.com/nerv-base/Oddward/internal/launcher/state"
@@ -252,10 +251,6 @@ func (b *GameDownloadBackend) applyOneDownloadPatch(ctx context.Context, p *down
 	if target.Route == nil {
 		return gameres.ErrNoViableAction
 	}
-	var store *gameinstall.Store
-	if b.DB != nil && b.StateRoot != "" {
-		store, _ = b.installStore()
-	}
 	steps := make([]gamepatch.Step, 0, len(target.Route.Steps))
 	for i, s := range target.Route.Steps {
 		blob, err := e.BlobPath(s.Blob)
@@ -271,9 +266,10 @@ func (b *GameDownloadBackend) applyOneDownloadPatch(ctx context.Context, p *down
 		}
 		if i == 0 {
 			step.OldPath = filepath.Join(p.root, filepath.FromSlash(target.Path))
-			if store != nil {
-				step.OldVerified = store.TargetFingerprintMatches(p.root, gameinstall.InstallTarget{Path: target.Path, MD5: s.Old.MD5, Size: s.Old.Size})
-			}
+			// gamepatch always checks oldSize before decoding and verifies the
+			// full output MD5; on any decode or output mismatch it falls back to
+			// full source MD5 verification to distinguish ErrSourceMismatch.
+			step.OldVerified = true
 		}
 		steps = append(steps, step)
 	}

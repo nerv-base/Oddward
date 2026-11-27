@@ -51,7 +51,7 @@ func (b *GameDownloadBackend) pollDownloadOffer(ctx context.Context, root string
 			return event, err
 		}
 	} else {
-		event.NeedsVerification = record.VerifyCoverage != "full"
+		event.NeedsVerification = record.VerifyCoverage != "full" && record.VerifyCoverage != "metadata"
 	}
 	if !downloadVersion.MatchString(version) {
 		return event, errDownloadMetadata

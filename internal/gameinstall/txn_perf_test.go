@@ -221,3 +221,126 @@ func TestTxnCommitMultipleCandidatesParallelVerification(t *testing.T) {
 		}
 	}
 }
+
+func TestTxnCommitAllowMetadataBaselineSkipsUntouchedAndOldHashesAndStaysHonest(t *testing.T) {
+	ctx := context.Background()
+	root, _ := adoptFixture(t)
+	s := adoptStore(t)
+	adopted, err := s.AdoptQuick(ctx, root, nil)
+	if err != nil || adopted.State != Adopted {
+		t.Fatalf("adopt: %+v %v", adopted, err)
+	}
+	// Update a.pak, keep b.pak untouched without ever running VerifyInstallation.
+	work := filepath.Join(root, ".oddward")
+	newA := string(bytes.Repeat([]byte("N"), 32<<10))
+	txnPut(t, work, "cache/blobs/a", newA)
+	candidate := adopted.Record
+	candidate.Mode = "oddward"
+	candidate.State = "ready"
+	candidate.Version = "1.2.4"
+	candidate.ListHash = adoptDigest([]byte("1.2.4-list"))
+	candidate.ManifestDigest = candidate.ListHash
+	candidate.VerifyCoverage = "none"
+	candidate.Targets = []InstallTarget{
+		txnTarget("Client/WindowsNoEditor/HT/Content/Paks/a.pak", newA),
+		adopted.Record.Targets[1], // b.pak untouched
+	}
+	in := TxnInput{
+		Root: root, WorkRoot: work, TxnID: "meta-baseline-update",
+		Candidate:             candidate,
+		AllowMetadataBaseline: true,
+		Guard:                 func(context.Context) error { return nil },
+		FreeBytes:             func(context.Context) (int64, error) { return 1 << 30, nil },
+		RequiredFreeBytes:     100,
+		BackupRetention:       0,
+		Files: []TxnFile{
+			{Path: candidate.Targets[0].Path, MD5: candidate.Targets[0].MD5, Size: candidate.Targets[0].Size, Source: "cache/blobs/a", Origin: "blob"},
+			{Path: candidate.Targets[1].Path, MD5: candidate.Targets[1].MD5, Size: candidate.Targets[1].Size, Source: "", Origin: "installed"},
+		},
+	}
+	var hashedFiles atomic.Int64
+	var hashedBytes atomic.Int64
+	prevHook := txnHashObserver
+	txnHashObserver = func(_ string, n int64) {
+		hashedFiles.Add(1)
+		hashedBytes.Add(n)
+	}
+	defer func() { txnHashObserver = prevHook }()
+
+	status, err := s.Commit(ctx, in)
+	if err != nil || !status.Published || status.LaunchBlocked {
+		t.Fatalf("metadata baseline commit failed: %+v %v", status, err)
+	}
+	// Only the 1 newly staged candidate blob (a.pak) should be hashed; untouched
+	// b.pak and replaced old a.pak must not trigger full MD5 reads.
+	if hashedFiles.Load() != 1 || hashedBytes.Load() != int64(len(newA)) {
+		t.Fatalf("hashed %d files / %d bytes; want 1 file / %d bytes", hashedFiles.Load(), hashedBytes.Load(), len(newA))
+	}
+	rec, err := s.ReadInstall(root)
+	if err != nil || rec.State != "ready" || rec.Version != "1.2.4" || rec.VerifyCoverage != "metadata" || rec.VerifiedTargets != 1 {
+		t.Fatalf("honest metadata coverage expected (1 of 2 verified): %+v %v", rec, err)
+	}
+	if !s.TargetFingerprintMatches(root, candidate.Targets[0]) {
+		t.Fatal("newly committed a.pak must have a persisted verify.json fingerprint")
+	}
+	if s.TargetFingerprintMatches(root, candidate.Targets[1]) {
+		t.Fatal("unhashed untouched b.pak must not be fabricated in verify.json")
+	}
+	// Explicit VerifyInstallation must reuse a.pak (1 reused) and hash only b.pak,
+	// then promote VerifyCoverage to "full".
+	vr, err := s.VerifyInstallation(ctx, root, nil)
+	if err != nil || vr.Reused != 1 || vr.Verified != 2 || vr.Record.VerifyCoverage != "full" {
+		t.Fatalf("post-update manual verify = %+v %v", vr, err)
+	}
+}
+
+func TestTxnCommitAllowMetadataBaselineRollbackOnCrash(t *testing.T) {
+	ctx := context.Background()
+	root, _ := adoptFixture(t)
+	s := adoptStore(t)
+	adopted, err := s.AdoptQuick(ctx, root, nil)
+	if err != nil || adopted.State != Adopted {
+		t.Fatalf("adopt: %+v %v", adopted, err)
+	}
+	work := filepath.Join(root, ".oddward")
+	txnPut(t, work, "cache/blobs/a", "new-first-payload")
+	candidate := adopted.Record
+	candidate.Mode = "oddward"
+	candidate.State = "ready"
+	candidate.Version = "1.2.4"
+	candidate.ListHash = adoptDigest([]byte("1.2.4-crash-list"))
+	candidate.ManifestDigest = candidate.ListHash
+	candidate.VerifyCoverage = "none"
+	candidate.Targets = []InstallTarget{
+		txnTarget("Client/WindowsNoEditor/HT/Content/Paks/a.pak", "new-first-payload"),
+		adopted.Record.Targets[1],
+	}
+	crash := errors.New("synthetic crash")
+	in := TxnInput{
+		Root: root, WorkRoot: work, TxnID: "meta-baseline-crash",
+		Candidate:             candidate,
+		AllowMetadataBaseline: true,
+		Guard:                 func(context.Context) error { return nil },
+		FreeBytes:             func(context.Context) (int64, error) { return 1 << 30, nil },
+		Checkpoint: func(point string) error {
+			if point == "after-all-placements" {
+				return crash
+			}
+			return nil
+		},
+		Files: []TxnFile{
+			{Path: candidate.Targets[0].Path, MD5: candidate.Targets[0].MD5, Size: candidate.Targets[0].Size, Source: "cache/blobs/a", Origin: "blob"},
+			{Path: candidate.Targets[1].Path, MD5: candidate.Targets[1].MD5, Size: candidate.Targets[1].Size, Source: "", Origin: "installed"},
+		},
+	}
+	if _, err := s.Commit(ctx, in); !errors.Is(err, crash) {
+		t.Fatalf("expected crash error, got %v", err)
+	}
+	st, err := s.Recover(ctx, root, work, in.Guard)
+	if err != nil || st.LaunchBlocked || st.Action != "rolled_back" {
+		t.Fatalf("metadata baseline rollback = %+v %v", st, err)
+	}
+	if got := txnRead(t, root, "Client/WindowsNoEditor/HT/Content/Paks/a.pak"); got != "correct first" {
+		t.Fatalf("rollback did not restore old a.pak: %q", got)
+	}
+}
