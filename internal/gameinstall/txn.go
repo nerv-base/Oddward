@@ -48,8 +48,9 @@ type TxnProgress struct {
 // used for downloads until Commit returns. Guard must verify no game or official
 // patcher process is running. WorkRoot must be inside Root/.oddward on the same
 // volume. Files describes the complete candidate set; Bootstrap is restricted to
-// the two explicitly allowed bootstrap files. Set BackupRetention to 24 hours for
-// the product default; zero explicitly requests immediate cleanup.
+// the two explicitly allowed bootstrap files. BackupRetention defaults to zero
+// (immediate cleanup once the published version is verified and durable); a
+// positive duration (up to 168h) retains backups under retained/ until expiry.
 // Checkpoint is an optional fault-injection hook. Its errors simulate abrupt
 // termination, leaving durable evidence intact for a later Recover call.
 type TxnInput struct {

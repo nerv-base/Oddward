@@ -95,7 +95,7 @@ func (b *GameDownloadBackend) commitDownload(ctx context.Context, req launcher.D
 	if p.kind == state.DownloadInstall {
 		candidate.Mode = "fresh"
 	}
-	input := gameinstall.TxnInput{Root: p.root, WorkRoot: downloadWork(p.root), TxnID: p.id, Guard: guard, BackupRetention: 24 * time.Hour,
+	input := gameinstall.TxnInput{Root: p.root, WorkRoot: downloadWork(p.root), TxnID: p.id, Guard: guard, BackupRetention: 0,
 		FreeBytes: func(context.Context) (int64, error) { return b.space(p.root) }, RequiredFreeBytes: p.margin,
 		Repair:                p.base.Root != "" && p.base.Version == candidate.Version && p.base.ListHash == candidate.ListHash,
 		AllowMetadataBaseline: p.kind != state.DownloadInstall,
@@ -204,6 +204,12 @@ func (b *GameDownloadBackend) commitDownload(ctx context.Context, req launcher.D
 		if err = b.preloadCommitted(ctx, p); err != nil {
 			return event, err
 		}
+	}
+	if p.kind != state.DownloadInstall {
+		// Sync coexisting official PatcherSDK metadata (config.xml + ResList.xml)
+		// best-effort after durable publication so opening NTELauncher later does
+		// not mistake newly updated files for corrupt old-version files.
+		_ = gameinstall.SyncOfficialMetadata(ctx, p.root, p.delivery.Config, p.delivery.Manifest, p.delivery.Branch)
 	}
 	event.Kind, event.Message = state.DownloadCommitted, candidate.Version
 	if p.kind == state.DownloadPreload {

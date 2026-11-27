@@ -309,7 +309,7 @@ func (b *GameDownloadBackend) buildDownloadPlan(ctx context.Context, root string
 		return nil, err
 	}
 	budget := gameres.BudgetInput{
-		VolumeFreeBytes: space, CacheFreeBytes: space, ReserveBytes: margin, BackupRetention: 24 * time.Hour,
+		VolumeFreeBytes: space, CacheFreeBytes: space, ReserveBytes: margin, BackupRetention: 0,
 		NetBytesPerSecond: rates.NetBytesPerSecond, VerifyBytesPerSecond: rates.HashBytesPerSecond, IOBytesPerSecond: rates.IOBytesPerSecond,
 	}
 	objects := downloadProbeCandidates(manifest, delivery.Graph, local, caps.PatchApply)

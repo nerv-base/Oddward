@@ -344,3 +344,106 @@ func TestTxnCommitAllowMetadataBaselineRollbackOnCrash(t *testing.T) {
 		t.Fatalf("rollback did not restore old a.pak: %q", got)
 	}
 }
+
+func TestTxnExpiredArchiveCleanupWorksWithMetadataCoverage(t *testing.T) {
+	ctx := context.Background()
+	root, _ := adoptFixture(t)
+	s := adoptStore(t)
+	adopted, err := s.AdoptQuick(ctx, root, nil)
+	if err != nil || adopted.State != Adopted {
+		t.Fatalf("adopt: %+v %v", adopted, err)
+	}
+	work := filepath.Join(root, ".oddward")
+	newA := string(bytes.Repeat([]byte("M"), 32<<10))
+	txnPut(t, work, "cache/blobs/a", newA)
+	candidate := adopted.Record
+	candidate.Mode = "oddward"
+	candidate.State = "ready"
+	candidate.Version = "1.2.4"
+	candidate.ListHash = adoptDigest([]byte("1.2.4-retained-meta-list"))
+	candidate.ManifestDigest = candidate.ListHash
+	candidate.VerifyCoverage = "none"
+	candidate.Targets = []InstallTarget{
+		txnTarget("Client/WindowsNoEditor/HT/Content/Paks/a.pak", newA),
+		adopted.Record.Targets[1],
+	}
+	in := TxnInput{
+		Root: root, WorkRoot: work, TxnID: "meta-retained-cleanup",
+		Candidate:             candidate,
+		AllowMetadataBaseline: true,
+		Guard:                 func(context.Context) error { return nil },
+		FreeBytes:             func(context.Context) (int64, error) { return 1 << 30, nil },
+		RequiredFreeBytes:     100,
+		BackupRetention:       24 * time.Hour,
+		Files: []TxnFile{
+			{Path: candidate.Targets[0].Path, MD5: candidate.Targets[0].MD5, Size: candidate.Targets[0].Size, Source: "cache/blobs/a", Origin: "blob"},
+			{Path: candidate.Targets[1].Path, MD5: candidate.Targets[1].MD5, Size: candidate.Targets[1].Size, Source: "", Origin: "installed"},
+		},
+	}
+	if _, err := s.Commit(ctx, in); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	rec, err := s.ReadInstall(root)
+	if err != nil || rec.VerifyCoverage != "metadata" {
+		t.Fatalf("expected metadata coverage after partial verify commit: %+v %v", rec, err)
+	}
+	// Backdate archive expiration to trigger txnExpireArchives.
+	key, _ := InstallKey(root)
+	name := key + "/retained/" + in.TxnID + ".json"
+	sr, err := os.OpenRoot(s.stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := stateReadBounded(sr, name)
+	sr.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var j txnJournal
+	if err := stateDecodeJSON(data, &j); err != nil {
+		t.Fatal(err)
+	}
+	j.RetainUntil = time.Now().Add(-time.Hour)
+	if err := s.stateWrite(name, j, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// If a current installed file is missing, Recover must refuse to delete the backup.
+	missingPath := filepath.Join(root, filepath.FromSlash(candidate.Targets[0].Path))
+	savedPayload, err := os.ReadFile(missingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(missingPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Recover(ctx, root, work, in.Guard); err == nil {
+		t.Fatal("Recover deleted retained backup despite missing current file")
+	}
+	if _, err := os.Stat(filepath.Join(work, "txn", in.TxnID, "backup", "0")); err != nil {
+		t.Fatalf("backup was removed when current file was missing: %v", err)
+	}
+	if err := os.WriteFile(missingPath, savedPayload, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// With current files intact, Recover expires the archive without rehashing the
+	// untouched MetaOnly file (b.pak) or the OldMetaOnly backup.
+	var hashed []string
+	prevHook := txnHashObserver
+	txnHashObserver = func(p string, _ int64) { hashed = append(hashed, p) }
+	defer func() { txnHashObserver = prevHook }()
+
+	st, err := s.Recover(ctx, root, work, in.Guard)
+	if err != nil || st.LaunchBlocked {
+		t.Fatalf("metadata-coverage Recover failed: %+v %v", st, err)
+	}
+	if _, err := os.Stat(filepath.Join(work, "txn", in.TxnID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired metadata archive survived cleanup: %v", err)
+	}
+	for _, h := range hashed {
+		if h == candidate.Targets[1].Path {
+			t.Fatalf("expired archive cleanup rehashed untouched MetaOnly file: %v", hashed)
+		}
+	}
+}
