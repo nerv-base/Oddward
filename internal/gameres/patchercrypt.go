@@ -87,6 +87,38 @@ func OpenContainer(data []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
+// SealContainer encodes plaintext XML into the Windows CN PatcherXML0 container
+// format accepted by official PatcherSDK::ReadProtectedFile and OpenContainer.
+func SealContainer(plaintext []byte) ([]byte, error) {
+	if len(plaintext) == 0 {
+		return nil, ErrContainer
+	}
+	if len(plaintext) > maxXMLBytes {
+		return nil, ErrTooLarge
+	}
+	var compressed bytes.Buffer
+	zw := zlib.NewWriter(&compressed)
+	if _, err := zw.Write(plaintext); err != nil {
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	padded := compressed.Bytes()
+	padLen := aes.BlockSize - (len(padded) % aes.BlockSize)
+	padded = append(padded, bytes.Repeat([]byte{byte(padLen)}, padLen)...)
+
+	block, err := aes.NewCipher([]byte(patcherKey))
+	if err != nil {
+		return nil, ErrContainer
+	}
+	out := make([]byte, patcherHeaderSize+len(padded))
+	copy(out, patcherMagic)
+	binary.LittleEndian.PutUint32(out[len(patcherMagic):patcherHeaderSize], uint32(len(plaintext)))
+	cipher.NewCBCEncrypter(block, []byte(patcherIV)).CryptBlocks(out[patcherHeaderSize:], padded)
+	return out, nil
+}
+
 // ManifestXML contains decoded members of a delivery archive. LastDiff is nil
 // if the archive omits lastdiff.bin.
 type ManifestXML struct {

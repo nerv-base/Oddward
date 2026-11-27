@@ -324,4 +324,125 @@ func testGameDownloadFirstInstall(t *testing.T, external bool) {
 	if data, err := os.ReadFile(filepath.Join(filepath.Dir(target), "next.pak")); err != nil || !bytes.Equal(data, nextContent) {
 		t.Fatalf("updated target = %q: %v", data, err)
 	}
+	// Published updates clean up same-volume backups and unreferenced in-install
+	// cache blobs immediately so .oddward does not retain tens of GBs after commit.
+	if _, err := os.Stat(filepath.Join(downloadWork(root), "txn", p.id)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("committed update retained txn backup dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(downloadWork(root), "cache", "blobs", patchObject.String())); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("committed update retained retired patch blob in .oddward cache: %v", err)
+	}
+}
+
+func TestUpdateCommitSyncsCoexistingOfficialPatcherMetadata(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	oldContent := []byte("old-156-payload")
+	newContent := []byte("new-157-payload-longer")
+	oldObj := adapterObject(oldContent)
+	newObj := adapterObject(newContent)
+
+	const patcherDir = "NTELauncher/UserData/Patcher/PatcherSDK/"
+	oldResPlain := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8" ?><ResList version="1.5.6" tag="baseTag"><Res filename="Client/WindowsNoEditor/HT/Content/Paks/demo.pak" md5="%s" timestamp="1776732768" filesize="%d" /></ResList>`, oldObj.MD5, oldObj.Size)
+	oldResSealed, err := gameres.SealContainer([]byte(oldResPlain))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCfg := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8" ?><config><LocalBranch>PC_150</LocalBranch><ResVersion>1.5.6</ResVersion><AppVersion>0.0</AppVersion><UpdateResVersion>0.0</UpdateResVersion><Tag>baseTag</Tag><ResSize>%d</ResSize><ResCount>1</ResCount><Extra><listHash>%x</listHash><BaseTag><item name="baseTag" /></BaseTag><speed>50</speed></Extra><Hash>oldh</Hash></config>`, oldObj.Size, md5.Sum([]byte(oldResPlain)))
+	preloadSystemPut(t, root, patcherDir+"config.xml", []byte(oldCfg))
+	preloadSystemPut(t, root, patcherDir+"ResList.xml", oldResSealed)
+	preloadSystemPut(t, root, "Client/WindowsNoEditor/HT/Content/Paks/demo.pak", oldContent)
+	preloadSystemPut(t, root, "Client/WindowsNoEditor/PatcherConfig/Patch_Windows.json", []byte(`{"appId":"1289","branchName":"PC_150","gameResUrl":["https://example.invalid"]}`))
+
+	// Minimal valid PE so gamelocate.Inspect succeeds during AdoptQuick.
+	exe := bytes.NewBuffer(make([]byte, 64))
+	copy(exe.Bytes(), "MZ")
+	binary.LittleEndian.PutUint32(exe.Bytes()[60:], 64)
+	exe.WriteString("PE\x00\x00")
+	if err := binary.Write(exe, binary.LittleEndian, pe.FileHeader{Machine: pe.IMAGE_FILE_MACHINE_AMD64, SizeOfOptionalHeader: 240, Characteristics: pe.IMAGE_FILE_EXECUTABLE_IMAGE}); err != nil {
+		t.Fatal(err)
+	}
+	if err := binary.Write(exe, binary.LittleEndian, pe.OptionalHeader64{Magic: 0x20b, NumberOfRvaAndSizes: 16}); err != nil {
+		t.Fatal(err)
+	}
+	preloadSystemPut(t, root, "Client/WindowsNoEditor/HT/Binaries/Win64/HTGame.exe", exe.Bytes())
+
+	casPath := func(o gameres.Object) string { return fmt.Sprintf("/%s/Res/%c/%s", bootstrapBranch, o.MD5[0], o) }
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == casPath(newObj) {
+			http.ServeContent(w, r, "new", time.Time{}, bytes.NewReader(newContent))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	backend := &GameDownloadBackend{
+		DB: dbtest.Open(t), StateRoot: t.TempDir(), Client: srv.Client(), roots: []string{srv.URL},
+		free:      func(string) (int64, error) { return 8 << 30, nil },
+		processes: func(context.Context) (downloadProcesses, error) { return downloadProcesses{}, nil },
+	}
+	store, err := backend.installStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adopted, err := store.AdoptQuick(ctx, root, nil)
+	if err != nil || adopted.State != gameinstall.Adopted {
+		t.Fatalf("AdoptQuick = %+v %v", adopted, err)
+	}
+
+	delivery := gameDelivery{
+		Branch: bootstrapBranch,
+		Config: gameres.Config{
+			ResVersion: "1.5.7",
+			Tag:        "baseTag",
+			BaseTag:    "baseTag",
+			ListHash:   strings.Repeat("b", 32),
+			DiffHash:   strings.Repeat("c", 32),
+			CheckHash:  "newh",
+			ResSize:    newObj.Size,
+		},
+		ConfigResponse: downloadResponse{Root: srv.URL, URL: srv.URL + "/config.xml"},
+		Manifest: gameres.ResList{
+			Version: "1.5.7",
+			Tag:     "baseTag",
+			Files:   []gameres.File{{Path: "HT/Content/Paks/demo.pak", MD5: newObj.MD5, Size: newObj.Size}},
+		},
+	}
+	p, err := backend.buildDownloadPlan(ctx, root, state.DownloadUpdate, delivery, adopted.Record, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend.putPlan(root, p)
+	req := launcher.DownloadRequest{Root: root, Kind: state.DownloadUpdate, Effect: state.Effect{Kind: state.EffectDownloadRun, Token: 1}}
+	if got := backend.HandleDownload(ctx, req, nil); got.Kind != state.DownloadVerified {
+		t.Fatalf("run = %+v", got)
+	}
+	req.Effect.Kind = state.EffectDownloadCommit
+	if got := backend.HandleDownload(ctx, req, nil); got.Kind != state.DownloadCommitted || got.Message != "1.5.7" {
+		t.Fatalf("commit = %+v", got)
+	}
+
+	// Official PatcherSDK config.xml and ResList.xml must now reflect 1.5.7 so
+	// opening NTELauncher does not mistake the updated demo.pak for a corrupt 1.5.6 file.
+	gotCfgBytes, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(patcherDir+"config.xml")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotCfg, err := gameres.ParseConfig(gotCfgBytes)
+	if err != nil || gotCfg.ResVersion != "1.5.7" || gotCfg.ResSize != newObj.Size || gotCfg.ListHash != delivery.Config.ListHash {
+		t.Fatalf("official config.xml not synced: %+v %v", gotCfg, err)
+	}
+	gotResBytes, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(patcherDir+"ResList.xml")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotResPlain, err := gameres.OpenContainer(gotResBytes)
+	if err != nil {
+		t.Fatalf("official ResList.xml not PatcherXML0: %v", err)
+	}
+	gotRes, err := gameres.ParseResList(gotResPlain)
+	if err != nil || gotRes.Version != "1.5.7" || len(gotRes.Files) != 1 || gotRes.Files[0].MD5 != newObj.MD5 {
+		t.Fatalf("official ResList.xml not synced: %+v %v", gotRes, err)
+	}
 }

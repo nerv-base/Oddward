@@ -34,9 +34,12 @@ func (b *GameDownloadBackend) collectDownloadCache(ctx context.Context, p *downl
 			protected = append(protected, file.Object)
 		}
 	}
+	// Evict unreferenced blobs inside the installation's .oddward cache right
+	// after commit (active tasks and preload blobs remain protected by marked).
+	// External shared caches retain unreferenced blobs up to 14 days for reuse.
 	options := gamedl.GCOptions{
 		DB: b.DB, WorkRoot: downloadWork(p.root), StateRoot: b.taskRoot(p.key), Lease: lease,
-		Protected: protected, MaxBlobBytes: 0, MaxAge: 14 * 24 * time.Hour,
+		Protected: protected, MaxBlobBytes: 1, MaxAge: 14 * 24 * time.Hour,
 	}
 	_, _ = gamedl.Collect(ctx, options)
 	if p.externalCache != "" {
@@ -49,7 +52,7 @@ func (b *GameDownloadBackend) collectDownloadCache(ctx context.Context, p *downl
 			return
 		}
 		defer cacheLease.Close()
-		options.WorkRoot, options.Lease = work, cacheLease
+		options.WorkRoot, options.Lease, options.MaxBlobBytes = work, cacheLease, 0
 		_, _ = gamedl.Collect(ctx, options)
 	}
 }

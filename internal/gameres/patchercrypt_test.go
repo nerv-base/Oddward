@@ -38,6 +38,45 @@ func TestOpenContainerDecodesKnownVector(t *testing.T) {
 	}
 }
 
+func TestSealContainerRoundTripsAndValidatesBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		xml  string
+	}{
+		{"small", "<ResList/>"},
+		{"manifest", `<?xml version="1.0" encoding="utf-8" ?><ResList version="1.5.13" tag="baseTag"><Res filename="Client/WindowsNoEditor/HT/Binaries/Win64/HTGame.exe" md5="e36acf2ebb03eedfebc778f2f7ad4f38" timestamp="1795777328" filesize="282326624" /></ResList>`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sealed, err := SealContainer([]byte(tc.xml))
+			if err != nil {
+				t.Fatalf("SealContainer() err = %v", err)
+			}
+			if !bytes.HasPrefix(sealed, []byte(patcherMagic)) {
+				t.Fatalf("missing PatcherXML0 magic: %x", sealed[:min(len(sealed), 16)])
+			}
+			if gotLen := binary.LittleEndian.Uint32(sealed[12:16]); int(gotLen) != len(tc.xml) {
+				t.Fatalf("declared length = %d, want %d", gotLen, len(tc.xml))
+			}
+			if (len(sealed)-patcherHeaderSize)%16 != 0 {
+				t.Fatalf("ciphertext not block aligned: %d", len(sealed)-patcherHeaderSize)
+			}
+			opened, err := OpenContainer(sealed)
+			if err != nil {
+				t.Fatalf("OpenContainer(SealContainer()) err = %v", err)
+			}
+			if string(opened) != tc.xml {
+				t.Fatalf("round-trip mismatch:\ngot:  %q\nwant: %q", opened, tc.xml)
+			}
+		})
+	}
+	if _, err := SealContainer(nil); !errors.Is(err, ErrContainer) {
+		t.Fatalf("SealContainer(nil) = %v, want %v", err, ErrContainer)
+	}
+	if _, err := SealContainer(make([]byte, maxXMLBytes+1)); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("SealContainer(oversized) = %v, want %v", err, ErrTooLarge)
+	}
+}
+
 func TestOpenContainerRejectsMalformedOrOversizedData(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

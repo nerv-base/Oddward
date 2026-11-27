@@ -4,7 +4,9 @@ package gameinstall
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -28,15 +30,47 @@ func (s *Store) txnExpireArchives(ctx context.Context, r *txnRoots, root, work s
 		if err != nil {
 			return err
 		}
-		if current.State != "ready" || current.TxnID == "" || current.VerifyCoverage != "full" || current.VerifiedTargets != len(current.Targets) {
+		fullCoverage := current.VerifyCoverage == "full" && current.VerifiedTargets == len(current.Targets)
+		metaCoverage := current.VerifyCoverage == "metadata" && current.VerifiedTargets >= 0 && current.VerifiedTargets < len(current.Targets)
+		if current.State != "ready" || current.TxnID == "" || current.BaselineMismatch || len(current.Targets) == 0 || (!fullCoverage && !metaCoverage) {
 			return errors.New("retained backup cleanup requires verified publication")
 		}
 		installLedger := s.txnSeedVerifyLedger(r.install, current)
-		if err := txnRunParallel(ctx, len(current.Targets), func(pctx context.Context, i int) error {
-			target := current.Targets[i]
-			return txnVerifyLedger(pctx, r.install, target.Path, target, installLedger, nil)
-		}); err != nil {
-			return err
+		if fullCoverage {
+			if err := txnRunParallel(ctx, len(current.Targets), func(pctx context.Context, i int) error {
+				target := current.Targets[i]
+				return txnVerifyLedger(pctx, r.install, target.Path, target, installLedger, nil)
+			}); err != nil {
+				return err
+			}
+		} else {
+			mustVerify := map[string]bool{}
+			if doc, _, verr := s.verifyReadEntries(current, false); verr == nil {
+				for _, e := range doc.Entries {
+					mustVerify[strings.ToUpper(e.Path)] = true
+				}
+			}
+			for _, e := range j.Files {
+				if !e.Reuse && !e.Prune && e.Target != nil {
+					mustVerify[strings.ToUpper(e.Path)] = true
+				}
+			}
+			if err := txnRunParallel(ctx, len(current.Targets), func(pctx context.Context, i int) error {
+				target := current.Targets[i]
+				if mustVerify[strings.ToUpper(target.Path)] {
+					return txnVerifyLedger(pctx, r.install, target.Path, target, installLedger, nil)
+				}
+				st, serr := txnStatStamp(r.install, target.Path)
+				if serr != nil {
+					return serr
+				}
+				if st.Size != target.Size {
+					return fmt.Errorf("metadata target mismatch: %s", target.Path)
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
 		}
 		if err := s.txnClear(ctx, r, j, TxnInput{}, true, nil); err != nil {
 			return err
